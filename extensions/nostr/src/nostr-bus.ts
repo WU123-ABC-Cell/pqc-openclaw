@@ -1,6 +1,7 @@
 // Nostr plugin module implements nostr bus behavior.
 import { SimplePool, finalizeEvent, getPublicKey, verifyEvent, type Event } from "nostr-tools";
-import { decrypt, encrypt } from "nostr-tools/nip44";
+import { decrypt as nip44Decrypt, encrypt as nip44Encrypt } from "nostr-tools/nip44";
+import { decrypt as nip04Decrypt } from "nostr-tools/nip04";
 import {
   createDirectDmPreCryptoGuardPolicy,
   type DirectDmPreCryptoGuardPolicyOverrides,
@@ -33,6 +34,27 @@ import {
   writeNostrProfileState,
 } from "./nostr-state-store.js";
 import { publishNostrEventToRelay } from "./relay-publish.js";
+
+// ============================================================================
+// Helper: auto-decrypt NIP-04 or NIP-44
+// ============================================================================
+
+function autoDecryptEvent(
+  privateKey: Uint8Array,
+  publicKey: string,
+  content: string,
+): string {
+  // NIP-44 v2: 以 "2:" 开头
+  if (content.startsWith("2:")) {
+    return nip44Decrypt(privateKey, publicKey, content);
+  }
+  // NIP-04: 包含 "?iv=" 标记
+  if (content.includes("?iv=")) {
+    return nip04Decrypt(privateKey, publicKey, content);
+  }
+  // fallback: 试 NIP-44 v1
+  return nip44Decrypt(privateKey, publicKey, content);
+}
 
 // ============================================================================
 // Constants
@@ -476,7 +498,7 @@ export async function startNostrBus(options: NostrBusOptions): Promise<NostrBusH
 
     let plaintext: string;
     try {
-      plaintext = decrypt(sk, event.pubkey, event.content);
+      plaintext = autoDecryptEvent(sk, event.pubkey, event.content);
       metrics.emit("decrypt.success");
     } catch (error) {
       metrics.emit("decrypt.failure");
@@ -752,7 +774,7 @@ async function sendEncryptedDm(
   onError?: (error: Error, context: string) => void,
   replyToEventId?: string,
 ): Promise<string> {
-  const ciphertext = encrypt(sk, toPubkey, text);
+  const ciphertext = nip44Encrypt(sk, toPubkey, text);
   // NIP-04 uses an e tag to keep a reply attached to its verified inbound event.
   const tags = [["p", toPubkey]];
   if (replyToEventId) {
