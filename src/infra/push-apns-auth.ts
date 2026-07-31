@@ -9,6 +9,10 @@ export type ApnsAuthConfig = {
   teamId: string;
   keyId: string;
   privateKey: string;
+  /** NEW: 启用 ML-DSA-65 备用签名（feature flag，默认 false）*/
+  pqcSignature?: boolean;
+  /** NEW: ML-DSA-65 私钥（PEM 格式）*/
+  mldsaPrivateKey?: string;
 };
 
 type ApnsAuthConfigResolution = { ok: true; value: ApnsAuthConfig } | { ok: false; error: string };
@@ -31,7 +35,11 @@ function toBase64UrlJson(value: object): string {
 
 function getJwtCacheKey(auth: ApnsAuthConfig): string {
   const keyHash = createHash("sha256").update(auth.privateKey).digest("hex");
-  return `${auth.teamId}:${auth.keyId}:${keyHash}`;
+  const mldsaHash = auth.mldsaPrivateKey
+    ? createHash("sha256").update(auth.mldsaPrivateKey).digest("hex")
+    : "";
+  const mode = auth.pqcSignature ? "pqc" : "es256";
+  return `${auth.teamId}:${auth.keyId}:${mode}:${keyHash}:${mldsaHash}`;
 }
 
 export function getApnsBearerToken(auth: ApnsAuthConfig, nowMs: number = Date.now()): string {
@@ -43,13 +51,26 @@ export function getApnsBearerToken(auth: ApnsAuthConfig, nowMs: number = Date.no
   // APNs provider tokens are valid for one hour. Cache for slightly less so
   // bursty wake/approval pushes avoid repeated ECDSA signing.
   const iat = Math.floor(nowMs / 1000);
-  const header = toBase64UrlJson({ alg: "ES256", kid: auth.keyId, typ: "JWT" });
+  const useMldsa = auth.pqcSignature === true && auth.mldsaPrivateKey;
+  const header = toBase64UrlJson({
+    alg: useMldsa ? "ML-DSA-65" : "ES256",
+    kid: auth.keyId,
+    typ: "JWT",
+  });
   const payload = toBase64UrlJson({ iss: auth.teamId, iat });
   const signingInput = `${header}.${payload}`;
-  const signature = signJwt("sha256", Buffer.from(signingInput, "utf8"), {
-    key: createPrivateKey(auth.privateKey),
-    dsaEncoding: "ieee-p1363",
-  });
+  let signature: Uint8Array;
+  if (useMldsa) {
+    // ML-DSA-65 already includes its own hash, so algorithm is null.
+    signature = signJwt(null, Buffer.from(signingInput, "utf8"), {
+      key: createPrivateKey(auth.mldsaPrivateKey!),
+    });
+  } else {
+    signature = signJwt("sha256", Buffer.from(signingInput, "utf8"), {
+      key: createPrivateKey(auth.privateKey),
+      dsaEncoding: "ieee-p1363",
+    });
+  }
   const token = `${signingInput}.${toBase64UrlBytes(signature)}`;
   cachedJwt = {
     cacheKey,
