@@ -47,9 +47,9 @@ vi.mock("nostr-tools", () => {
   };
 });
 
-vi.mock("nostr-tools/nip04", () => ({
+vi.mock("nostr-tools/nip44", () => ({
   decrypt: vi.fn(),
-  encrypt: vi.fn(() => "ciphertext"),
+  encrypt: vi.fn(() => "2:base64ciphertext"),
 }));
 
 vi.mock("./nostr-state-store.js", () => ({
