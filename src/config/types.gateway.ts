@@ -15,6 +15,8 @@ export type GatewayTlsConfig = {
   keyPath?: string;
   /** Optional PEM CA bundle for TLS clients (mTLS or custom roots). */
   caPath?: string;
+  /** NEW: enable X25519MLKEM768 hybrid KEX in TLS 1.3 (default: true) */
+  pqcKex?: boolean;
 };
 
 export type WideAreaDiscoveryConfig = {
