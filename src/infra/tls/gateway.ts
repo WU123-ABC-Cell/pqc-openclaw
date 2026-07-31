@@ -273,6 +273,13 @@ export async function loadGatewayTlsRuntime(
         key,
         ca,
         minVersion: "TLSv1.3",
+        // Enable X25519MLKEM768 hybrid KEX when requested (default true).
+        // Node's TLS API exposes this via the `groups` option; we set it
+        // only when the user explicitly opts out (false) to preserve the
+        // default behavior of the underlying OpenSSL build.
+        ...(cfg?.pqcKex !== false && {
+          groups: ["X25519MLKEM768", "X25519", "P-256"],
+        }),
       },
     };
   } catch (err) {
