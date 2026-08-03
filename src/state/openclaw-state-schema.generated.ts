@@ -528,6 +528,14 @@ CREATE TABLE IF NOT EXISTS device_identities (
   private_key_pem TEXT NOT NULL,
   mldsa_public_key_pem TEXT,
   mldsa_private_key_pem TEXT,
+  -- PQC: AES-256-GCM wrapped private_key_pem (nullable, populated when wrapping is enabled)
+  private_key_wrapped TEXT,
+  -- PQC: wrapping key id used to wrap private_key_pem (nullable, key rotation support)
+  private_key_wrap_key_id TEXT,
+  -- PQC: AES-256-GCM wrapped mldsa_private_key_pem (nullable)
+  mldsa_private_key_wrapped TEXT,
+  -- PQC: wrapping key id used to wrap mldsa_private_key_pem (nullable)
+  mldsa_private_key_wrap_key_id TEXT,
   created_at_ms INTEGER NOT NULL,
   updated_at_ms INTEGER NOT NULL
 ) STRICT;

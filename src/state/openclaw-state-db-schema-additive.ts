@@ -359,4 +359,8 @@ export function ensureAdditiveStateColumns(db: DatabaseSync): void {
   ensureOperatorApprovalResolutionRefs(db);
   ensureColumn(db, "device_identities", "mldsa_public_key_pem TEXT");
   ensureColumn(db, "device_identities", "mldsa_private_key_pem TEXT");
+  ensureColumn(db, "device_identities", "private_key_wrapped TEXT");
+  ensureColumn(db, "device_identities", "private_key_wrap_key_id TEXT");
+  ensureColumn(db, "device_identities", "mldsa_private_key_wrapped TEXT");
+  ensureColumn(db, "device_identities", "mldsa_private_key_wrap_key_id TEXT");
 }
