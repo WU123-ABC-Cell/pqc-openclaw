@@ -209,3 +209,78 @@ export function verifyEd25519SignatureBytes(params: {
     return false;
   }
 }
+
+// ---------------------------------------------------------------------------
+// ML-DSA-65 helpers
+// ---------------------------------------------------------------------------
+
+function assertMlDsa65KeyType(key: crypto.KeyObject, label: string): void {
+  if (key.asymmetricKeyType !== "ml-dsa-65") {
+    throw new Error(`${label} must be an ML-DSA-65 key`);
+  }
+}
+
+export function signMlDsa65Payload(privateKeyPem: string, payload: string): string {
+  const key = crypto.createPrivateKey(privateKeyPem);
+  assertMlDsa65KeyType(key, "private key");
+  const signature = crypto.sign(null, Buffer.from(payload, "utf8"), key);
+  return base64UrlEncode(signature);
+}
+
+export function verifyMlDsa65Signature(params: {
+  publicKey: string;
+  payload: string;
+  signatureBase64Url: string;
+}): boolean {
+  try {
+    const key = crypto.createPublicKey(params.publicKey);
+    assertMlDsa65KeyType(key, "public key");
+    const signature = base64UrlDecode(params.signatureBase64Url);
+    return crypto.verify(null, Buffer.from(params.payload, "utf8"), key, signature);
+  } catch {
+    return false;
+  }
+}
+
+export function signDevicePayloadDual(
+  ed25519PrivateKeyPem: string,
+  mldsaPrivateKeyPem: string,
+  payload: string,
+): { ed25519: string; mlDsa65: string } {
+  return {
+    ed25519: signEd25519Payload(ed25519PrivateKeyPem, payload),
+    mlDsa65: signMlDsa65Payload(mldsaPrivateKeyPem, payload),
+  };
+}
+
+export function verifyDeviceSignatureDual(params: {
+  ed25519PublicKey: string;
+  mldsaPublicKey: string;
+  payload: string;
+  signatures: { ed25519?: string; mlDsa65?: string };
+}): boolean {
+  const { ed25519PublicKey, mldsaPublicKey, payload, signatures } = params;
+  if (signatures.ed25519) {
+    try {
+      const key = crypto.createPublicKey(ed25519PublicKey);
+      assertEd25519KeyType(key, "public key");
+      const signature = base64UrlDecode(signatures.ed25519);
+      if (crypto.verify(null, Buffer.from(payload, "utf8"), key, signature)) {
+        return true;
+      }
+    } catch {
+      // fall through to ML-DSA attempt
+    }
+  }
+  if (signatures.mlDsa65) {
+    try {
+      const key = crypto.createPublicKey(mldsaPublicKey);
+      assertMlDsa65KeyType(key, "public key");
+      const signature = base64UrlDecode(signatures.mlDsa65);
+      return crypto.verify(null, Buffer.from(payload, "utf8"), key, signature);
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
