@@ -12,6 +12,13 @@ import {
 } from "../state/openclaw-state-db.js";
 import { resolveOpenClawStateSqlitePath } from "../state/openclaw-state-db.paths.js";
 import {
+  wrapSecret,
+  unwrapSecret,
+  serializeWrappedSecret,
+  deserializeWrappedSecret,
+  type WrappingKeyProvider,
+} from "../security/secret-wrapping.js";
+import {
   deriveCanonicalEd25519PrivateKeyRaw,
   deriveCanonicalEd25519PublicKeyRaw,
 } from "./ed25519-signature.js";
@@ -39,6 +46,10 @@ export type StoredDeviceIdentity = DeviceIdentity & {
 
 export type DeviceIdentityStoreOptions = OpenClawStateDatabaseOptions & {
   identityKey?: string;
+  /** PQC: when provided, private keys are wrapped with AES-256-GCM before
+   *  being persisted and unwrapped on read. Legacy plaintext columns are
+   *  also written/kept for backward compatibility. */
+  wrappingProvider?: WrappingKeyProvider;
 };
 
 type DeviceIdentityDatabase = Pick<OpenClawStateKyselyDatabase, "device_identities">;
@@ -161,25 +172,65 @@ export function validateStoredDeviceIdentity(
 function rowToStoredIdentity(
   row: DeviceIdentityRow,
   expectedIdentityKey: string,
+  wrappingProvider?: WrappingKeyProvider,
 ): StoredDeviceIdentity {
   if (
     row.identity_key !== expectedIdentityKey ||
     typeof row.device_id !== "string" ||
     typeof row.public_key_pem !== "string" ||
-    typeof row.private_key_pem !== "string" ||
     parseCreatedAtMs(row.created_at_ms) === null ||
     parseCreatedAtMs(row.updated_at_ms) === null
   ) {
     throw invalidStoredIdentityError(expectedIdentityKey);
   }
+  const privateKeyPem = unwrapPrivateKeyPem(
+    row.private_key_pem,
+    row.private_key_wrapped,
+    row.private_key_wrap_key_id,
+    wrappingProvider,
+    expectedIdentityKey,
+  );
+  const mldsaPrivateKeyPem = unwrapPrivateKeyPem(
+    row.mldsa_private_key_pem,
+    row.mldsa_private_key_wrapped,
+    row.mldsa_private_key_wrap_key_id,
+    wrappingProvider,
+    expectedIdentityKey,
+  );
   return {
     deviceId: row.device_id,
     publicKeyPem: row.public_key_pem,
-    privateKeyPem: row.private_key_pem,
+    privateKeyPem,
     mldsaPublicKeyPem: row.mldsa_public_key_pem ?? undefined,
-    mldsaPrivateKeyPem: row.mldsa_private_key_pem ?? undefined,
+    mldsaPrivateKeyPem,
     createdAtMs: row.created_at_ms,
   };
+}
+
+function unwrapPrivateKeyPem(
+  legacyPem: unknown,
+  wrapped: unknown,
+  wrapKeyId: unknown,
+  provider: WrappingKeyProvider | undefined,
+  identityKey: string,
+): string | undefined {
+  if (
+    provider &&
+    typeof legacyPem === "string" &&
+    typeof wrapped === "string" &&
+    typeof wrapKeyId === "string"
+  ) {
+    return unwrapSecret(deserializeWrappedSecret(wrapped), provider).toString("utf8");
+  }
+  if (typeof legacyPem === "string") {
+    return legacyPem;
+  }
+  // PQC: nullable columns (e.g. mldsa_private_key_pem on legacy rows that
+  // predate 2.1) are not an error - preserve the 2.1 behavior of `?? undefined`.
+  if (legacyPem === null || legacyPem === undefined) {
+    return undefined;
+  }
+  throw invalidStoredIdentityError(identityKey);
 }
 
 function salvageStoredIdentityRow(
@@ -229,8 +280,9 @@ function storedIdentityToRow(
   identityKey: string,
   stored: StoredDeviceIdentity,
   updatedAtMs = stored.createdAtMs,
+  wrappingProvider?: WrappingKeyProvider,
 ): DeviceIdentityInsert {
-  return {
+  const row: DeviceIdentityInsert = {
     identity_key: identityKey,
     device_id: stored.deviceId,
     public_key_pem: stored.publicKeyPem,
@@ -238,6 +290,19 @@ function storedIdentityToRow(
     created_at_ms: stored.createdAtMs,
     updated_at_ms: updatedAtMs,
   };
+  if (wrappingProvider) {
+    if (stored.privateKeyPem) {
+      const wrapped = wrapSecret(Buffer.from(stored.privateKeyPem, "utf8"), wrappingProvider);
+      row.private_key_wrapped = serializeWrappedSecret(wrapped);
+      row.private_key_wrap_key_id = wrapped.keyId;
+    }
+    if (stored.mldsaPrivateKeyPem) {
+      const wrapped = wrapSecret(Buffer.from(stored.mldsaPrivateKeyPem, "utf8"), wrappingProvider);
+      row.mldsa_private_key_wrapped = serializeWrappedSecret(wrapped);
+      row.mldsa_private_key_wrap_key_id = wrapped.keyId;
+    }
+  }
+  return row;
 }
 
 function readStoredIdentityRowFromDatabase(
@@ -256,9 +321,10 @@ function readStoredIdentityRowFromDatabase(
 function readStoredIdentityFromDatabase(
   database: { db: Parameters<typeof getNodeSqliteKysely>[0] },
   identityKey: string,
+  wrappingProvider?: WrappingKeyProvider,
 ): StoredDeviceIdentity | null {
   const row = readStoredIdentityRowFromDatabase(database, identityKey);
-  return row ? rowToStoredIdentity(row, identityKey) : null;
+  return row ? rowToStoredIdentity(row, identityKey, wrappingProvider) : null;
 }
 
 /** Resolve the concrete database and row identity used by process caches and diagnostics. */
@@ -283,7 +349,11 @@ export function readStoredDeviceIdentity(
     env: options.env,
     path: resolved.databasePath,
   });
-  const stored = readStoredIdentityFromDatabase(database, resolved.identityKey);
+  const stored = readStoredIdentityFromDatabase(
+    database,
+    resolved.identityKey,
+    options.wrappingProvider,
+  );
   if (stored) {
     validateStoredDeviceIdentity(stored, resolved.identityKey);
   }
@@ -305,7 +375,11 @@ export function readStoredDeviceIdentityReadOnly(
   }
   return withOpenClawStateDatabaseReadOnly(
     (database) => {
-      const stored = readStoredIdentityFromDatabase(database, resolved.identityKey);
+      const stored = readStoredIdentityFromDatabase(
+        database,
+        resolved.identityKey,
+        options.wrappingProvider,
+      );
       if (stored) {
         validateStoredDeviceIdentity(stored, resolved.identityKey);
       }
@@ -324,7 +398,11 @@ export function insertStoredDeviceIdentityIfAbsent(
   validateStoredDeviceIdentity(candidate, resolved.identityKey);
   return runOpenClawStateWriteTransaction(
     ({ db }) => {
-      const existing = readStoredIdentityFromDatabase({ db }, resolved.identityKey);
+      const existing = readStoredIdentityFromDatabase(
+        { db },
+        resolved.identityKey,
+        options.wrappingProvider,
+      );
       if (existing) {
         validateStoredDeviceIdentity(existing, resolved.identityKey);
       } else {
@@ -333,11 +411,22 @@ export function insertStoredDeviceIdentityIfAbsent(
           db,
           kysely
             .insertInto("device_identities")
-            .values(storedIdentityToRow(resolved.identityKey, candidate))
+            .values(
+              storedIdentityToRow(
+                resolved.identityKey,
+                candidate,
+                undefined,
+                options.wrappingProvider,
+              ),
+            )
             .onConflict((conflict) => conflict.column("identity_key").doNothing()),
         );
       }
-      const authoritative = readStoredIdentityFromDatabase({ db }, resolved.identityKey);
+      const authoritative = readStoredIdentityFromDatabase(
+        { db },
+        resolved.identityKey,
+        options.wrappingProvider,
+      );
       if (!authoritative) {
         throw new DeviceIdentityStorageError(
           `SQLite device identity "${resolved.identityKey}" was not durable after insert.`,
@@ -366,7 +455,7 @@ export function repairInvalidStoredDeviceIdentity(
       try {
         existingRow = readStoredIdentityRowFromDatabase({ db }, resolved.identityKey);
         const existing = existingRow
-          ? rowToStoredIdentity(existingRow, resolved.identityKey)
+          ? rowToStoredIdentity(existingRow, resolved.identityKey, options.wrappingProvider)
           : null;
         if (existing) {
           validateStoredDeviceIdentity(existing, resolved.identityKey);
@@ -384,20 +473,33 @@ export function repairInvalidStoredDeviceIdentity(
           candidate.createdAtMs,
         );
         if (salvaged) {
+          const repairSet: Parameters<ReturnType<typeof getNodeSqliteKysely<DeviceIdentityDatabase>>["updateTable"]>[1] = {
+            device_id: salvaged.deviceId,
+            public_key_pem: salvaged.publicKeyPem,
+            private_key_pem: salvaged.privateKeyPem,
+            created_at_ms: salvaged.createdAtMs,
+            updated_at_ms: candidate.createdAtMs,
+          };
+          if (options.wrappingProvider) {
+            const salvagedWrapped = wrapSecret(
+              Buffer.from(salvaged.privateKeyPem, "utf8"),
+              options.wrappingProvider,
+            );
+            repairSet.private_key_wrapped = serializeWrappedSecret(salvagedWrapped);
+            repairSet.private_key_wrap_key_id = salvagedWrapped.keyId;
+          }
           executeSqliteQuerySync(
             db,
             getNodeSqliteKysely<DeviceIdentityDatabase>(db)
               .updateTable("device_identities")
-              .set({
-                device_id: salvaged.deviceId,
-                public_key_pem: salvaged.publicKeyPem,
-                private_key_pem: salvaged.privateKeyPem,
-                created_at_ms: salvaged.createdAtMs,
-                updated_at_ms: candidate.createdAtMs,
-              })
+              .set(repairSet)
               .where("identity_key", "=", resolved.identityKey),
           );
-          const authoritative = readStoredIdentityFromDatabase({ db }, resolved.identityKey);
+          const authoritative = readStoredIdentityFromDatabase(
+            { db },
+            resolved.identityKey,
+            options.wrappingProvider,
+          );
           if (!authoritative) {
             throw new DeviceIdentityStorageError(
               `SQLite device identity "${resolved.identityKey}" was not durable after repair.`,
@@ -423,10 +525,21 @@ export function repairInvalidStoredDeviceIdentity(
         db,
         getNodeSqliteKysely<DeviceIdentityDatabase>(db)
           .insertInto("device_identities")
-          .values(storedIdentityToRow(resolved.identityKey, candidate))
+          .values(
+            storedIdentityToRow(
+              resolved.identityKey,
+              candidate,
+              undefined,
+              options.wrappingProvider,
+            ),
+          )
           .onConflict((conflict) => conflict.column("identity_key").doNothing()),
       );
-      const authoritative = readStoredIdentityFromDatabase({ db }, resolved.identityKey);
+      const authoritative = readStoredIdentityFromDatabase(
+        { db },
+        resolved.identityKey,
+        options.wrappingProvider,
+      );
       if (!authoritative) {
         throw new DeviceIdentityStorageError(
           `SQLite device identity "${resolved.identityKey}" was not durable after repair.`,
