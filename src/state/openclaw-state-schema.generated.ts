@@ -520,11 +520,14 @@ CREATE TABLE IF NOT EXISTS device_bootstrap_tokens (
 CREATE INDEX IF NOT EXISTS idx_device_bootstrap_tokens_ts
   ON device_bootstrap_tokens(ts);
 
+-- PQC: ML-DSA-65 device identity (post-quantum step 2.1)
 CREATE TABLE IF NOT EXISTS device_identities (
   identity_key TEXT NOT NULL PRIMARY KEY,
   device_id TEXT NOT NULL,
   public_key_pem TEXT NOT NULL,
   private_key_pem TEXT NOT NULL,
+  mldsa_public_key_pem TEXT,
+  mldsa_private_key_pem TEXT,
   created_at_ms INTEGER NOT NULL,
   updated_at_ms INTEGER NOT NULL
 ) STRICT;
