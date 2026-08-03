@@ -357,4 +357,6 @@ export function ensureAdditiveStateColumns(db: DatabaseSync): void {
     "teardown_terminal_state TEXT CHECK (teardown_terminal_state IN ('destroyed', 'failed'))",
   );
   ensureOperatorApprovalResolutionRefs(db);
+  ensureColumn(db, "device_identities", "mldsa_public_key_pem TEXT");
+  ensureColumn(db, "device_identities", "mldsa_private_key_pem TEXT");
 }
