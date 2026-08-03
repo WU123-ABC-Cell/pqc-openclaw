@@ -27,6 +27,10 @@ export type DeviceIdentity = {
   deviceId: string;
   publicKeyPem: string;
   privateKeyPem: string;
+  /** NEW: ML-DSA-65 public key (PEM) for post-quantum signature */
+  mldsaPublicKeyPem?: string;
+  /** NEW: ML-DSA-65 private key (PEM) for post-quantum signature */
+  mldsaPrivateKeyPem?: string;
 };
 
 export type StoredDeviceIdentity = DeviceIdentity & {
@@ -81,10 +85,17 @@ export function generateStoredDeviceIdentity(now = Date.now()): StoredDeviceIden
   const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
   const publicKeyPem = publicKey.export({ type: "spki", format: "pem" });
   const privateKeyPem = privateKey.export({ type: "pkcs8", format: "pem" });
+  // NEW: ML-DSA-65 generation
+  const { publicKey: mldsaPub, privateKey: mldsaPriv } = crypto.generateKeyPairSync("ml-dsa-65", {
+    publicKeyEncoding: { type: "spki", format: "pem" },
+    privateKeyEncoding: { type: "pkcs8", format: "pem" },
+  });
   return {
     deviceId: fingerprintPublicKey(publicKeyPem),
     publicKeyPem,
     privateKeyPem,
+    mldsaPublicKeyPem: mldsaPub,
+    mldsaPrivateKeyPem: mldsaPriv,
     createdAtMs: now,
   };
 }
@@ -123,6 +134,8 @@ export function validateStoredDeviceIdentity(
       !/^[a-f0-9]{64}$/.test(value.deviceId) ||
       !value.publicKeyPem ||
       !value.privateKeyPem ||
+      (value.mldsaPublicKeyPem && !value.mldsaPrivateKeyPem) ||
+      (!value.mldsaPublicKeyPem && value.mldsaPrivateKeyPem) ||
       parseCreatedAtMs(value.createdAtMs) === null ||
       !keyPairMatches(value.publicKeyPem, value.privateKeyPem)
     ) {
@@ -163,6 +176,8 @@ function rowToStoredIdentity(
     deviceId: row.device_id,
     publicKeyPem: row.public_key_pem,
     privateKeyPem: row.private_key_pem,
+    mldsaPublicKeyPem: row.mldsa_public_key_pem ?? undefined,
+    mldsaPrivateKeyPem: row.mldsa_private_key_pem ?? undefined,
     createdAtMs: row.created_at_ms,
   };
 }
