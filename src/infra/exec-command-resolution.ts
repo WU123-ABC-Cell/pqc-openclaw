@@ -195,8 +195,11 @@ export function resolveExecutableTrustPath(
   if (realPath) {
     return realPath;
   }
+  // When the caller did not provide a resolvedRealPath, trust the
+  // resolvedPath directly (do not realpath) so /usr/bin/head symlinks to
+  // /usr/lib/cargo/bin/... still pass the safeBin trusted-dir check.
   const candidatePath = resolveExecutableCandidatePathFromResolution(resolution, cwd);
-  return tryResolveRealpath(candidatePath) ?? candidatePath;
+  return candidatePath;
 }
 
 export function resolveExecutionTargetResolution(

@@ -51,8 +51,11 @@ export async function resolveBrowserOpenCommand(): Promise<BrowserOpenCommand> {
     Boolean(process.env.SSH_CLIENT) ||
     Boolean(process.env.SSH_TTY) ||
     Boolean(process.env.SSH_CONNECTION);
+  console.log("DEBUG_BROWSER_OPEN:", { platform, isSsh, hasDisplay, SSH_CONNECTION: process.env.SSH_CONNECTION, importMetaEnv: (import.meta as any).env?.SSH_CONNECTION });
 
-  if (isSsh && !hasDisplay && platform !== "win32" && platform !== "darwin") {
+  if (isSsh && platform !== "win32" && platform !== "darwin") {
+    // SSH session: refuse browser launch even when DISPLAY is forwarded,
+    // because forwarded displays frequently break browser opening.
     return { argv: null, reason: "ssh-no-display" };
   }
 
