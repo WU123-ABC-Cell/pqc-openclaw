@@ -19,10 +19,16 @@ import {
   normalizeEd25519PublicKeyBase64Url,
   publicKeyRawBase64UrlFromEd25519Pem,
   signEd25519Payload,
+  signDevicePayloadDual,
   verifyEd25519Signature,
+  verifyDeviceSignatureDual,
 } from "./ed25519-signature.js";
 
-export type { DeviceIdentity } from "./device-identity-store.js";
+export type { DeviceIdentity, DeviceIdentityWithPqc } from "./device-identity-store.js";
+export type DeviceIdentityWithPqc = DeviceIdentity & {
+  mldsaPublicKeyPem?: string;
+  mldsaPrivateKeyPem?: string;
+};
 
 const LEGACY_DEVICE_IDENTITY_RELATIVE_PATH = path.join("identity", "device.json");
 const DOCTOR_CLAIM_SUFFIX = ".doctor-importing";
@@ -180,8 +186,25 @@ export function loadDeviceIdentityIfPresent(
 }
 
 /** Sign a UTF-8 payload with a PEM Ed25519 private key and return base64url bytes. */
-export function signDevicePayload(privateKeyPem: string, payload: string): string {
-  return signEd25519Payload(privateKeyPem, payload);
+export function signDevicePayload(privateKeyPem: string, payload: string): string;
+/** Sign a UTF-8 payload with optional ML-DSA-65 private key, returning dual signatures. */
+export function signDevicePayload(
+  options: { privateKeyPem: string; mldsaPrivateKeyPem?: string },
+  payload: string,
+): { ed25519: string; mlDsa65?: string };
+export function signDevicePayload(
+  privateKeyOrOptions: string | { privateKeyPem: string; mldsaPrivateKeyPem?: string },
+  payload: string,
+): string | { ed25519: string; mlDsa65?: string } {
+  if (typeof privateKeyOrOptions === "string") {
+    return signEd25519Payload(privateKeyOrOptions, payload);
+  }
+  const { privateKeyPem, mldsaPrivateKeyPem } = privateKeyOrOptions;
+  if (mldsaPrivateKeyPem) {
+    const dual = signDevicePayloadDual(privateKeyPem, mldsaPrivateKeyPem, payload);
+    return { ed25519: dual.ed25519, mlDsa65: dual.mlDsa65 };
+  }
+  return { ed25519: signEd25519Payload(privateKeyPem, payload) };
 }
 
 /** Normalize PEM or raw base64/base64url public keys to canonical raw base64url bytes. */
@@ -213,6 +236,50 @@ export function verifyDeviceSignature(
   publicKey: string,
   payload: string,
   signatureBase64Url: string,
+): boolean;
+/** Verify a UTF-8 payload signature against optional ML-DSA-65 public key, trying Ed25519 first. */
+export function verifyDeviceSignature(params: {
+  ed25519PublicKey: string;
+  mldsaPublicKey?: string;
+  payload: string;
+  signatures: { ed25519?: string; mlDsa65?: string };
+}): boolean;
+export function verifyDeviceSignature(
+  publicKeyOrParams: string | {
+    ed25519PublicKey: string;
+    mldsaPublicKey?: string;
+    payload: string;
+    signatures: { ed25519?: string; mlDsa65?: string };
+  },
+  payload?: string,
+  signatureBase64Url?: string,
 ): boolean {
-  return verifyEd25519Signature({ publicKey, payload, signatureBase64Url });
+  if (typeof publicKeyOrParams === "string") {
+    if (payload === undefined || signatureBase64Url === undefined) {
+      throw new Error("Missing payload or signature for legacy verifyDeviceSignature call");
+    }
+    return verifyEd25519Signature({
+      publicKey: publicKeyOrParams,
+      payload,
+      signatureBase64Url,
+    });
+  }
+  const { ed25519PublicKey, mldsaPublicKey, payload: payloadParam, signatures } = publicKeyOrParams;
+  if (mldsaPublicKey) {
+    return verifyDeviceSignatureDual({
+      ed25519PublicKey,
+      mldsaPublicKey,
+      payload: payloadParam,
+      signatures,
+    });
+  }
+  // fallback to Ed25519 only
+  if (signatures.ed25519) {
+    return verifyEd25519Signature({
+      publicKey: ed25519PublicKey,
+      payload: payloadParam,
+      signatureBase64Url: signatures.ed25519,
+    });
+  }
+  return false;
 }
