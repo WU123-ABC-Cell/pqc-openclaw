@@ -287,6 +287,8 @@ function storedIdentityToRow(
     device_id: stored.deviceId,
     public_key_pem: stored.publicKeyPem,
     private_key_pem: stored.privateKeyPem,
+    mldsa_public_key_pem: stored.mldsaPublicKeyPem,
+    mldsa_private_key_pem: stored.mldsaPrivateKeyPem,
     created_at_ms: stored.createdAtMs,
     updated_at_ms: updatedAtMs,
   };
