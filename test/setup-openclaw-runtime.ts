@@ -13,6 +13,9 @@ import { installSharedTestSetup } from "./setup.shared.js";
 
 installSharedTestSetup();
 
+// Force English locale so wizard prompts match the test expectations.
+process.env.OPENCLAW_LOCALE = "en";
+
 const WORKER_RUNTIME_STATE = Symbol.for("openclaw.testSetupRuntimeState");
 const WORKER_PLUGIN_RUNTIME_HELPERS = Symbol.for("openclaw.testSetupPluginRuntimeHelpers");
 const WORKER_CLEANUP_HELPERS = Symbol.for("openclaw.testSetupCleanupHelpers");
