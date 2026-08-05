@@ -20,9 +20,30 @@ import {
   chmodSync,
 } from "node:fs";
 import { randomBytes } from "node:crypto";
+import { createRequire } from "node:module";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import type { ActiveWrappingKey, WrappingKeyProvider } from "./secret-wrapping.js";
+
+/** Minimal shape of the @napi-rs/keyring `Entry` class. Optional dep. */
+export interface NapiRsKeyringEntry {
+  getPassword(): string | null;
+  setPassword(password: string): void;
+  deletePassword(): boolean;
+}
+
+export interface NapiRsKeyringModule {
+  Entry: new (service: string, username: string) => NapiRsKeyringEntry;
+}
+
+function defaultKeyringLoader(): NapiRsKeyringModule | null {
+  try {
+    const require = createRequire(import.meta.url);
+    return require("@napi-rs/keyring") as NapiRsKeyringModule;
+  } catch {
+    return null;
+  }
+}
 
 const KEY_BYTES = 32;
 const KEY_ID_BYTES = 16; // 128 bits of randomness
@@ -167,6 +188,55 @@ export class FileKeyringProvider implements WrappingKeyProvider {
 }
 
 /**
+ * OS keyring provider backed by @napi-rs/keyring (Keychain / libsecret / Credential Vault).
+ * Falls back to throwing when the native module is unavailable; pair with
+ * CompositeKeyringProvider(FileKeyringProvider) for graceful degradation.
+ *
+ * The native module is loaded lazily via the `loader` parameter to keep tests
+ * and unsupported platforms working. In production, defaultKeyringLoader() is used.
+ */
+export class OSKeyringProvider implements WrappingKeyProvider {
+  private readonly module: NapiRsKeyringModule | null;
+
+  constructor(
+    private readonly service: string = "openclaw",
+    private readonly keyId: string = generateKeyId(),
+    private readonly loader: () => NapiRsKeyringModule | null = defaultKeyringLoader,
+  ) {
+    this.module = loader();
+  }
+
+  getActiveKey(): ActiveWrappingKey {
+    if (!this.module) {
+      throw new Error("@napi-rs/keyring not available");
+    }
+    const entry = new this.module.Entry(this.service, this.keyId);
+    let password = entry.getPassword();
+    if (!password) {
+      const key = randomBytes(KEY_BYTES).toString("base64url");
+      entry.setPassword(key);
+      password = key;
+    }
+    return { key: Buffer.from(password, "base64url"), keyId: this.keyId };
+  }
+
+  getKeyById(keyId: string): Buffer | null {
+    if (!this.module) return null;
+    try {
+      const entry = new this.module.Entry(this.service, keyId);
+      const password = entry.getPassword();
+      return password ? Buffer.from(password, "base64url") : null;
+    } catch {
+      return null;
+    }
+  }
+
+  isAvailable(): boolean {
+    return this.module !== null;
+  }
+}
+
+/**
  * Composite: try primary first, fall back to secondary on errors.
  * - getActiveKey: primary succeeds -> use it; primary throws -> fall back
  * - getKeyById: query primary first, then secondary (so rotated keys
@@ -202,9 +272,22 @@ export class CompositeKeyringProvider implements WrappingKeyProvider {
 export function createDefaultKeyringProvider(options?: {
   dir?: string;
   keyId?: string;
+  preferOSKeyring?: boolean;
+  osKeyringLoader?: () => NapiRsKeyringModule | null;
 }): WrappingKeyProvider {
   if (process.env[ENV_KEY]) {
     return new EnvKeyringProvider();
   }
-  return new FileKeyringProvider(options?.dir, options?.keyId);
+  const fileProvider = new FileKeyringProvider(options?.dir, options?.keyId);
+  if (options?.preferOSKeyring !== false) {
+    const osProvider = new OSKeyringProvider(
+      "openclaw",
+      options?.keyId,
+      options?.osKeyringLoader ?? defaultKeyringLoader,
+    );
+    if (osProvider.isAvailable()) {
+      return new CompositeKeyringProvider(osProvider, fileProvider);
+    }
+  }
+  return fileProvider;
 }

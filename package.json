@@ -2029,7 +2029,8 @@
     "vitest": "4.1.10"
   },
   "optionalDependencies": {
-    "sqlite-vec": "0.1.9"
+    "sqlite-vec": "0.1.9",
+    "@napi-rs/keyring": "1.3.0"
   },
   "engines": {
     "node": ">=22.22.3 <23 || >=24.15.0 <25 || >=25.9.0"

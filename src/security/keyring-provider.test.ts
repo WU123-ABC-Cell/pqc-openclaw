@@ -7,8 +7,10 @@ import {
   CompositeKeyringProvider,
   EnvKeyringProvider,
   FileKeyringProvider,
+  OSKeyringProvider,
   createDefaultKeyringProvider,
   generateKeyId,
+  type NapiRsKeyringModule,
 } from "./keyring-provider.js";
 import type { WrappingKeyProvider } from "./secret-wrapping.js";
 
@@ -206,6 +208,69 @@ describe("CompositeKeyringProvider", () => {
   });
 });
 
+function makeMockKeyringLoader(
+  entries: Record<string, string> = {},
+): () => NapiRsKeyringModule {
+  return () => ({
+    Entry: function (service: string, username: string) {
+      const key = `${service}::${username}`;
+      return {
+        getPassword: () => entries[key] ?? null,
+        setPassword: (password: string) => {
+          entries[key] = password;
+        },
+        deletePassword: () => {
+          delete entries[key];
+          return true;
+        },
+      };
+    },
+  });
+}
+
+describe("OSKeyringProvider", () => {
+  it("uses OS keyring when module is available", () => {
+    const p = new OSKeyringProvider("svc", "kid", makeMockKeyringLoader());
+    const { key, keyId } = p.getActiveKey();
+    expect(key.length).toBe(KEY_BYTES);
+    expect(keyId).toBe("kid");
+  });
+
+  it("isAvailable returns true with a working loader", () => {
+    const p = new OSKeyringProvider("svc", "kid", makeMockKeyringLoader());
+    expect(p.isAvailable()).toBe(true);
+  });
+
+  it("isAvailable returns false when loader returns null", () => {
+    const p = new OSKeyringProvider("svc", "kid", () => null);
+    expect(p.isAvailable()).toBe(false);
+  });
+
+  it("throws on getActiveKey when module is unavailable", () => {
+    const p = new OSKeyringProvider("svc", "kid", () => null);
+    expect(() => p.getActiveKey()).toThrow(/not available/);
+  });
+
+  it("persists key across instances via the loader", () => {
+    const entries: Record<string, string> = {};
+    const p1 = new OSKeyringProvider("svc", "kid", makeMockKeyringLoader(entries));
+    const { key: k1 } = p1.getActiveKey();
+    const p2 = new OSKeyringProvider("svc", "kid", makeMockKeyringLoader(entries));
+    const { key: k2 } = p2.getActiveKey();
+    expect(k1.equals(k2)).toBe(true);
+  });
+
+  it("getKeyById returns null for unknown key when available", () => {
+    const p = new OSKeyringProvider("svc", "kid", makeMockKeyringLoader());
+    expect(p.getKeyById("nonexistent")).toBeNull();
+  });
+
+  it("getKeyById returns null when module is unavailable", () => {
+    const p = new OSKeyringProvider("svc", "kid", () => null);
+    expect(p.getKeyById("kid")).toBeNull();
+  });
+});
+
 describe("createDefaultKeyringProvider", () => {
   const origKey = process.env.OPENCLAW_WRAP_KEY;
   const origKeyId = process.env.OPENCLAW_WRAP_KEY_ID;
@@ -235,6 +300,49 @@ describe("createDefaultKeyringProvider", () => {
     const dir = mkdtempSync(join(tmpdir(), "openclaw-factory-test-"));
     try {
       const p = createDefaultKeyringProvider({ dir });
+      expect(p).toBeInstanceOf(FileKeyringProvider);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns OS+file composite when OS keyring is available", () => {
+    delete process.env.OPENCLAW_WRAP_KEY;
+    const dir = mkdtempSync(join(tmpdir(), "openclaw-os-factory-test-"));
+    try {
+      const p = createDefaultKeyringProvider({
+        dir,
+        osKeyringLoader: makeMockKeyringLoader(),
+      });
+      expect(p).toBeInstanceOf(CompositeKeyringProvider);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns FileKeyringProvider when OS keyring loader returns null", () => {
+    delete process.env.OPENCLAW_WRAP_KEY;
+    const dir = mkdtempSync(join(tmpdir(), "openclaw-fallback-factory-test-"));
+    try {
+      const p = createDefaultKeyringProvider({
+        dir,
+        osKeyringLoader: () => null,
+      });
+      expect(p).toBeInstanceOf(FileKeyringProvider);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns FileKeyringProvider when preferOSKeyring is false", () => {
+    delete process.env.OPENCLAW_WRAP_KEY;
+    const dir = mkdtempSync(join(tmpdir(), "openclaw-nopref-factory-test-"));
+    try {
+      const p = createDefaultKeyringProvider({
+        dir,
+        osKeyringLoader: makeMockKeyringLoader(),
+        preferOSKeyring: false,
+      });
       expect(p).toBeInstanceOf(FileKeyringProvider);
     } finally {
       rmSync(dir, { recursive: true, force: true });
