@@ -1149,6 +1149,12 @@ INSERT INTO device_identities VALUES (
       device_id: "device-1",
       public_key_pem: "public-key",
       private_key_pem: "private-key",
+      mldsa_public_key_pem: null,
+      mldsa_private_key_pem: null,
+      private_key_wrapped: null,
+      private_key_wrap_key_id: null,
+      mldsa_private_key_wrapped: null,
+      mldsa_private_key_wrap_key_id: null,
       created_at_ms: 10,
       updated_at_ms: 20,
     });
