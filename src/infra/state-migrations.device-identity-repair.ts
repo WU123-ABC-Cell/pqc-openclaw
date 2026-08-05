@@ -7,6 +7,7 @@ import {
   readStoredDeviceIdentityReadOnly,
   repairInvalidStoredDeviceIdentity,
 } from "./device-identity-store.js";
+import type { WrappingKeyProvider } from "../security/secret-wrapping.js";
 import { formatErrorMessage } from "./errors.js";
 import type { LegacyDeviceIdentityDetection } from "./state-migrations.device-identity.types.js";
 import type { MigrationMessages } from "./state-migrations.types.js";
@@ -30,6 +31,7 @@ export function detectLegacyDeviceIdentity(params: {
   stateDir: string;
   env?: NodeJS.ProcessEnv;
   doctorOnlyStateMigrations?: boolean;
+  wrappingProvider?: WrappingKeyProvider;
 }): LegacyDeviceIdentityDetection {
   const sourcePath = path.join(params.stateDir, LEGACY_IDENTITY_RELATIVE_PATH);
   const claimPath = `${sourcePath}${DOCTOR_CLAIM_SUFFIX}`;
@@ -41,6 +43,7 @@ export function detectLegacyDeviceIdentity(params: {
       readStoredDeviceIdentityReadOnly({
         env: { ...(params.env ?? process.env), OPENCLAW_STATE_DIR: params.stateDir },
         identityKey: IDENTITY_KEY,
+        wrappingProvider: params.wrappingProvider,
       });
     } catch (error) {
       hasInvalidCanonical = error instanceof DeviceIdentityStorageError;
@@ -66,11 +69,15 @@ export function hasLegacyDeviceIdentityPath(detected: LegacyDeviceIdentityDetect
 }
 
 /** Generate a replacement only after the caller acquires Doctor's exclusive state lock. */
-export function repairInvalidCanonicalIdentity(env: NodeJS.ProcessEnv): MigrationMessages {
+export function repairInvalidCanonicalIdentity(
+  env: NodeJS.ProcessEnv,
+  options?: { wrappingProvider?: WrappingKeyProvider },
+): MigrationMessages {
   try {
     const result = repairInvalidStoredDeviceIdentity(generateStoredDeviceIdentity(), {
       env,
       identityKey: IDENTITY_KEY,
+      wrappingProvider: options?.wrappingProvider,
     });
     if (!result.repaired) {
       return { changes: [], warnings: [] };

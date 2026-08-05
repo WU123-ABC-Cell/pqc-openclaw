@@ -29,6 +29,7 @@ import {
   hasLegacyDeviceIdentityPath,
   repairInvalidCanonicalIdentity,
 } from "./state-migrations.device-identity-repair.js";
+import type { WrappingKeyProvider } from "../security/secret-wrapping.js";
 import type { LegacyDeviceIdentityDetection } from "./state-migrations.device-identity.types.js";
 import {
   legacyMigrationSourceSnapshotsMatch as snapshotsMatch,
@@ -577,6 +578,7 @@ export async function migrateLegacyDeviceIdentity(params: {
   beforeClaim?: (sourcePath: string) => void;
   beforeCleanup?: () => void;
   removeSource?: (sourcePath: string) => Promise<void> | void;
+  wrappingProvider?: WrappingKeyProvider;
 }): Promise<MigrationMessages> {
   if (!params.detected.hasLegacy && !params.detected.hasInvalidCanonical) {
     return { changes: [], warnings: [] };
@@ -637,7 +639,7 @@ export async function migrateLegacyDeviceIdentity(params: {
           });
           result = await migrateWithExclusiveStateOwnership({ ...params, env, stateRoot });
         } else if (params.detected.hasInvalidCanonical) {
-          result = repairInvalidCanonicalIdentity(env);
+          result = repairInvalidCanonicalIdentity(env, { wrappingProvider: params.wrappingProvider });
         }
       } catch (error) {
         result.warnings.push(`Failed reading legacy device identity state: ${String(error)}`);
