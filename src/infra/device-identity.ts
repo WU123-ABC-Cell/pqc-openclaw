@@ -15,6 +15,7 @@ import {
   type DeviceIdentityStoreOptions,
   type StoredDeviceIdentity,
 } from "./device-identity-store.js";
+import { getOrCreateDefaultWrappingProvider } from "./device-identity-store-keyring-default.js";
 import {
   normalizeEd25519PublicKeyBase64Url,
   publicKeyRawBase64UrlFromEd25519Pem,
@@ -99,7 +100,12 @@ function withDeviceIdentityCoordinator<T>(
     resolvedOptions: DeviceIdentityStoreOptions,
   ) => T,
 ): T {
-  const resolved = resolveDeviceIdentityStore(options);
+  // PQC 2.3.5: auto-inject default wrapping provider if not specified.
+  // Falls through to FileKeyringProvider (CSPRNG keys in ~/.openclaw/state/wrap-keys/).
+  const effectiveOptions: DeviceIdentityStoreOptions = options.wrappingProvider
+    ? options
+    : { ...options, wrappingProvider: getOrCreateDefaultWrappingProvider() };
+  const resolved = resolveDeviceIdentityStore(effectiveOptions);
   const resolvedOptions: DeviceIdentityStoreOptions = {
     ...options,
     path: resolved.databasePath,
