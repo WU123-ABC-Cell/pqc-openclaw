@@ -560,7 +560,13 @@ export interface DeviceIdentities {
   created_at_ms: number;
   device_id: string;
   identity_key: string;
+  mldsa_private_key_pem: string | null;
+  mldsa_private_key_wrap_key_id: string | null;
+  mldsa_private_key_wrapped: string | null;
+  mldsa_public_key_pem: string | null;
   private_key_pem: string;
+  private_key_wrap_key_id: string | null;
+  private_key_wrapped: string | null;
   public_key_pem: string;
   updated_at_ms: number;
 }
