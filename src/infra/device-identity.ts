@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { resolveStateDir } from "../config/paths.js";
 import { acquireDeviceIdentityCoordinator } from "./device-identity-coordinator.js";
+import { getOrCreateDefaultWrappingProvider } from "./device-identity-store-keyring-default.js";
 import {
   generateStoredDeviceIdentity,
   insertStoredDeviceIdentityIfAbsent,
@@ -15,7 +16,6 @@ import {
   type DeviceIdentityStoreOptions,
   type StoredDeviceIdentity,
 } from "./device-identity-store.js";
-import { getOrCreateDefaultWrappingProvider } from "./device-identity-store-keyring-default.js";
 import {
   normalizeEd25519PublicKeyBase64Url,
   publicKeyRawBase64UrlFromEd25519Pem,
@@ -100,7 +100,7 @@ function withDeviceIdentityCoordinator<T>(
     resolvedOptions: DeviceIdentityStoreOptions,
   ) => T,
 ): T {
-  // PQC 2.3.5: auto-inject default wrapping provider if not specified.
+  // PQC 2.2.5: auto-inject default wrapping provider if not specified.
   // Falls through to FileKeyringProvider (CSPRNG keys in ~/.openclaw/state/wrap-keys/).
   const effectiveOptions: DeviceIdentityStoreOptions = options.wrappingProvider
     ? options
@@ -206,7 +206,10 @@ export function signDevicePayload(
     return signEd25519Payload(privateKeyOrOptions, payload);
   }
   const { privateKeyPem, mldsaPrivateKeyPem } = privateKeyOrOptions;
-  console.debug("[PQC] [2.1] sign-device-payload", { hasMldsa: !!mldsaPrivateKeyPem, bytes: payload.length });
+  console.debug("[PQC] [2.1] sign-device-payload", {
+    hasMldsa: !!mldsaPrivateKeyPem,
+    bytes: payload.length,
+  });
   if (mldsaPrivateKeyPem) {
     const dual = signDevicePayloadDual(privateKeyPem, mldsaPrivateKeyPem, payload);
     return { ed25519: dual.ed25519, mlDsa65: dual.mlDsa65 };
@@ -252,12 +255,14 @@ export function verifyDeviceSignature(params: {
   signatures: { ed25519?: string; mlDsa65?: string };
 }): boolean;
 export function verifyDeviceSignature(
-  publicKeyOrParams: string | {
-    ed25519PublicKey: string;
-    mldsaPublicKey?: string;
-    payload: string;
-    signatures: { ed25519?: string; mlDsa65?: string };
-  },
+  publicKeyOrParams:
+    | string
+    | {
+        ed25519PublicKey: string;
+        mldsaPublicKey?: string;
+        payload: string;
+        signatures: { ed25519?: string; mlDsa65?: string };
+      },
   payload?: string,
   signatureBase64Url?: string,
 ): boolean {

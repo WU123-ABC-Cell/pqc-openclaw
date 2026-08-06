@@ -12,17 +12,11 @@
 // secret; no additional encryption. Protection relies on filesystem perms
 // or OS keyring ACLs (the latter is a follow-up PR using @napi-rs/keyring).
 
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  writeFileSync,
-  chmodSync,
-} from "node:fs";
 import { randomBytes } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
 import { createRequire } from "node:module";
-import { join } from "node:path";
 import { homedir } from "node:os";
+import { join } from "node:path";
 import type { ActiveWrappingKey, WrappingKeyProvider } from "./secret-wrapping.js";
 import {
   exportWrapKey,
@@ -101,9 +95,7 @@ function parseKeyString(raw: string): Buffer {
  * OPENCLAW_WRAP_KEY_ID: key id (defaults to "env" if unset)
  */
 export class EnvKeyringProvider implements WrappingKeyProvider {
-  constructor(
-    private readonly env: NodeJS.ProcessEnv = process.env,
-  ) {}
+  constructor(private readonly env: NodeJS.ProcessEnv = process.env) {}
 
   getActiveKey(): ActiveWrappingKey {
     const raw = this.env[ENV_KEY];
@@ -190,8 +182,7 @@ export class FileKeyringProvider implements WrappingKeyProvider {
     return key;
   }
 
-
-  // --- backup / restore (PQC 2.3.5.D) ---
+  // --- backup / restore (PQC 2.2.5.D) ---
 
   /** Export the currently active wrap key to a passphrase-encrypted backup blob. */
   exportActiveKey(options: ExportOptions): ExportedWrapKey {
@@ -213,7 +204,10 @@ export class FileKeyringProvider implements WrappingKeyProvider {
    * If the imported keyId matches the current active key id, the key is replaced;
    * otherwise the key is added as an additional entry (rotation history).
    */
-  importKey(blob: ExportedWrapKey, options: ImportOptions): { keyId: string; becameActive: boolean } {
+  importKey(
+    blob: ExportedWrapKey,
+    options: ImportOptions,
+  ): { keyId: string; becameActive: boolean } {
     const { key, keyId } = importWrapKey(blob, options);
     const path = this.keyPath(keyId);
     writeFileSync(path, key, { mode: KEY_FILE_MODE });

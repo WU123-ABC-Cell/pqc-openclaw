@@ -1,12 +1,12 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runWrapKeyCommand } from "./wrap-key.js";
-import { createDefaultKeyringProvider } from "../security/keyring-provider.js";
-import { openOpenClawStateDatabase } from "../state/openclaw-state-db.js";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { resetDefaultWrappingProviderForTest } from "../infra/device-identity-store-keyring-default.js";
+import { createDefaultKeyringProvider } from "../security/keyring-provider.js";
 import type { WrappingKeyProvider } from "../security/secret-wrapping.js";
+import { openOpenClawStateDatabase } from "../state/openclaw-state-db.js";
+import { runWrapKeyCommand } from "./wrap-key.js";
 
 let tmpDir: string;
 let env: NodeJS.ProcessEnv;
@@ -52,7 +52,7 @@ describe("runWrapKeyCommand status", () => {
     const r = await runWrapKeyCommand(["status"], { env });
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toContain("total device identities:  0");
-    expect(r.stdout).toContain("wrapped (PQC 2.3):       0");
+    expect(r.stdout).toContain("wrapped (PQC 2.2):       0");
   });
 });
 

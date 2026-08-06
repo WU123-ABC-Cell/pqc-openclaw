@@ -4,16 +4,12 @@
 // - all wrap columns reference keys that exist in the keyring
 // - flags legacy rows (no wrap columns) so users can upgrade
 
+import { getOrCreateDefaultWrappingProvider } from "../infra/device-identity-store-keyring-default.js";
 import {
   openExistingOpenClawStateDatabaseReadOnly,
   type OpenClawStateDatabaseOptions,
 } from "../state/openclaw-state-db.js";
-import { getOrCreateDefaultWrappingProvider } from "../infra/device-identity-store-keyring-default.js";
-import type {
-  HealthCheck,
-  HealthCheckContext,
-  HealthFinding,
-} from "./health-checks.js";
+import type { HealthCheck, HealthCheckContext, HealthFinding } from "./health-checks.js";
 
 const CHECK_ID = "core/doctor/wrap-key";
 
@@ -25,7 +21,11 @@ export interface WrapKeyHealthProbe {
 }
 
 export type WrapKeyHealthResult =
-  | { readonly ok: true; readonly probe: WrapKeyHealthProbe; readonly findings: readonly HealthFinding[] }
+  | {
+      readonly ok: true;
+      readonly probe: WrapKeyHealthProbe;
+      readonly findings: readonly HealthFinding[];
+    }
   | { readonly ok: false; readonly error: string };
 
 function finding(params: {
@@ -52,9 +52,11 @@ export async function runWrapKeyHealthCheck(
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
   try {
-    const rows = database.db.prepare(
-      "SELECT device_id, private_key_wrap_key_id, mldsa_private_key_wrap_key_id FROM device_identities",
-    ).all() as Array<{
+    const rows = database.db
+      .prepare(
+        "SELECT device_id, private_key_wrap_key_id, mldsa_private_key_wrap_key_id FROM device_identities",
+      )
+      .all() as Array<{
       device_id: string;
       private_key_wrap_key_id: string | null;
       mldsa_private_key_wrap_key_id: string | null;
@@ -82,7 +84,8 @@ export async function runWrapKeyHealthCheck(
         legacyCount++;
       }
       if (row.private_key_wrap_key_id) referencedKeyIds.add(row.private_key_wrap_key_id);
-      if (row.mldsa_private_key_wrap_key_id) referencedKeyIds.add(row.mldsa_private_key_wrap_key_id);
+      if (row.mldsa_private_key_wrap_key_id)
+        referencedKeyIds.add(row.mldsa_private_key_wrap_key_id);
     }
 
     const missingKeyIds: string[] = [];
@@ -99,23 +102,29 @@ export async function runWrapKeyHealthCheck(
     }
 
     if (missingKeyIds.length > 0) {
-      findings.push(finding({
-        severity: "error",
-        message: `${missingKeyIds.length} wrap key id(s) referenced by device identities are not in any keyring: ${missingKeyIds.join(", ")}`,
-        path: "state.db:device_identities",
-        requirement: "All device identity private keys must be decryptable",
-        fixHint: "Restore the missing wrap keys from backup via `openclaw wrap-key import <backup-blob>`, or rotate to a new key with `openclaw wrap-key rotate`.",
-      }));
+      findings.push(
+        finding({
+          severity: "error",
+          message: `${missingKeyIds.length} wrap key id(s) referenced by device identities are not in any keyring: ${missingKeyIds.join(", ")}`,
+          path: "state.db:device_identities",
+          requirement: "All device identity private keys must be decryptable",
+          fixHint:
+            "Restore the missing wrap keys from backup via `openclaw wrap-key import <backup-blob>`, or rotate to a new key with `openclaw wrap-key rotate`.",
+        }),
+      );
     }
 
     if (legacyCount > 0) {
-      findings.push(finding({
-        severity: "info",
-        message: `${legacyCount} of ${totalIdentities} device identity(ies) have no PQC wrap columns (legacy 2.1 or earlier plaintext).`,
-        path: "state.db:device_identities",
-        requirement: "Device identity private keys should be wrapped (PQC 2.3) for at-rest encryption",
-        fixHint: "Run a key migration to upgrade legacy device identities to wrapped form.",
-      }));
+      findings.push(
+        finding({
+          severity: "info",
+          message: `${legacyCount} of ${totalIdentities} device identity(ies) have no PQC wrap columns (legacy 2.1 or earlier plaintext).`,
+          path: "state.db:device_identities",
+          requirement:
+            "Device identity private keys should be wrapped (PQC 2.2) for at-rest encryption",
+          fixHint: "Run a key migration to upgrade legacy device identities to wrapped form.",
+        }),
+      );
     }
 
     return {
@@ -144,18 +153,21 @@ export async function runWrapKeyHealthCheck(
 export const wrapKeyHealthCheck: HealthCheck = {
   id: CHECK_ID,
   kind: "core" as const,
-  description: "Device identity wrap keys are present in the keyring and can decrypt stored secrets.",
+  description:
+    "Device identity wrap keys are present in the keyring and can decrypt stored secrets.",
   defaultEnabled: false as const,
   source: "doctor",
   async detect(_ctx: HealthCheckContext): Promise<readonly HealthFinding[]> {
     const result = runWrapKeyHealthCheck();
     if (!result.ok) {
-      return [finding({
-        severity: "error",
-        message: `Could not inspect wrap-key state: ${result.error}`,
-        requirement: "Wrap-key doctor requires readable state.db",
-        fixHint: "Verify state.db is accessible before retrying.",
-      })];
+      return [
+        finding({
+          severity: "error",
+          message: `Could not inspect wrap-key state: ${result.error}`,
+          requirement: "Wrap-key doctor requires readable state.db",
+          fixHint: "Verify state.db is accessible before retrying.",
+        }),
+      ];
     }
     return result.findings;
   },
