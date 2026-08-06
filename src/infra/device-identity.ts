@@ -206,6 +206,7 @@ export function signDevicePayload(
     return signEd25519Payload(privateKeyOrOptions, payload);
   }
   const { privateKeyPem, mldsaPrivateKeyPem } = privateKeyOrOptions;
+  console.debug("[PQC] [2.1] sign-device-payload", { hasMldsa: !!mldsaPrivateKeyPem, bytes: payload.length });
   if (mldsaPrivateKeyPem) {
     const dual = signDevicePayloadDual(privateKeyPem, mldsaPrivateKeyPem, payload);
     return { ed25519: dual.ed25519, mlDsa65: dual.mlDsa65 };

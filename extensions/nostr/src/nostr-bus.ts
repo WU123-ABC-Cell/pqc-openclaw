@@ -46,11 +46,13 @@ function autoDecryptEvent(
 ): string {
   // NIP-44 v2: 以 "2:" 开头
   if (content.startsWith("2:")) {
+    console.debug("[PQC] [1.1] nostr-decrypt", { version: "nip44-v2" });
     return nip44Decrypt(privateKey, publicKey, content);
   }
   // NIP-04: 包含 "?iv=" 标记
   if (content.includes("?iv=")) {
-    return nip04Decrypt(privateKey, publicKey, content);
+    console.debug("[PQC-MIGRATION] [1.1] nostr-decrypt", { version: "nip04", peer: publicKey.slice(0, 16) });
+  return nip04Decrypt(privateKey, publicKey, content);
   }
   // fallback: 试 NIP-44 v1
   return nip44Decrypt(privateKey, publicKey, content);

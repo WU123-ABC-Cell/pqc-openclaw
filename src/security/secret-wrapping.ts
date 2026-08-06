@@ -30,6 +30,7 @@ export function wrapSecret(
   provider: WrappingKeyProvider,
 ): WrappedSecret {
   const { key, keyId } = provider.getActiveKey();
+  console.debug("[PQC] [2.3] wrap-secret", { keyId, keyBytes: key.length });
   if (key.length !== 32) {
     throw new Error(`wrapping key must be 32 bytes, got ${key.length}`);
   }
@@ -50,6 +51,7 @@ export function unwrapSecret(
   provider: WrappingKeyProvider,
 ): Buffer {
   const key = provider.getKeyById(wrapped.keyId);
+  console.debug("[PQC] [2.3] unwrap-secret", { keyId: wrapped.keyId, found: key !== null });
   if (!key) {
     throw new Error(`wrapping key not found: ${wrapped.keyId}`);
   }
