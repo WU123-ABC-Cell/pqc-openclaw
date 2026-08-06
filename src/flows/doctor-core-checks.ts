@@ -51,6 +51,7 @@ import type {
   HealthRepairContext,
 } from "./health-checks.js";
 
+import { wrapKeyHealthCheck } from "../security/wrap-key-health-check.js";
 const BROWSER_CLAWD_PROFILE_RESIDUE_CHECK_ID = "core/doctor/browser-clawd-profile-residue";
 const CODEX_SESSION_ROUTES_CHECK_ID = "core/doctor/codex-session-routes";
 const FINAL_CONFIG_VALIDATION_CHECK_ID = "core/doctor/final-config-validation";
@@ -1329,6 +1330,7 @@ export function createCoreHealthChecks(
     createSkillsReadinessCheck(deps),
     browserClawdProfileResidueCheck,
     finalConfigValidationCheck,
+    wrapKeyHealthCheck,
   ];
 }
 
