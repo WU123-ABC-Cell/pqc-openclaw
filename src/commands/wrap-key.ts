@@ -138,11 +138,8 @@ async function runImport(args: readonly string[], ctx: WrapKeyCommandContext): P
   const importOpts: ImportOptions = { passphrase: pw };
   const provider = getProvider(ctx);
   try {
-    const maybeImport = (provider as unknown as {
-      importKey?: (b: ExportedWrapKey, o: ImportOptions) => { keyId: string; becameActive: boolean };
-    }).importKey;
-    if (typeof maybeImport === "function") {
-      const result = maybeImport.call(provider, parsed, importOpts);
+    if (hasImportKey(provider)) {
+      const result = provider.importKey(parsed, importOpts);
       return { exitCode: 0, stdout: `imported wrap key ${result.keyId} (became active: ${result.becameActive})\n`, stderr: "" };
     }
     importWrapKey(parsed, importOpts);
@@ -165,8 +162,9 @@ async function runRotate(args: readonly string[], ctx: WrapKeyCommandContext): P
   const provider = getProvider(ctx);
   const newKeyId = generateKeyId();
   const newKey = randomBytes(32);
-  const addKey = (provider as unknown as { addKey?: (id: string, key: Buffer) => void }).addKey;
-  if (typeof addKey === "function") addKey.call(provider, newKeyId, newKey);
+  if (hasAddKey(provider)) {
+    provider.addKey(newKeyId, newKey);
+  }
   const newProvider: WrappingKeyProvider = {
     getActiveKey: () => ({ key: newKey, keyId: newKeyId }),
     getKeyById: (id) => (id === newKeyId ? newKey : provider.getKeyById(id)),
@@ -233,4 +231,24 @@ export async function runWrapKeyCommand(
   } catch (err) {
     return { exitCode: 1, stdout: "", stderr: `wrap-key ${sub} failed: ${err instanceof Error ? err.message : String(err)}` };
   }
+}
+
+// --- type guards for optional provider methods (PQC step 2.3.8) ---
+
+interface ProviderWithImportKey {
+  importKey(blob: ExportedWrapKey, options: ImportOptions): { keyId: string; becameActive: boolean };
+}
+
+interface ProviderWithAddKey {
+  addKey(keyId: string, key: Buffer): void;
+}
+
+function hasImportKey(p: WrappingKeyProvider): p is WrappingKeyProvider & ProviderWithImportKey {
+  const fn = (p as Partial<ProviderWithImportKey>).importKey;
+  return typeof fn === "function";
+}
+
+function hasAddKey(p: WrappingKeyProvider): p is WrappingKeyProvider & ProviderWithAddKey {
+  const fn = (p as Partial<ProviderWithAddKey>).addKey;
+  return typeof fn === "function";
 }
