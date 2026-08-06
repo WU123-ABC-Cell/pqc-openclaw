@@ -25,7 +25,7 @@ import {
   verifyDeviceSignatureDual,
 } from "./ed25519-signature.js";
 
-export type { DeviceIdentity, DeviceIdentityWithPqc } from "./device-identity-store.js";
+export type { DeviceIdentity } from "./device-identity-store.js";
 export type DeviceIdentityWithPqc = DeviceIdentity & {
   mldsaPublicKeyPem?: string;
   mldsaPrivateKeyPem?: string;
