@@ -111,7 +111,7 @@ export function resolveFinalDoctorHealthContributions(params: {
     createDoctorHealthContribution({
       id: "doctor:security",
       label: "Security",
-      healthCheckIds: ["core/doctor/security"],
+      healthCheckIds: ["core/doctor/security", "core/doctor/wrap-key"],
       run: runSecurityHealth,
     }),
     createDoctorHealthContribution({
