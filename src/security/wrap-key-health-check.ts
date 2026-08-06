@@ -42,12 +42,12 @@ function finding(params: {
   };
 }
 
-export function runWrapKeyHealthCheck(
+export async function runWrapKeyHealthCheck(
   options: OpenClawStateDatabaseOptions = {},
-): WrapKeyHealthResult {
+): Promise<WrapKeyHealthResult> {
   let database;
   try {
-    database = openExistingOpenClawStateDatabaseReadOnly(options);
+    database = await openExistingOpenClawStateDatabaseReadOnly(options);
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }

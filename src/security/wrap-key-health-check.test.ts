@@ -34,9 +34,9 @@ describe("wrapKeyHealthCheck metadata", () => {
 });
 
 describe("runWrapKeyHealthCheck on missing state.db", () => {
-  it("returns ok=false when state.db does not exist", () => {
-    withFreshDir("openclaw-no-state-", (dir) => {
-      const result = runWrapKeyHealthCheck({ env: { OPENCLAW_STATE_DIR: dir } });
+  it("returns ok=false when state.db does not exist", async () => {
+    await withFreshDir("openclaw-no-state-", async (dir) => {
+      const result = await runWrapKeyHealthCheck({ env: { OPENCLAW_STATE_DIR: dir } });
       expect(result.ok).toBe(false);
       if (!result.ok) {
         expect(typeof result.error).toBe("string");
@@ -45,10 +45,10 @@ describe("runWrapKeyHealthCheck on missing state.db", () => {
     });
   });
 
-  it("returns ok=false when env has no OPENCLAW_STATE_DIR and no default", () => {
-    withFreshDir("openclaw-bare-", (dir) => {
+  it("returns ok=false when env has no OPENCLAW_STATE_DIR and no default", async () => {
+    await withFreshDir("openclaw-bare-", async (dir) => {
       // Cwd is irrelevant; we just want to confirm the call doesn't crash.
-      const result = runWrapKeyHealthCheck({ env: { OPENCLAW_STATE_DIR: dir } });
+      const result = await runWrapKeyHealthCheck({ env: { OPENCLAW_STATE_DIR: dir } });
       expect(result.ok).toBe(false);
     });
   });

@@ -4,7 +4,7 @@ import { boundaryTestFiles } from "./vitest.unit-paths.mjs";
 
 export function createInfraVitestConfig(env?: Record<string, string | undefined>) {
   return createScopedVitestConfig(
-    ["src/flows/doctor-core-checks.test.ts", "src/infra/**/*.test.ts", "src/security/**/*.test.ts"],
+    ["src/commands/wrap-key.test.ts", "src/flows/doctor-core-checks.test.ts", "src/infra/**/*.test.ts", "src/security/**/*.test.ts"],
     {
       dir: "src",
       env,
