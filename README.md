@@ -1,5 +1,16 @@
 # 🦞 OpenClaw — Personal AI Assistant
 
+> ## ⚛️ This repository is a Post-Quantum Hardened Fork of OpenClaw
+>
+> Built on top of upstream OpenClaw, with **NIST FIPS 203 / 204** post-quantum algorithms:
+>
+> - **Transport layer** (Nostr DM / Gateway TLS / APNs): **ML-KEM-768** for key encapsulation
+> - **Device identity signatures**: **Ed25519 + ML-DSA-65** hybrid
+> - **state.db private key encryption**: AES-256-GCM, with wrap keys derived via ML-KEM
+>
+> All upgrades use **hybrid mode**, with classical algorithms retained as fallback — **backward compatible**.
+> See the [PQC Upgrade Whitepaper](docs/security/pqc-whitepaper.md) for the full design.
+
 <p align="center">
     <picture>
         <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/openclaw/openclaw/main/docs/assets/openclaw-banner-light.png">
