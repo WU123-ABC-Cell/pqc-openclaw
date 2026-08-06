@@ -24,6 +24,14 @@ import { createRequire } from "node:module";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import type { ActiveWrappingKey, WrappingKeyProvider } from "./secret-wrapping.js";
+import {
+  exportWrapKey,
+  importWrapKey,
+  type ExportedWrapKey,
+  type ExportOptions,
+  type ImportOptions,
+  WrapKeyBackupError,
+} from "./wrap-key-backup.js";
 
 /** Minimal shape of the @napi-rs/keyring `Entry` class. Optional dep. */
 export interface NapiRsKeyringEntry {
@@ -180,6 +188,40 @@ export class FileKeyringProvider implements WrappingKeyProvider {
     const key = randomBytes(KEY_BYTES);
     writeFileSync(path, key, { mode: KEY_FILE_MODE });
     return key;
+  }
+
+
+  // --- backup / restore (PQC 2.3.5.D) ---
+
+  /** Export the currently active wrap key to a passphrase-encrypted backup blob. */
+  exportActiveKey(options: ExportOptions): ExportedWrapKey {
+    const { key, keyId } = this.getActiveKey();
+    return exportWrapKey(key, keyId, options);
+  }
+
+  /** Export any known wrap key by id. Throws if the key is not in the keyring. */
+  exportKey(keyId: string, options: ExportOptions): ExportedWrapKey {
+    const key = this.getKeyById(keyId);
+    if (!key) {
+      throw new WrapKeyBackupError(`unknown wrap key id: ${keyId}`);
+    }
+    return exportWrapKey(key, keyId, options);
+  }
+
+  /**
+   * Import a backup blob and persist the recovered key to disk.
+   * If the imported keyId matches the current active key id, the key is replaced;
+   * otherwise the key is added as an additional entry (rotation history).
+   */
+  importKey(blob: ExportedWrapKey, options: ImportOptions): { keyId: string; becameActive: boolean } {
+    const { key, keyId } = importWrapKey(blob, options);
+    const path = this.keyPath(keyId);
+    writeFileSync(path, key, { mode: KEY_FILE_MODE });
+    const becameActive = keyId === this.keyId;
+    if (becameActive) {
+      this.persistActiveKeyId(keyId);
+    }
+    return { keyId, becameActive };
   }
 
   private keyPath(keyId: string): string {

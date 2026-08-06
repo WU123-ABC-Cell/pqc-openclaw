@@ -299,7 +299,7 @@ describe("createDefaultKeyringProvider", () => {
     delete process.env.OPENCLAW_WRAP_KEY;
     const dir = mkdtempSync(join(tmpdir(), "openclaw-factory-test-"));
     try {
-      const p = createDefaultKeyringProvider({ dir });
+      const p = createDefaultKeyringProvider({ dir, preferOSKeyring: false });
       expect(p).toBeInstanceOf(FileKeyringProvider);
     } finally {
       rmSync(dir, { recursive: true, force: true });
