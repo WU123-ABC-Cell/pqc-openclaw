@@ -25,6 +25,7 @@
 //     the row so a key rotation can re-encrypt the payload with the new
 //     active key without losing the public side.
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
+import { pqcLog, PQC_EVENT } from "../logging/pqc-log.js";
 
 /** A wrapped secret ready to be stored in SQLite. All bytes are base64url. */
 export interface WrappedSecret {
@@ -79,6 +80,7 @@ export function wrapSecret(
     // misconfigured; refuse to encrypt rather than let GCM truncate or
     // pad silently. The message names the actual size so operators can
     // diagnose.
+    pqcLog.error(PQC_EVENT.WrapSecret, { status: "fail", keyId, detail: "wrong-size key" });
     throw new Error(
       `wrapSecret: wrapping key must be ${REQUIRED_KEY_BYTES} bytes (AES-256), got ${key.length}`,
     );
@@ -91,10 +93,12 @@ export function wrapSecret(
     // GCM's auth tag is always 16 bytes; if Node ever returns something
     // different, we'd be storing a partial tag and any verification
     // would silently weaken. Refuse the write.
+    pqcLog.error(PQC_EVENT.WrapSecret, { status: "fail", keyId, detail: "wrong-size auth tag" });
     throw new Error(
       `wrapSecret: AES-256-GCM auth tag must be ${REQUIRED_AUTH_TAG_BYTES} bytes, got ${authTag.length}`,
     );
   }
+  pqcLog.info(PQC_EVENT.WrapSecret, { status: "ok", keyId, byteLength: plaintext.length });
   return {
     ciphertext: ciphertext.toString("base64url"),
     iv: iv.toString("base64url"),
@@ -116,9 +120,11 @@ export function unwrapSecret(
 ): Buffer {
   const key = provider.getKeyById(wrapped.keyId);
   if (!key) {
+    pqcLog.error(PQC_EVENT.UnwrapSecret, { status: "fail", keyId: wrapped.keyId, detail: "key not found" });
     throw new Error(`unwrapSecret: wrapping key not found: ${wrapped.keyId}`);
   }
   if (key.length !== REQUIRED_KEY_BYTES) {
+    pqcLog.error(PQC_EVENT.UnwrapSecret, { status: "fail", keyId: wrapped.keyId, detail: "wrong-size key" });
     throw new Error(
       `unwrapSecret: wrapping key must be ${REQUIRED_KEY_BYTES} bytes (AES-256), got ${key.length}`,
     );
@@ -129,21 +135,27 @@ export function unwrapSecret(
   const authTag = Buffer.from(wrapped.authTag, "base64url");
   const ciphertext = Buffer.from(wrapped.ciphertext, "base64url");
   if (iv.length !== REQUIRED_IV_BYTES) {
+    pqcLog.error(PQC_EVENT.UnwrapSecret, { status: "fail", keyId: wrapped.keyId, detail: "wrong-size iv" });
     throw new Error(
       `unwrapSecret: iv must be ${REQUIRED_IV_BYTES} bytes, got ${iv.length}`,
     );
   }
   if (authTag.length !== REQUIRED_AUTH_TAG_BYTES) {
+    pqcLog.error(PQC_EVENT.UnwrapSecret, { status: "fail", keyId: wrapped.keyId, detail: "wrong-size auth tag" });
     throw new Error(
       `unwrapSecret: authTag must be ${REQUIRED_AUTH_TAG_BYTES} bytes, got ${authTag.length}`,
     );
   }
   const decipher = createDecipheriv("aes-256-gcm", key, iv);
   decipher.setAuthTag(authTag);
-  // GCM's `final()` runs the authentication check. Any tamper in
-  // ciphertext / iv / authTag / key throws here — that is the canonical
-  // failure path and is the one the test suite asserts.
-  return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+  try {
+    const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+    pqcLog.info(PQC_EVENT.UnwrapSecret, { status: "ok", keyId: wrapped.keyId, byteLength: plaintext.length });
+    return plaintext;
+  } catch (error) {
+    pqcLog.error(PQC_EVENT.UnwrapSecret, { status: "fail", keyId: wrapped.keyId, detail: "gcm auth failed" });
+    throw error;
+  }
 }
 
 /** Flatten a `WrappedSecret` into a single base64url-encoded JSON string.

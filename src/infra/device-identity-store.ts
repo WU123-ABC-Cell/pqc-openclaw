@@ -39,6 +39,7 @@ import {
   type WrappingKeyProvider,
   wrapSecret,
 } from "../security/secret-wrapping.js";
+import { pqcLog, PQC_EVENT } from "../logging/pqc-log.js";
 import {
   decodeMlDsa65PublicKey,
   decodeMlDsa65SecretKey,
@@ -162,6 +163,11 @@ export function generateStoredDeviceIdentity(
     // envelope is independent of the wire format. M5 stores the result
     // as a base64url JSON BLOB in `mldsa_private_key_wrapped`.
     const wrapped = wrapSecret(Buffer.from(secretKey), wrappingKeyProvider);
+    pqcLog.info(PQC_EVENT.DeviceIdentity, {
+      status: "ok",
+      detail: "generated wrapped identity",
+      keyId: wrapped.keyId,
+    });
     return {
       deviceId,
       publicKeyPem,
@@ -173,6 +179,10 @@ export function generateStoredDeviceIdentity(
     };
   }
   const privateKeyPem = encodeMlDsa65SecretKey(secretKey);
+  pqcLog.warn(PQC_EVENT.DeviceIdentity, {
+    status: "ok",
+    detail: "generated plaintext identity (no keyring)",
+  });
   return {
     deviceId,
     publicKeyPem,
@@ -314,8 +324,20 @@ function rowToStoredIdentity(
     try {
       rawSecret = unwrapSecret(wrapped, wrappingKeyProvider);
     } catch (error) {
+      pqcLog.error(PQC_EVENT.DeviceIdentity, {
+        status: "fail",
+        identityKey: expectedIdentityKey,
+        keyId: wrapKeyId,
+        detail: "unwrap failed for stored identity",
+      });
       throw invalidStoredIdentityError(expectedIdentityKey, error);
     }
+    pqcLog.info(PQC_EVENT.DeviceIdentity, {
+      status: "ok",
+      identityKey: expectedIdentityKey,
+      keyId: wrapKeyId,
+      detail: "unwrapped stored identity",
+    });
     if (rawSecret.length !== MLDSA65_SECRET_KEY_LENGTH) {
       throw invalidStoredIdentityError(
         expectedIdentityKey,
