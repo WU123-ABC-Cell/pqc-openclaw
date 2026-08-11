@@ -1,5 +1,15 @@
-// Gateway/device Ed25519 identity API backed by canonical shared SQLite state.
-import crypto from "node:crypto";
+// Gateway/device ML-DSA-65 (FIPS 204) identity API backed by canonical shared
+// SQLite state.
+//
+// PQC fork: every sign/verify/fingerprint call below uses ML-DSA-65 — there
+// is no Ed25519 fallback by design (per the fork's PQC direction). The Ed25519
+// helpers in ed25519-signature.ts are kept for the dual-sign transitional API
+// only and are NOT exposed here.
+//
+// `DeviceIdentity.publicKeyPem` / `privateKeyPem` carry ML-DSA-65 material
+// tagged with the MLDSA65-PUBLIC-KEY: / MLDSA65-SECRET-KEY: wire prefix (see
+// mldsa65-key-storage.ts). They are stored verbatim in the corresponding
+// SQLite TEXT columns and round-trip without conversion.
 import fs from "node:fs";
 import path from "node:path";
 import { resolveStateDir } from "../config/paths.js";
@@ -16,11 +26,18 @@ import {
   type StoredDeviceIdentity,
 } from "./device-identity-store.js";
 import {
-  normalizeEd25519PublicKeyBase64Url,
-  publicKeyRawBase64UrlFromEd25519Pem,
-  signEd25519Payload,
-  verifyEd25519Signature,
-} from "./ed25519-signature.js";
+  decodeMlDsa65PublicKey,
+  decodeMlDsa65SecretKey,
+  encodeMlDsa65PublicKey,
+  encodeMlDsa65SecretKey,
+  fingerprintMlDsa65PublicKey,
+  isMlDsa65PublicKey,
+  isMlDsa65SecretKey,
+  MLDSA65_PUBLIC_KEY_LENGTH,
+  MLDSA65_SECRET_KEY_LENGTH,
+  signMlDsa65Payload as signMlDsa65PayloadRaw,
+  verifyMlDsa65Signature as verifyMlDsa65SignatureRaw,
+} from "./mldsa65-key-storage.js";
 import { pruneMapToMaxSize } from "./map-size.js";
 
 export type { DeviceIdentity } from "./device-identity-store.js";
@@ -178,40 +195,88 @@ export function loadDeviceIdentityIfPresent(
   });
 }
 
-/** Sign a UTF-8 payload with a PEM Ed25519 private key and return base64url bytes. */
+/** Sign a UTF-8 payload with an ML-DSA-65 secret key (the `MLDSA65-SECRET-KEY:`
+ *  prefixed base64url string stored in `DeviceIdentity.privateKeyPem`).
+ *  Returns a base64url-encoded 3309-byte FIPS 204 signature. */
 export function signDevicePayload(privateKeyPem: string, payload: string): string {
-  return signEd25519Payload(privateKeyPem, payload);
+  if (!isMlDsa65SecretKey(privateKeyPem)) {
+    throw new Error(
+      "Device identity private key is not in MLDSA65-SECRET-KEY: format; " +
+        "this fork stores ML-DSA-65 only (no Ed25519 fallback).",
+    );
+  }
+  const secretKey = decodeMlDsa65SecretKey(privateKeyPem);
+  return signMlDsa65PayloadRaw(secretKey, payload);
 }
 
-/** Normalize PEM or raw base64/base64url public keys to canonical raw base64url bytes. */
+/** Normalize the MLDSA65-PUBLIC-KEY: prefixed string to canonical raw 1952-byte
+ *  public key, then base64url-encode it. Returns null on any decode failure. */
 export function normalizeDevicePublicKeyBase64Url(publicKey: string): string | null {
-  return normalizeEd25519PublicKeyBase64Url(publicKey);
-}
-
-/** Derive the stable device id from PEM or raw base64/base64url public key material. */
-export function deriveDeviceIdFromPublicKey(publicKey: string): string | null {
   try {
-    const normalized = normalizeEd25519PublicKeyBase64Url(publicKey);
-    if (!normalized) {
+    if (!isMlDsa65PublicKey(publicKey)) {
       return null;
     }
-    const raw = Buffer.from(normalized, "base64url");
-    return crypto.createHash("sha256").update(raw).digest("hex");
+    const raw = decodeMlDsa65PublicKey(publicKey);
+    return Buffer.from(raw).toString("base64url");
   } catch {
     return null;
   }
 }
 
-/** Export a PEM Ed25519 public key as canonical raw base64url bytes. */
-export function publicKeyRawBase64UrlFromPem(publicKeyPem: string): string {
-  return publicKeyRawBase64UrlFromEd25519Pem(publicKeyPem);
+/** Derive the stable 64-hex-char device id (SHA-256 of the raw 1952-byte
+ *  ML-DSA-65 public key) from an MLDSA65-PUBLIC-KEY: prefixed string. */
+export function deriveDeviceIdFromPublicKey(publicKey: string): string | null {
+  try {
+    if (!isMlDsa65PublicKey(publicKey)) {
+      return null;
+    }
+    const raw = decodeMlDsa65PublicKey(publicKey);
+    return fingerprintMlDsa65PublicKey(raw);
+  } catch {
+    return null;
+  }
 }
 
-/** Verify a UTF-8 payload signature against PEM or raw base64/base64url public key material. */
+/** Export an MLDSA65-PUBLIC-KEY: prefixed string's raw 1952-byte public key
+ *  as canonical base64url bytes. Returns null on any decode failure. */
+export function publicKeyRawBase64UrlFromPem(publicKeyPem: string): string | null {
+  try {
+    if (!isMlDsa65PublicKey(publicKeyPem)) {
+      return null;
+    }
+    const raw = decodeMlDsa65PublicKey(publicKeyPem);
+    return Buffer.from(raw).toString("base64url");
+  } catch {
+    return null;
+  }
+}
+
+/** Verify a base64url ML-DSA-65 signature against an MLDSA65-PUBLIC-KEY:
+ *  prefixed public key. Returns false on any decode/verify failure. */
 export function verifyDeviceSignature(
   publicKey: string,
   payload: string,
   signatureBase64Url: string,
 ): boolean {
-  return verifyEd25519Signature({ publicKey, payload, signatureBase64Url });
+  return verifyMlDsa65SignatureRaw({
+    publicKey,
+    payload,
+    signatureBase64Url,
+  });
 }
+
+/** Re-export the canonical ML-DSA-65 constants and prefix helpers so callers
+ *  that previously imported them from this module keep working. */
+export {
+  MLDSA65_PUBLIC_KEY_LENGTH,
+  MLDSA65_SECRET_KEY_LENGTH,
+  isMlDsa65PublicKey,
+  isMlDsa65SecretKey,
+  encodeMlDsa65PublicKey,
+  encodeMlDsa65SecretKey,
+  decodeMlDsa65PublicKey,
+  decodeMlDsa65SecretKey,
+  fingerprintMlDsa65PublicKey,
+  signMlDsa65PayloadRaw as signMlDsa65PayloadCanonical,
+  verifyMlDsa65SignatureRaw as verifyMlDsa65SignatureCanonical,
+} from "./mldsa65-key-storage.js";
