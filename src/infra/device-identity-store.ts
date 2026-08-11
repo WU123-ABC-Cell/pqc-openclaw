@@ -1,5 +1,9 @@
-// Canonical SQLite storage for gateway/device Ed25519 identities.
-import crypto from "node:crypto";
+// Canonical SQLite storage for the fork's post-quantum device identities.
+//
+// The PQC fork replaces Ed25519 with ML-DSA-65 (FIPS 204, parameter set 6).
+// Key material is stored as base64url-encoded raw bytes inside the existing
+// public_key_pem / private_key_pem columns, prefixed with a stable tag so the
+// SQL schema and downstream code keep working without an extra column.
 import fs from "node:fs";
 import path from "node:path";
 import type { Insertable, Selectable } from "kysely";
@@ -12,9 +16,17 @@ import {
 } from "../state/openclaw-state-db.js";
 import { resolveOpenClawStateSqlitePath } from "../state/openclaw-state-db.paths.js";
 import {
-  deriveCanonicalEd25519PrivateKeyRaw,
-  deriveCanonicalEd25519PublicKeyRaw,
-} from "./ed25519-signature.js";
+  decodeMlDsa65PublicKey,
+  decodeMlDsa65SecretKey,
+  encodeMlDsa65PublicKey,
+  encodeMlDsa65SecretKey,
+  fingerprintMlDsa65PublicKey,
+  generateMlDsa65KeyPair,
+  isMlDsa65PublicKey,
+  isMlDsa65SecretKey,
+  MLDSA65_PUBLIC_KEY_LENGTH,
+  MLDSA65_SECRET_KEY_LENGTH,
+} from "./mldsa65-key-storage.js";
 import {
   executeSqliteQuerySync,
   executeSqliteQueryTakeFirstSync,
@@ -72,37 +84,32 @@ function invalidStoredIdentityError(
 }
 
 function fingerprintPublicKey(publicKeyPem: string): string {
-  const raw = deriveCanonicalEd25519PublicKeyRaw(publicKeyPem);
-  return crypto.createHash("sha256").update(raw).digest("hex");
+  const raw = decodeMlDsa65PublicKey(publicKeyPem);
+  return fingerprintMlDsa65PublicKey(raw);
 }
 
-/** Generate canonical Ed25519 material before entering a synchronous write transaction. */
+/** Generate canonical ML-DSA-65 material before entering a synchronous write transaction. */
 export function generateStoredDeviceIdentity(now = Date.now()): StoredDeviceIdentity {
-  const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
-  const publicKeyPem = publicKey.export({ type: "spki", format: "pem" });
-  const privateKeyPem = privateKey.export({ type: "pkcs8", format: "pem" });
+  const { publicKey, secretKey } = generateMlDsa65KeyPair();
   return {
-    deviceId: fingerprintPublicKey(publicKeyPem),
-    publicKeyPem,
-    privateKeyPem,
+    deviceId: fingerprintMlDsa65PublicKey(publicKey),
+    publicKeyPem: encodeMlDsa65PublicKey(publicKey),
+    privateKeyPem: encodeMlDsa65SecretKey(secretKey),
     createdAtMs: now,
   };
 }
 
 function keyPairMatches(publicKeyPem: string, privateKeyPem: string): boolean {
   try {
-    deriveCanonicalEd25519PublicKeyRaw(publicKeyPem);
-    deriveCanonicalEd25519PrivateKeyRaw(privateKeyPem);
-    const publicKey = crypto.createPublicKey(publicKeyPem);
-    const privateKey = crypto.createPrivateKey(privateKeyPem);
-    if (publicKey.asymmetricKeyType !== "ed25519" || privateKey.asymmetricKeyType !== "ed25519") {
+    if (!isMlDsa65PublicKey(publicKeyPem) || !isMlDsa65SecretKey(privateKeyPem)) {
       return false;
     }
-    const derivedPublicKey = crypto
-      .createPublicKey(privateKeyPem)
-      .export({ type: "spki", format: "der" });
-    const storedPublicKey = publicKey.export({ type: "spki", format: "der" });
-    return Buffer.from(derivedPublicKey).equals(Buffer.from(storedPublicKey));
+    const publicKeyRaw = decodeMlDsa65PublicKey(publicKeyPem);
+    const privateKeyRaw = decodeMlDsa65SecretKey(privateKeyPem);
+    return (
+      publicKeyRaw.length === MLDSA65_PUBLIC_KEY_LENGTH &&
+      privateKeyRaw.length === MLDSA65_SECRET_KEY_LENGTH
+    );
   } catch {
     return false;
   }
@@ -172,8 +179,9 @@ function salvageStoredIdentityRow(
   expectedIdentityKey: string,
   repairedAtMs: number,
 ): StoredDeviceIdentity | null {
-  // Device ids, timestamps, and PEM framing are repairable metadata. Preserve matching
-  // Ed25519 key bytes because rotating them would invalidate pairing and stored auth.
+  // The PQC fork only stores one algorithm class (ML-DSA-65). Salvage is limited to
+  // repairing the device_id fingerprint and timestamp; raw key bytes are kept
+  // byte-for-byte because rotating them would invalidate pairing and stored auth.
   if (
     row.identity_key !== expectedIdentityKey ||
     typeof row.public_key_pem !== "string" ||
@@ -181,26 +189,24 @@ function salvageStoredIdentityRow(
   ) {
     return null;
   }
+  if (!isMlDsa65PublicKey(row.public_key_pem) || !isMlDsa65SecretKey(row.private_key_pem)) {
+    return null;
+  }
   try {
-    const publicKey = crypto.createPublicKey(row.public_key_pem);
-    const privateKey = crypto.createPrivateKey(row.private_key_pem);
-    if (publicKey.asymmetricKeyType !== "ed25519" || privateKey.asymmetricKeyType !== "ed25519") {
-      return null;
-    }
-    const canonicalPublicKeyPem = publicKey.export({ type: "spki", format: "pem" });
-    const canonicalPrivateKeyPem = privateKey.export({ type: "pkcs8", format: "pem" });
-    const derivedPublicKeyPem = crypto
-      .createPublicKey(canonicalPrivateKeyPem)
-      .export({ type: "spki", format: "pem" });
-    if (derivedPublicKeyPem !== canonicalPublicKeyPem) {
+    const publicKeyRaw = decodeMlDsa65PublicKey(row.public_key_pem);
+    const privateKeyRaw = decodeMlDsa65SecretKey(row.private_key_pem);
+    if (
+      publicKeyRaw.length !== MLDSA65_PUBLIC_KEY_LENGTH ||
+      privateKeyRaw.length !== MLDSA65_SECRET_KEY_LENGTH
+    ) {
       return null;
     }
     const createdAtMs =
       parseCreatedAtMs(row.created_at_ms) ?? parseCreatedAtMs(row.updated_at_ms) ?? repairedAtMs;
     const salvaged = {
-      deviceId: fingerprintPublicKey(canonicalPublicKeyPem),
-      publicKeyPem: canonicalPublicKeyPem,
-      privateKeyPem: canonicalPrivateKeyPem,
+      deviceId: fingerprintMlDsa65PublicKey(publicKeyRaw),
+      publicKeyPem: row.public_key_pem,
+      privateKeyPem: row.private_key_pem,
       createdAtMs,
     };
     validateStoredDeviceIdentity(salvaged, expectedIdentityKey);
