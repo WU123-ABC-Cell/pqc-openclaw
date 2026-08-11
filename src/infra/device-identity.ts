@@ -28,13 +28,9 @@ import {
 import {
   decodeMlDsa65PublicKey,
   decodeMlDsa65SecretKey,
-  encodeMlDsa65PublicKey,
-  encodeMlDsa65SecretKey,
   fingerprintMlDsa65PublicKey,
   isMlDsa65PublicKey,
   isMlDsa65SecretKey,
-  MLDSA65_PUBLIC_KEY_LENGTH,
-  MLDSA65_SECRET_KEY_LENGTH,
   signMlDsa65Payload as signMlDsa65PayloadRaw,
   verifyMlDsa65Signature as verifyMlDsa65SignatureRaw,
 } from "./mldsa65-key-storage.js";
@@ -238,8 +234,26 @@ export function deriveDeviceIdFromPublicKey(publicKey: string): string | null {
 }
 
 /** Export an MLDSA65-PUBLIC-KEY: prefixed string's raw 1952-byte public key
- *  as canonical base64url bytes. Returns null on any decode failure. */
-export function publicKeyRawBase64UrlFromPem(publicKeyPem: string): string | null {
+ *  as canonical base64url bytes. Throws on any decode failure or non-ML-DSA-65
+ *  input — the runtime path that loads `DeviceIdentity` already enforces the
+ *  MLDSA65-PUBLIC-KEY: prefix, so this is the strict post-validity helper.
+ *  For untrusted / wire-format input, use `tryDecodeMlDsa65PublicKeyRaw` below
+ *  which returns null on failure. */
+export function publicKeyRawBase64UrlFromPem(publicKeyPem: string): string {
+  if (!isMlDsa65PublicKey(publicKeyPem)) {
+    throw new Error(
+      "publicKeyRawBase64UrlFromPem: input is not an MLDSA65-PUBLIC-KEY: prefixed string; " +
+        "this fork stores ML-DSA-65 only (no Ed25519 fallback).",
+    );
+  }
+  const raw = decodeMlDsa65PublicKey(publicKeyPem);
+  return Buffer.from(raw).toString("base64url");
+}
+
+/** Defensive variant of `publicKeyRawBase64UrlFromPem` that returns null on
+ *  any decode failure. Use for untrusted / wire-format input where the
+ *  caller wants to inspect / fail-closed without throwing. */
+export function tryDecodeMlDsa65PublicKeyRaw(publicKeyPem: string): string | null {
   try {
     if (!isMlDsa65PublicKey(publicKeyPem)) {
       return null;
@@ -277,6 +291,6 @@ export {
   decodeMlDsa65PublicKey,
   decodeMlDsa65SecretKey,
   fingerprintMlDsa65PublicKey,
-  signMlDsa65PayloadRaw as signMlDsa65PayloadCanonical,
-  verifyMlDsa65SignatureRaw as verifyMlDsa65SignatureCanonical,
+  signMlDsa65Payload as signMlDsa65PayloadCanonical,
+  verifyMlDsa65Signature as verifyMlDsa65SignatureCanonical,
 } from "./mldsa65-key-storage.js";

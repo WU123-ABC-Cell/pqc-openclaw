@@ -112,11 +112,11 @@ minimumReleaseAgeExclude:
   - "sqlite-vec-*"
   - "rastermill"
   - "clawpdf"
-      - '@noble/post-quantum'
-      - '@noble/ciphers'
-      - '@noble/curves'
-      - '@noble/hashes'
-      - '@noble/ed25519'
+  - "@noble/post-quantum"
+  - "@noble/ciphers"
+  - "@noble/curves"
+  - "@noble/hashes"
+  - "@noble/ed25519"
 
 nodeLinker: hoisted
 # GWTs share node_modules; script commands must not reconcile that shared install.

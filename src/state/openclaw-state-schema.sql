@@ -541,7 +541,19 @@ CREATE TABLE IF NOT EXISTS device_identities (
   public_key_pem TEXT NOT NULL,
   private_key_pem TEXT NOT NULL,
   created_at_ms INTEGER NOT NULL,
-  updated_at_ms INTEGER NOT NULL
+  updated_at_ms INTEGER NOT NULL,
+  -- ML-DSA-65 (FIPS 204) device identity columns. PQC 2.1.3 + 2.2.1.
+  -- `mldsa_public_key_pem` / `mldsa_private_key_pem` mirror the legacy Ed25519
+  -- PEM columns for the post-quantum identity so dual signing can read both
+  -- materials in one row. `mldsa_private_key_wrapped` holds the AES-256-GCM
+  -- ciphertext + IV + tag produced by the wrap-key path; when set, the plaintext
+  -- `mldsa_private_key_pem` MUST be NULL. `mldsa_private_key_wrap_key_id` names
+  -- the keyring key that sealed the wrapped payload, so the row can be
+  -- re-encrypted under a rotated key without losing the public side.
+  mldsa_public_key_pem TEXT,
+  mldsa_private_key_pem TEXT,
+  mldsa_private_key_wrapped BLOB,
+  mldsa_private_key_wrap_key_id TEXT
 ) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_device_identities_device

@@ -303,6 +303,13 @@ export function ensureAdditiveStateColumns(db: DatabaseSync): void {
     "current_conversation_bindings",
     "conversation_kind TEXT NOT NULL DEFAULT 'channel'",
   );
+  // PQC 2.1.3 + 2.2.1: ML-DSA-65 device identity columns are additive, so
+  // they stay NULL on legacy rows until the device-identity store migrates
+  // them. Downgraded builds ignore the columns and keep working.
+  ensureColumn(db, "device_identities", "mldsa_public_key_pem TEXT");
+  ensureColumn(db, "device_identities", "mldsa_private_key_pem TEXT");
+  ensureColumn(db, "device_identities", "mldsa_private_key_wrapped BLOB");
+  ensureColumn(db, "device_identities", "mldsa_private_key_wrap_key_id TEXT");
   ensureColumn(db, "device_bootstrap_tokens", "pending_profile_json TEXT");
   ensureColumn(db, "gateway_restart_handoff", "restart_trace_started_at INTEGER");
   ensureColumn(db, "gateway_restart_handoff", "restart_trace_last_at INTEGER");
