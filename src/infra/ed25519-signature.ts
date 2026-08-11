@@ -218,10 +218,15 @@ export function verifyEd25519SignatureBytes(params: {
 // ---------------------------------------------------------------------------
 // PQC bridge: dual Ed25519 + ML-DSA-65 sign/verify.
 //
-// During the Ed25519 → ML-DSA-65 cutover the device may publish two signatures
-// for the same payload so old peers can verify one and new peers can verify the
-// other. New code paths should sign with ML-DSA-65 only — these helpers exist
-// purely to make the cutover ergonomic.
+// The fork's PQC device identity is ML-DSA-65 only. The dual-sign API below
+// exists for transitional interop with older Ed25519-only peers during a
+// cutover window. New code paths should sign with ML-DSA-65 only — these
+// helpers exist purely to make the cutover ergonomic.
+//
+// The signature types differ from the raw-bytes API:
+//   - Ed25519 helpers take SPKI/PKCS8 PEM (Node native crypto).
+//   - ML-DSA-65 helpers take raw 4032-byte secret bytes (from the
+//     MLDSA65-SECRET-KEY: prefixed string produced by mldsa65-key-storage).
 // ---------------------------------------------------------------------------
 
 export type DualDeviceSignatures = {

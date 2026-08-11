@@ -4,6 +4,15 @@
 // It deliberately avoids any Ed25519 fallback so callers cannot accidentally downgrade
 // to a classical algorithm at runtime.
 //
+// Why @noble and not Node native crypto?
+//   Node 22's `node:crypto` does NOT expose ML-DSA-65 in its JS API even though the
+//   bundled OpenSSL 3.5+ has the primitives. ML-DSA-65 key generation / signing
+//   was added to Node's JS API in v24.6.0 (see OpenSSL v26 docs). Since the
+//   fork's runtime is pinned to Node 22.x (matching the upstream OpenClaw 2026.7.2
+//   LTS), the only FIPS 204 implementation available in pure JS is @noble/post-quantum.
+//   We accept the small supply-chain surface in exchange for staying on Node 22
+//   and matching what the whitepaper (§2.1, FIPS 204) requires.
+//
 // Storage format: the public/secret-key raw bytes are base64url-encoded and tagged
 // with a stable, parseable prefix ("MLDSA65-PUBLIC-KEY:" / "MLDSA65-SECRET-KEY:").
 // The prefix is what the device-identity SQLite store round-trips through, so a
@@ -42,7 +51,10 @@ function assertLength(actual: number, expected: number, label: string): void {
   }
 }
 
-/** Generate a fresh ML-DSA-65 keypair. @noble uses OS entropy by default (FIPS 204 §5.3). */
+/**
+ * Generate a fresh ML-DSA-65 keypair. @noble uses OS entropy by default
+ * (FIPS 204 §5.3 hedged signing path; the entropy is consumed at sign time, not keygen).
+ */
 export function generateMlDsa65KeyPair(): MlDsa65KeyPair {
   const kp = ml_dsa65.keygen();
   assertLength(kp.publicKey.length, MLDSA65_PUBLIC_KEY_LENGTH, "public key");

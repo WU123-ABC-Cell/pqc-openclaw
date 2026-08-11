@@ -4,6 +4,10 @@
 // Key material is stored as base64url-encoded raw bytes inside the existing
 // public_key_pem / private_key_pem columns, prefixed with a stable tag so the
 // SQL schema and downstream code keep working without an extra column.
+//
+// The MLDSA65-PUBLIC-KEY: / MLDSA65-SECRET-KEY: wire format lets the same
+// `text PKCS8/SEC1 PEM` columns hold either Ed25519 PEM (legacy) or
+// ML-DSA-65 tagged base64url, distinguished unambiguously by the prefix.
 import fs from "node:fs";
 import path from "node:path";
 import type { Insertable, Selectable } from "kysely";
