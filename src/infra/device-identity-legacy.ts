@@ -41,11 +41,20 @@ function normalizeLegacyKeyPair(params: {
     const privateKeyPem = ed25519PrivateKeyPemFromRaw(privateKeyRaw);
     // Legacy deviceId was derived metadata. Preserve the authoritative key bytes and
     // recompute the fingerprint so stale metadata never rotates a shipped identity.
-    const normalized = {
+    const normalized: NormalizedLegacyDeviceIdentity = {
       deviceId: fingerprintPublicKey(publicKeyPem),
       publicKeyPem,
       privateKeyPem,
       createdAtMs: params.createdAtMs,
+      // Ed25519 legacy payloads do not carry ML-DSA-65 / wrap material;
+      // mark the new-shape fields as null so the StoredDeviceIdentity
+      // contract still type-checks. The legacy migration path itself is
+      // gated by whitepaper 2.1 (Ed25519 removed), so this branch only
+      // fires when Doctor is reconstructing a canonical row from a
+      // legacy JSON for read-only inspection.
+      mldsaPrivateKeyPem: null,
+      mldsaPrivateKeyWrapped: null,
+      mldsaPrivateKeyWrapKeyId: null,
     };
     validateStoredDeviceIdentity(normalized);
     return normalized;

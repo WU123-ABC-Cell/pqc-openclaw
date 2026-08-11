@@ -120,6 +120,12 @@ function classifyCanonicalRow(
         publicKeyPem: row.public_key_pem,
         privateKeyPem: row.private_key_pem,
         createdAtMs: row.created_at_ms,
+        // Legacy / non-ML-DSA-65 rows do not carry wrap material; the
+        // new-shape fields default to null so the StoredDeviceIdentity
+        // contract still type-checks.
+        mldsaPrivateKeyPem: null,
+        mldsaPrivateKeyWrapped: null,
+        mldsaPrivateKeyWrapKeyId: null,
       },
       row.identity_key,
     );
