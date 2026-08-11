@@ -1,0 +1,311 @@
+// Wrapping-key providers for the device-identity wrap-key feature
+// (PQC whitepaper 2.2.5 + 2.2.5.A + 2.2.5.B).
+//
+// This module owns the read-side of the wrap-key: where does the
+// 32-byte AES-256 key live? M5's secret-wrapping.ts is the envelope;
+// this file decides which secret goes into it. The contract is the
+// `WrappingKeyProvider` interface (re-declared here as `KeyringProvider`
+// for the file / env / OS flavours; the same shape also lives inline
+// in secret-wrapping.ts so that module can stay self-contained).
+//
+// Implementations:
+//   * file-keyring: read a base64url-encoded 32-byte key from a file
+//     at a known path. File permissions are checked (0600 on POSIX);
+//     loose permissions are a config error.
+//   * env-keyring: read a base64url-encoded 32-byte key from an env var.
+//     Intended for CI / container deployments; not as a long-term store.
+//   * os-keyring: a stub here; the real implementation lives in
+//     `os-keyring.ts` and uses @napi-rs/keyring when available. The
+//     split keeps this file dependency-free so tests run on any
+//     platform without native modules.
+//
+// Compose the providers with `CompositeKeyring` (M6's "auto-inject
+// default keyring", whitepaper 2.2.5.A): try the active source, fall
+// back to the others in order.
+import { randomBytes } from "node:crypto";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { isAbsolute } from "node:path";
+import { OsKeyring } from "./os-keyring.js";
+
+/** Stable id of a keyring entry. The wrap envelope records this id so
+ *  a rotation can re-encrypt the payload with the new active key
+ *  without losing the public side. */
+export type KeyId = string;
+
+/** 32-byte AES-256 key plus the id it was looked up under. */
+export interface ActiveWrappingKey {
+  key: Buffer;
+  keyId: KeyId;
+}
+
+/** Contract that all keyring providers satisfy. The same shape is
+ *  duplicated in `secret-wrapping.ts` to keep that module dependency-
+ *  free. If you add a method here, mirror it in the inline interface
+ *  in `secret-wrapping.ts`. */
+export interface KeyringProvider {
+  getActiveKey(): ActiveWrappingKey;
+  getKeyById(keyId: KeyId): Buffer | null;
+}
+
+/** Decode a 32-byte AES-256 key from a base64url (or base64) string.
+ *  Throws on wrong length or malformed encoding. The two encodings are
+ *  accepted so operators can paste a key from either format; the
+ *  wire format on disk / in env is always base64url by convention. */
+export function decodeBase64UrlKey(encoded: string, label: string): Buffer {
+  if (typeof encoded !== "string" || encoded.length === 0) {
+    throw new Error(`keyring: ${label} must be a non-empty string`);
+  }
+  // Buffer.from with "base64url" is permissive; it accepts both padded
+  // and unpadded forms. We then check the byte length.
+  const key = Buffer.from(encoded, "base64url");
+  if (key.length !== 32) {
+    throw new Error(
+      `keyring: ${label} must decode to exactly 32 bytes (AES-256), got ${key.length}`,
+    );
+  }
+  return key;
+}
+
+/** Encode a 32-byte buffer as base64url (no padding). The wire format
+ *  for file-keyring and env-keyring. */
+export function encodeBase64UrlKey(key: Buffer): string {
+  if (key.length !== 32) {
+    throw new Error(`keyring: key must be 32 bytes (AES-256), got ${key.length}`);
+  }
+  return Buffer.from(key).toString("base64url");
+}
+
+/** Generate a fresh 32-byte key. Used by `openclaw wrap-key` (M8) and
+ *  by tests. Not used by the read path. */
+export function generateWrappingKey(): Buffer {
+  return randomBytes(32);
+}
+
+/** File-backed keyring. Reads a base64url-encoded 32-byte key from
+ *  `keyPath`. POSIX file permissions are checked (must be 0600 or 0400
+ *  after following the owner's umask); broader permissions are a
+ *  config error because the key is a plaintext secret. */
+export class FileKeyring implements KeyringProvider {
+  private cachedKey: Buffer | null = null;
+
+  constructor(
+    private readonly keyPath: string,
+    private readonly keyId: KeyId = "file-keyring",
+  ) {
+    if (typeof keyPath !== "string" || keyPath.length === 0) {
+      throw new Error("FileKeyring: keyPath must be a non-empty string");
+    }
+    if (!isAbsolute(keyPath)) {
+      // Refuse relative paths so a CWD change cannot silently move the
+      // key file out from under us.
+      throw new Error(`FileKeyring: keyPath must be absolute, got ${keyPath}`);
+    }
+  }
+
+  /** Resolve the on-disk path (used for diagnostics and tests). */
+  getKeyPath(): string {
+    return this.keyPath;
+  }
+
+  getActiveKey(): ActiveWrappingKey {
+    return { key: this.readKey(), keyId: this.keyId };
+  }
+
+  getKeyById(keyId: KeyId): Buffer | null {
+    if (keyId !== this.keyId) {
+      return null;
+    }
+    return this.readKey();
+  }
+
+  private readKey(): Buffer {
+    if (this.cachedKey) {
+      // The cache exists so repeated wrap / unwrap calls in one
+      // process lifetime don't re-read the file. Operators who want
+      // rotation call `invalidate()` after swapping the file.
+      return this.cachedKey;
+    }
+    if (!existsSync(this.keyPath)) {
+      throw new Error(`FileKeyring: key file not found: ${this.keyPath}`);
+    }
+    const stat = statSync(this.keyPath);
+    if (process.platform !== "win32") {
+      // POSIX: refuse world- or group-readable keys. 0600 (owner rw)
+      // and 0400 (owner r) are the only acceptable modes; everything
+      // else risks exposing the key to other users on the host.
+      const mode = stat.mode & 0o777;
+      if ((mode & 0o077) !== 0) {
+        throw new Error(
+          `FileKeyring: key file ${this.keyPath} has unsafe permissions ` +
+            `(mode=${mode.toString(8).padStart(4, "0")}); expected 0600 or 0400`,
+        );
+      }
+    }
+    const raw = readFileSync(this.keyPath, "utf8").trim();
+    const key = decodeBase64UrlKey(raw, `file:${this.keyPath}`);
+    this.cachedKey = key;
+    return key;
+  }
+
+  /** Drop the in-memory cache. Used by M7 rotation after the file
+   *  has been swapped on disk. */
+  invalidate(): void {
+    this.cachedKey = null;
+  }
+}
+
+/** Environment-variable-backed keyring. Reads a base64url-encoded
+ *  32-byte key from `process.env[name]`. Intended for CI / container
+ *  deployments; the variable is read on every `getActiveKey` call so
+ *  a parent process can rotate the key by re-exporting the env var
+ *  and re-instantiating the keyring (no in-memory cache). */
+export class EnvKeyring implements KeyringProvider {
+  constructor(
+    private readonly envName: string,
+    private readonly env: NodeJS.ProcessEnv = process.env,
+    private readonly keyId: KeyId = "env-keyring",
+  ) {
+    if (typeof envName !== "string" || envName.length === 0) {
+      throw new Error("EnvKeyring: envName must be a non-empty string");
+    }
+  }
+
+  getActiveKey(): ActiveWrappingKey {
+    return { key: this.readKey(), keyId: this.keyId };
+  }
+
+  getKeyById(keyId: KeyId): Buffer | null {
+    if (keyId !== this.keyId) {
+      return null;
+    }
+    return this.readKey();
+  }
+
+  private readKey(): Buffer {
+    const raw = this.env[this.envName];
+    if (typeof raw !== "string" || raw.length === 0) {
+      throw new Error(
+        `EnvKeyring: env var ${this.envName} is not set or empty; ` +
+          `set it to a base64url-encoded 32-byte AES-256 key`,
+      );
+    }
+    return decodeBase64UrlKey(raw, `env:${this.envName}`);
+  }
+}
+
+/** Composite keyring that tries providers in order. Used for
+ *  "auto-inject default keyring" (whitepaper 2.2.5.A): a primary
+ *  keyring (e.g. OS keyring on macOS) and one or more fallbacks
+ *  (e.g. file keyring for tests / CI). `getKeyById` walks every
+ *  provider so historical keys can still be unwrapped during a
+ *  rotation grace period. */
+export class CompositeKeyring implements KeyringProvider {
+  private readonly providers: KeyringProvider[];
+
+  constructor(providers: KeyringProvider[]) {
+    if (!Array.isArray(providers) || providers.length === 0) {
+      throw new Error("CompositeKeyring: providers must be a non-empty array");
+    }
+    this.providers = providers.slice();
+  }
+
+  getActiveKey(): ActiveWrappingKey {
+    const errors: string[] = [];
+    for (const provider of this.providers) {
+      try {
+        return provider.getActiveKey();
+      } catch (error) {
+        errors.push(`${provider.constructor.name}: ${(error as Error).message}`);
+      }
+    }
+    throw new Error(
+      `CompositeKeyring: no provider returned an active key. Errors: ${errors.join("; ")}`,
+    );
+  }
+
+  getKeyById(keyId: KeyId): Buffer | null {
+    for (const provider of this.providers) {
+      try {
+        const key = provider.getKeyById(keyId);
+        if (key) {
+          return key;
+        }
+      } catch {
+        // A failing provider is not an error for `getKeyById`; the
+        // composite walks all providers and returns the first match.
+      }
+    }
+    return null;
+  }
+
+  /** The number of providers in the composite. Useful for tests
+   *  asserting that "auto-inject" added a primary + a fallback. */
+  get size(): number {
+    return this.providers.length;
+  }
+}
+
+/** Resolve a keyring by reading the optional configuration block. This
+ *  is the M6+ factory the CLI / Doctor will use to auto-inject the
+ *  default keyring. Each entry's `kind` selects an implementation;
+ *  the file and env variants need no extra setup. The OS variant
+ *  needs `@napi-rs/keyring` and lives in `os-keyring.ts`. */
+export type KeyringConfig =
+  | { kind: "file"; keyPath: string; keyId?: KeyId }
+  | { kind: "env"; envName: string; keyId?: KeyId }
+  | { kind: "os"; service: string; account: string; keyId?: KeyId }
+  | { kind: "composite"; providers: KeyringConfig[] };
+
+/** Map a `KeyringConfig` to a `KeyringProvider`. The OS variant is
+ *  imported statically from `./os-keyring.ts`; the M6.B swap to
+ *  @napi-rs/keyring lives in that file. */
+export function createKeyring(config: KeyringConfig): KeyringProvider {
+  switch (config.kind) {
+    case "file":
+      return new FileKeyring(config.keyPath, config.keyId ?? "file-keyring");
+    case "env":
+      return new EnvKeyring(config.envName, process.env, config.keyId ?? "env-keyring");
+    case "os":
+      return new OsKeyring(config.service, config.account, config.keyId ?? "os-keyring");
+    case "composite":
+      return new CompositeKeyring(config.providers.map(createKeyring));
+    default: {
+      const exhaustive: never = config;
+      throw new Error(`createKeyring: unknown config kind: ${JSON.stringify(exhaustive)}`);
+    }
+  }
+}
+
+/** Convenience for tests + a future "default config" path: return the
+ *  set of stable key ids the keyring is willing to resolve. The
+ *  `composite` variant returns the union of its providers' ids when
+ *  each provider exposes a known static id (File and Env do, OS does
+ *  not — its id is the service+account name and is opaque to us). */
+export function knownKeyIds(provider: KeyringProvider): KeyId[] {
+  if (provider instanceof FileKeyring) {
+    return [provider.getKeyPath()];
+  }
+  if (provider instanceof EnvKeyring) {
+    return [provider["envName" as keyof EnvKeyring] as unknown as KeyId];
+  }
+  if (provider instanceof CompositeKeyring) {
+    // The composite itself doesn't carry ids; recurse on its providers.
+    const out: KeyId[] = [];
+    for (const inner of (provider as unknown as { providers: KeyringProvider[] }).providers) {
+      out.push(...knownKeyIds(inner));
+    }
+    return out;
+  }
+  return [];
+}
+
+/** Re-export a couple of types the runtime (M5) already declared
+ *  locally so consumers have a single import surface. */
+export type { ActiveWrappingKey as KeyringActiveKey };
+
+// Re-export the OS keyring stub so the test file (and the future
+// M6.B real implementation) can import the class from one place.
+// The actual factory uses a dynamic `require` to avoid an ESM
+// circular import at static-parse time; the static re-export is
+// fine because os-keyring.ts does not import back into this file.
+export { OsKeyring } from "./os-keyring.js";
