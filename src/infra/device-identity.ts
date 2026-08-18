@@ -34,6 +34,7 @@ import {
   signMlDsa65Payload as signMlDsa65PayloadRaw,
   verifyMlDsa65Signature as verifyMlDsa65SignatureRaw,
 } from "./mldsa65-key-storage.js";
+import { getDefaultKeyringFromEnv } from "../security/keyring-provider.js";
 import { pruneMapToMaxSize } from "./map-size.js";
 
 export type { DeviceIdentity } from "./device-identity-store.js";
@@ -139,15 +140,38 @@ function withDeviceIdentityCoordinator<T>(
 
 function loadOrCreateDeviceIdentityOwned(options: DeviceIdentityStoreOptions): DeviceIdentity {
   assertNoPendingLegacyIdentity(options);
-  const existing = readStoredDeviceIdentity(options);
+  // M5.5 auto-inject: when the caller didn't supply a wrapping keyring
+  // and `OPENCLAW_WRAP_KEY_FILE` (+ optional `OPENCLAW_WRAP_KEY_ID`) is
+  // set in the environment, resolve the default keyring here so the
+  // device-identity store can wrap / unwrap private keys automatically.
+  // The resolved `FileKeyring` is cached at module level in
+  // `keyring-provider.ts`, so its internal `cachedKey` is reused and
+  // repeated `getActiveKey()` calls during startup are memory lookups
+  // (replaces the per-call `readFileSync + chmodSync + base64.decode`
+  // pattern of the M5.5 v1/v2 runtime patches).
+  let resolvedOptions = options;
+  if (!options.wrappingKeyProvider) {
+    const defaultKeyring = getDefaultKeyringFromEnv();
+    if (defaultKeyring) {
+      resolvedOptions = { ...options, wrappingKeyProvider: defaultKeyring };
+    }
+  }
+  const existing = readStoredDeviceIdentity(resolvedOptions);
   if (existing) {
     return toDeviceIdentity(existing);
   }
 
   // Generate outside the write transaction. The transaction rereads the row
   // before inserting so concurrent runtimes converge on one authoritative key.
-  const candidate = generateStoredDeviceIdentity();
-  return toDeviceIdentity(insertStoredDeviceIdentityIfAbsent(candidate, options));
+  // Pass `resolvedOptions.wrappingKeyProvider` so the M5.5 auto-inject
+  // path actually wraps the freshly generated secret; without this the
+  // candidate would be plaintext and `insertStoredDeviceIdentityIfAbsent`
+  // would persist a plaintext row even though the keyring is configured.
+  const candidate = generateStoredDeviceIdentity(
+    Date.now(),
+    resolvedOptions.wrappingKeyProvider,
+  );
+  return toDeviceIdentity(insertStoredDeviceIdentityIfAbsent(candidate, resolvedOptions));
 }
 
 /** Load a valid canonical identity or atomically create its SQLite row. */

@@ -22,8 +22,10 @@ import {
   EnvKeyring,
   FileKeyring,
   generateWrappingKey,
+  getDefaultKeyringFromEnv,
   type KeyringProvider,
   OsKeyring,
+  resetDefaultKeyringCache,
 } from "./keyring-provider.js";
 import { unwrapSecret, wrapSecret } from "./secret-wrapping.js";
 
@@ -361,5 +363,100 @@ describe("generateWrappingKey (M8 CLI helper)", () => {
     const a = generateWrappingKey();
     const b = generateWrappingKey();
     expect(a.equals(b)).toBe(false);
+  });
+});
+
+describe("getDefaultKeyringFromEnv (M5.5 auto-inject — whitepaper 2.2.5.A)", () => {
+  // Each test mutates a single env-var set, so save the original and
+  // restore it in afterEach. The module-level cache is reset between
+  // tests via `resetDefaultKeyringCache()` so the env-var changes are
+  // observable on the next call.
+  const originalFile = process.env.OPENCLAW_WRAP_KEY_FILE;
+  const originalId = process.env.OPENCLAW_WRAP_KEY_ID;
+
+  afterEach(() => {
+    if (originalFile === undefined) {
+      delete process.env.OPENCLAW_WRAP_KEY_FILE;
+    } else {
+      process.env.OPENCLAW_WRAP_KEY_FILE = originalFile;
+    }
+    if (originalId === undefined) {
+      delete process.env.OPENCLAW_WRAP_KEY_ID;
+    } else {
+      process.env.OPENCLAW_WRAP_KEY_ID = originalId;
+    }
+    resetDefaultKeyringCache();
+  });
+
+  it("returns null when OPENCLAW_WRAP_KEY_FILE is unset", () => {
+    delete process.env.OPENCLAW_WRAP_KEY_FILE;
+    resetDefaultKeyringCache();
+    expect(getDefaultKeyringFromEnv()).toBeNull();
+  });
+
+  it("returns null when OPENCLAW_WRAP_KEY_FILE is empty", () => {
+    process.env.OPENCLAW_WRAP_KEY_FILE = "";
+    resetDefaultKeyringCache();
+    expect(getDefaultKeyringFromEnv()).toBeNull();
+  });
+
+  it("returns a FileKeyring when the env var points to a real key file", () => {
+    const dir = makeTempDir();
+    const keyPath = path.join(dir, "wrap.key");
+    const key = newKey();
+    writeKeyFile(keyPath, key);
+    process.env.OPENCLAW_WRAP_KEY_FILE = keyPath;
+    process.env.OPENCLAW_WRAP_KEY_ID = "wrap-key-2026-08";
+    resetDefaultKeyringCache();
+
+    const ring = getDefaultKeyringFromEnv();
+    expect(ring).not.toBeNull();
+    expect(ring).toBeInstanceOf(FileKeyring);
+    const active = ring!.getActiveKey();
+    expect(active.keyId).toBe("wrap-key-2026-08");
+    expect(active.key).toEqual(key);
+  });
+
+  it("defaults the keyId to 'file-keyring' when OPENCLAW_WRAP_KEY_ID is unset", () => {
+    const dir = makeTempDir();
+    const keyPath = path.join(dir, "wrap.key");
+    writeKeyFile(keyPath, newKey());
+    process.env.OPENCLAW_WRAP_KEY_FILE = keyPath;
+    delete process.env.OPENCLAW_WRAP_KEY_ID;
+    resetDefaultKeyringCache();
+
+    const ring = getDefaultKeyringFromEnv();
+    expect(ring).not.toBeNull();
+    expect(ring!.getActiveKey().keyId).toBe("file-keyring");
+  });
+
+  it("caches the FileKeyring instance across calls (replaces M5.5 v1/v2 runtime patch)", () => {
+    const dir = makeTempDir();
+    const keyPath = path.join(dir, "wrap.key");
+    writeKeyFile(keyPath, newKey());
+    process.env.OPENCLAW_WRAP_KEY_FILE = keyPath;
+    process.env.OPENCLAW_WRAP_KEY_ID = "wrap-key-2026-08";
+    resetDefaultKeyringCache();
+
+    const a = getDefaultKeyringFromEnv();
+    const b = getDefaultKeyringFromEnv();
+    // The M5.5 v1/v2 runtime patches constructed a fresh keyring on
+    // every call, defeating `FileKeyring`'s `cachedKey` instance field.
+    // Auto-inject must hand back the same instance so the built-in
+    // cache survives across the 12+ startup callers.
+    expect(a).toBe(b);
+  });
+
+  it("rejects a relative key path (FileKeyring's own guard, not bypassed by auto-inject)", () => {
+    process.env.OPENCLAW_WRAP_KEY_FILE = "wrap.key";
+    resetDefaultKeyringCache();
+    // FileKeyring's constructor throws on relative paths; auto-inject
+    // must surface that error rather than swallowing it.
+    expect(() => getDefaultKeyringFromEnv()).toThrow(/absolute/);
+    // The throw means the module-level cache stays "undefined" (the
+    // early-return path in `getDefaultKeyringFromEnv` runs after the
+    // constructor) — verify the next call retries the construction.
+    resetDefaultKeyringCache();
+    expect(() => getDefaultKeyringFromEnv()).toThrow(/absolute/);
   });
 });

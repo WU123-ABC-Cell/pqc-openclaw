@@ -309,3 +309,59 @@ export type { ActiveWrappingKey as KeyringActiveKey };
 // circular import at static-parse time; the static re-export is
 // fine because os-keyring.ts does not import back into this file.
 export { OsKeyring } from "./os-keyring.js";
+
+/** Module-level cache for `getDefaultKeyringFromEnv`. Without this
+ *  cache, every call to `getDefaultKeyringFromEnv` would build a
+ *  fresh `FileKeyring` whose internal `cachedKey` is empty, so
+ *  `getActiveKey()` would re-read the key file on every invocation.
+ *  The `cachedKey` field on the class is per-instance, so the
+ *  instance itself has to be reused for caching to be effective. */
+let cachedDefaultKeyring: KeyringProvider | null | undefined = undefined;
+
+/** Build a process-level cached `FileKeyring` from environment
+ *  variables. Implements the M5.5 "auto-inject default keyring"
+ *  path (whitepaper 2.2.5.A): when the operator sets
+ *  `OPENCLAW_WRAP_KEY_FILE` (+ optional `OPENCLAW_WRAP_KEY_ID`),
+ *  the runtime uses a single `FileKeyring` everywhere the device
+ *  identity store is asked to wrap or unwrap a private key.
+ *
+ *  Reads:
+ *  - `OPENCLAW_WRAP_KEY_FILE` (required): absolute path to the
+ *    base64url-encoded 32-byte AES-256 wrapping key. The `FileKeyring`
+ *    constructor enforces absolute-path + 0600/0400 mode at construction.
+ *  - `OPENCLAW_WRAP_KEY_ID` (optional): logical key id, defaults to
+ *    `"file-keyring"`. Mapped to `mldsa_private_key_wrap_key_id` so
+ *    wrapped rows record which key protected them.
+ *
+ *  Returns `null` when `OPENCLAW_WRAP_KEY_FILE` is unset/empty, so
+ *  callers can "auto-inject if configured" without forcing a keyring
+ *  on environments that don't need one (tests, the unwrapped mode
+ *  that predates M5, etc.).
+ *
+ *  The first call constructs and caches the `FileKeyring`; subsequent
+ *  calls return the same instance, so the class-level `cachedKey`
+ *  cache is preserved and `getActiveKey()` is a memory lookup after
+ *  the first read.
+ */
+export function getDefaultKeyringFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): KeyringProvider | null {
+  if (cachedDefaultKeyring !== undefined) {
+    return cachedDefaultKeyring;
+  }
+  const keyPath = env.OPENCLAW_WRAP_KEY_FILE;
+  if (typeof keyPath !== "string" || keyPath.length === 0) {
+    cachedDefaultKeyring = null;
+    return null;
+  }
+  const keyId = (env.OPENCLAW_WRAP_KEY_ID as KeyId | undefined) ?? "file-keyring";
+  cachedDefaultKeyring = new FileKeyring(keyPath, keyId);
+  return cachedDefaultKeyring;
+}
+
+/** Drop the module-level default keyring cache. Tests use this to
+ *  verify that env-var changes between calls are picked up; production
+ *  code should not need it. */
+export function resetDefaultKeyringCache(): void {
+  cachedDefaultKeyring = undefined;
+}

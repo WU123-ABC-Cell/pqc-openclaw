@@ -37,6 +37,7 @@ import {
   type WrappingKeyProvider,
   wrapSecret,
 } from "../security/secret-wrapping.js";
+import { resetDefaultKeyringCache } from "../security/keyring-provider.js";
 
 class InMemoryKeyring implements WrappingKeyProvider {
   private readonly activeId: string;
@@ -75,6 +76,17 @@ function newKey(): Buffer {
   const k = randomBytes(32);
   originalKeys.push(k);
   return k;
+}
+
+function writeKeyFile(filePath: string, key: Buffer, mode: number = 0o600): void {
+  // Authorised test-only writer. `FileKeyring` enforces a 0600/0400
+  // mode on non-Windows; we keep the default at 0o600 so the auto-inject
+  // path (which constructs a `FileKeyring` directly from
+  // `OPENCLAW_WRAP_KEY_FILE`) doesn't trip its safety guard.
+  fs.writeFileSync(filePath, key.toString("base64url"));
+  if (process.platform !== "win32") {
+    fs.chmodSync(filePath, mode);
+  }
 }
 
 function makeStoreOptions(wrappingKeyProvider?: WrappingKeyProvider): DeviceIdentityStoreOptions & {
@@ -347,5 +359,108 @@ describe("device-identity store — M5 wrap integration", () => {
     } finally {
       database.close();
     }
+  });
+});
+
+describe("M5.5 auto-inject default keyring from env", () => {
+  // The auto-inject path (device-identity.ts) reads `OPENCLAW_WRAP_KEY_FILE`
+  // and `OPENCLAW_WRAP_KEY_ID` and constructs a `FileKeyring` automatically
+  // when the caller doesn't pass an explicit `wrappingKeyProvider`. The
+  // original M5.5 implementation was a runtime monkey-patch (M5.5 v1 / v2)
+  // that bypassed the source's caching logic; the v3 source-level fix
+  // removes that patch and wires the auto-inject here. These tests
+  // verify the end-to-end round trip through the auto-injected keyring.
+  const originalFile = process.env.OPENCLAW_WRAP_KEY_FILE;
+  const originalId = process.env.OPENCLAW_WRAP_KEY_ID;
+
+  afterEach(() => {
+    if (originalFile === undefined) {
+      delete process.env.OPENCLAW_WRAP_KEY_FILE;
+    } else {
+      process.env.OPENCLAW_WRAP_KEY_FILE = originalFile;
+    }
+    if (originalId === undefined) {
+      delete process.env.OPENCLAW_WRAP_KEY_ID;
+    } else {
+      process.env.OPENCLAW_WRAP_KEY_ID = originalId;
+    }
+    // Force the module-level cache in `keyring-provider.ts` to drop
+    // so subsequent tests (in this file or elsewhere) don't see a
+    // cached keyring from a previous test.
+    resetDefaultKeyringCache();
+  });
+
+  it("wraps on insert + unwraps on read when only OPENCLAW_WRAP_KEY_FILE is set", () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-pqc-m55-"));
+    tempDirs.push(stateDir);
+    const keyPath = path.join(stateDir, "wrap.key");
+    const key = newKey();
+    writeKeyFile(keyPath, key, 0o600);
+
+    process.env.OPENCLAW_WRAP_KEY_FILE = keyPath;
+    process.env.OPENCLAW_WRAP_KEY_ID = "wrap-key-2026-08";
+    resetDefaultKeyringCache();
+
+    // No `wrappingKeyProvider` passed — auto-inject must fill it in.
+    const options: DeviceIdentityStoreOptions = {
+      env: { ...process.env, OPENCLAW_STATE_DIR: stateDir },
+      path: path.join(stateDir, "state", "openclaw.sqlite"),
+    };
+
+    const candidate = generateStoredDeviceIdentity(1_700_000_000_000);
+    const inserted = insertStoredDeviceIdentityIfAbsent(candidate, options);
+    // Wrap form was applied even though the caller didn't pass a keyring.
+    expect(inserted.mldsaPrivateKeyPem).toBeNull();
+    expect(inserted.mldsaPrivateKeyWrapped).not.toBeNull();
+    expect(inserted.mldsaPrivateKeyWrapKeyId).toBe("wrap-key-2026-08");
+
+    // Read path also auto-injects — unwrap must restore the original secret.
+    const reloaded = readStoredDeviceIdentity(options);
+    expect(reloaded).not.toBeNull();
+    const recovered = decodeMlDsa65SecretKey(reloaded!.privateKeyPem);
+    expect(recovered.length).toBe(4032);
+    expect(fingerprintMlDsa65PublicKey(decodeMlDsa65PublicKey(reloaded!.publicKeyPem))).toBe(candidate.deviceId);
+  });
+
+  it("stays in plaintext mode when OPENCLAW_WRAP_KEY_FILE is unset (no auto-inject)", () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-pqc-m55-"));
+    tempDirs.push(stateDir);
+    delete process.env.OPENCLAW_WRAP_KEY_FILE;
+    delete process.env.OPENCLAW_WRAP_KEY_ID;
+    resetDefaultKeyringCache();
+
+    const options: DeviceIdentityStoreOptions = {
+      env: { ...process.env, OPENCLAW_STATE_DIR: stateDir },
+      path: path.join(stateDir, "state", "openclaw.sqlite"),
+    };
+    const candidate = generateStoredDeviceIdentity(1_700_000_000_000);
+    const inserted = insertStoredDeviceIdentityIfAbsent(candidate, options);
+    expect(inserted.mldsaPrivateKeyWrapped).toBeNull();
+    expect(inserted.mldsaPrivateKeyPem).toMatch(/^MLDSA65-SECRET-KEY:/);
+  });
+
+  it("explicit wrappingKeyProvider takes precedence over env-injected keyring", () => {
+    // Regression guard: an explicit keyring passed by the caller must
+    // never be silently replaced by an env-injected one (the auto-inject
+    // path is a "no keyring provided" fallback, not a "always" hook).
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-pqc-m55-"));
+    tempDirs.push(stateDir);
+    const explicit = new InMemoryKeyring("explicit-key");
+    explicit.addKey("explicit-key", newKey());
+
+    const keyPath = path.join(stateDir, "wrap.key");
+    writeKeyFile(keyPath, newKey(), 0o600);
+    process.env.OPENCLAW_WRAP_KEY_FILE = keyPath;
+    process.env.OPENCLAW_WRAP_KEY_ID = "env-key";
+    resetDefaultKeyringCache();
+
+    const options: DeviceIdentityStoreOptions = {
+      env: { ...process.env, OPENCLAW_STATE_DIR: stateDir },
+      path: path.join(stateDir, "state", "openclaw.sqlite"),
+      wrappingKeyProvider: explicit,
+    };
+    const candidate = generateStoredDeviceIdentity(1_700_000_000_000);
+    const inserted = insertStoredDeviceIdentityIfAbsent(candidate, options);
+    expect(inserted.mldsaPrivateKeyWrapKeyId).toBe("explicit-key");
   });
 });
