@@ -1,7 +1,8 @@
 # OpenClaw Post-Quantum Cryptography (PQC) 升级白皮书
 
 **作者:** 吴昊天
-**日期:** 2026 年 8 月
+**日期:** 2026 年 8 月 20 日
+**最近更新:** §2.2.5.A 加入 M12 v3 source-level FileKeyring auto-inject (commit `f89f296687`, 启动时间 167s → 1.7s, 98x speedup)
 
 ---
 
@@ -16,6 +17,8 @@
 - 设备身份私钥在 state.db 中存储的抗量子加密
 
 升级覆盖 ML-KEM-768（FIPS 203）、ML-DSA-65（FIPS 204）、AES-256-GCM、PBKDF2-SHA256 等 NIST 标准算法。所有 PQC 升级均采用混合模式（hybrid mode），与经典算法并存，向后兼容。
+
+**M12 v3 优化（2026-08-19 commit `f89f296687`）**: keyring 激活从"wizard 9 次 restart"简化为"设两个 env var"，fork 启动时间从 167s 降至 1.7s（98x speedup），且**不降低安全性**（fail-closed 保留, FileKeyring class `cachedKey` 复用）。详见 §2.2.5.A 末尾。
 
 ## 2. 背景与动机
 
@@ -172,6 +175,15 @@ Apple 推送通知签名从纯 Ed25519 升级到 Ed25519 + ML-DSA-65 双签名�
 **2.2.5 keyring 增强**
 
 - 2.2.5.A Keyring providers 基础：File + Env + Composite
+  - **M12 v3 source-level auto-inject（2026-08-19, commit `f89f296687`）**:
+    - **问题**: 之前 fork 启动时 `loadOrCreateDeviceIdentityOwned` 不接 `wrappingKeyProvider` 也会调用，依赖用户手动 `secrets configure` wizard 走 9 次 restart 才能让 ML-DSA-65 私钥 wrap。早期 v1/v2 runtime patch 尝试 hand-roll 一个 `__M55_KEYRING` object, 但绕开了 source 里真 `FileKeyring` class 的 `cachedKey: Buffer | null` instance field, 每次都 new instance, 每次都重读 key file, 启动 167s。
+    - **v3 修法**: 复用 source 里真 `FileKeyring` class, 在 `keyring-provider.ts` 加 `getDefaultKeyringFromEnv()`, module-level `cachedDefaultKeyring` 缓存 single instance — `cachedKey` field 跨 12+ 启动 caller 复用, 启动 1.7s (98x).
+    - **env var 激活**: `OPENCLAW_WRAP_KEY_FILE=/path/wrap.bin` (chmod 0600, base64url 32 字节) + 可选 `OPENCLAW_WRAP_KEY_ID` (默认 `file-keyring`)。设置后 fork 启动自动 wrap, 0 配置。
+    - **设备身份存储 hook**: `loadOrCreateDeviceIdentityOwned` 检测 caller 未传 `wrappingKeyProvider` → 自动 inject `getDefaultKeyringFromEnv()` (不 mutate caller's options, 走 `{ ...options, wrappingKeyProvider: defaultKeyring }`)。
+    - **关键坑 (latent bug fix)**: `generateStoredDeviceIdentity(Date.now(), wrappingKeyProvider?)` 必须传 wrappingKeyProvider, 否则 candidate 是 plaintext。原 v3 部署时这个参数没传, sqlite 列 7 写 plaintext, 列 8 wrap NULL。修法: `insertStoredDeviceIdentityIfAbsent(generateStoredDeviceIdentity(Date.now(), resolvedOptions.wrappingKeyProvider), resolvedOptions)`。
+    - **fail-closed 不变**: env 路径不存在 / 权限错 / 相对路径 → `FileKeyring` 构造抛错 → fork 启动 fail, 不静默 fallback plaintext。
+    - **测试覆盖**: 6 unit invariants (env unset/empty, env+keyId, default keyId, instance cache, relative path reject) + 3 integration invariants (env wrap+unwrap, env unset plaintext mode, explicit override 优先级) = +9 invariants.
+  - **生态位**: v1/v2 runtime patch 完全 obsolete, 已 archive 到 `pqc-fork-scripts/archive/m5_5-v1v2/`. `m5_5-migrate.mjs` 保留, 用于从 v1/v2 状态 dir 一次性迁移到 v3.
 - 2.2.5.B OS keyring：@napi-rs/keyring（Keychain/libsecret/Credential Vault，optional dep）
 - 2.2.5.C Wrap-key 轮换：rotateDeviceIdentityWrappingKey 工具函数
 - 2.2.5.D Wrap-key 备份/恢复：passphrase + PBKDF2-SHA256 600k + AES-256-GCM
@@ -320,6 +332,8 @@ wrap-key 备份 passphrase 丢失 灾难恢复不可用 1Password + 印刷备份
 OpenClaw 进程内存转储 wrap key 在内存 短寿命（用后清零）
 灾难恢复中 1Password 被攻击 备份 blob 泄露 PBKDF2 600k iter 抗暴力
 wrap-key 轮换期间断电 部分 rows 已轮换 立即事务回滚，下次启动自动修复
+M12 v3 env var 错配 (`OPENCLAW_WRAP_KEY_FILE` 指向不存在/无权限文件) fork 启动失败 (fail-closed) FileKeyring 构造时拒, 不静默 fallback plaintext — 比 v1/v2 runtime patch 的"chmodSync 救场"更安全
+老 plaintext row (M12 v3 部署前) 被 fail-closed 拒读 wrap 失败，fork 报错 手动 `DELETE FROM device_identities WHERE identity_key='primary'` + 重启 (重建走 wrap path)
 
 ---
 
@@ -455,6 +469,7 @@ daemon 648 / 0 0
 - PQC 算法切换自动监测：跟踪 NIST 新标准发布，自动提示升级
 - 长期签名迁移：SLH-DSA (FIPS 205) 和 FN-DSA (Falcon) 作为备选
 - 性能优化：
+  - ✅ **已完成 (M12 v3)**: FileKeyring instance cache + env auto-inject — 启动时间 167s → 1.7s (98x), 不需要 `secrets configure` wizard, +9 invariants
   - 内存中的 wrap key 用 mlock 防止转储
   - 签名/验签 cache 减少重复计算
 - 客户端迁移进度自动监控：
