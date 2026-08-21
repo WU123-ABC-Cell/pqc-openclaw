@@ -2,7 +2,7 @@
 
 **作者:** 吴昊天
 **日期:** 2026 年 8 月 20 日
-**最近更新:** §2.2.5.A 加入 M12 v3 source-level FileKeyring auto-inject (commit `f89f296687`, 启动时间 167s → 1.7s, 98x speedup)
+**最近更新:** §2.2.5.A 加入 M12 v3 source-level FileKeyring auto-inject (commit `f89f296687`, 启动时间 167s → 6-9s, 17-28x speedup; 8/22 用 `measure-startup.sh` 复测: cold 9.5s, warm 6.2s)
 
 ---
 
@@ -47,7 +47,7 @@
 
 升级覆盖 ML-KEM-768（FIPS 203）、ML-DSA-65（FIPS 204）、AES-256-GCM、PBKDF2-SHA256 等 NIST 标准算法。所有 PQC 升级均采用混合模式（hybrid mode），与经典算法并存，向后兼容。
 
-**M12 v3 优化（2026-08-19 commit `f89f296687`）**: keyring 激活从"wizard 9 次 restart"简化为"设两个 env var"，fork 启动时间从 167s 降至 1.7s（98x speedup），且**不降低安全性**（fail-closed 保留, FileKeyring class `cachedKey` 复用）。详见 §2.2.5.A 末尾。
+**M12 v3 优化（2026-08-19 commit `f89f296687`）**: keyring 激活从"wizard 9 次 restart"简化为"设两个 env var"，fork 启动时间从 167s 降至 6-9s（17-28x speedup, warm ~6.2s / cold ~9.5s; 2026-08-22 用 `measure-startup.sh` 实测, 之前 commit message 写的 "1.7s" 是测量误差），且**不降低安全性**（fail-closed 保留, FileKeyring class `cachedKey` 复用）。详见 §2.2.5.A 末尾。
 
 ## 2. 背景与动机
 
@@ -206,7 +206,7 @@ Apple 推送通知签名从纯 Ed25519 升级到 Ed25519 + ML-DSA-65 双签名�
 - 2.2.5.A Keyring providers 基础：File + Env + Composite
   - **M12 v3 source-level auto-inject（2026-08-19, commit `f89f296687`）**:
     - **问题**: 之前 fork 启动时 `loadOrCreateDeviceIdentityOwned` 不接 `wrappingKeyProvider` 也会调用，依赖用户手动 `secrets configure` wizard 走 9 次 restart 才能让 ML-DSA-65 私钥 wrap。早期 v1/v2 runtime patch 尝试 hand-roll 一个 `__M55_KEYRING` object, 但绕开了 source 里真 `FileKeyring` class 的 `cachedKey: Buffer | null` instance field, 每次都 new instance, 每次都重读 key file, 启动 167s。
-    - **v3 修法**: 复用 source 里真 `FileKeyring` class, 在 `keyring-provider.ts` 加 `getDefaultKeyringFromEnv()`, module-level `cachedDefaultKeyring` 缓存 single instance — `cachedKey` field 跨 12+ 启动 caller 复用, 启动 1.7s (98x).
+    - **v3 修法**: 复用 source 里真 `FileKeyring` class, 在 `keyring-provider.ts` 加 `getDefaultKeyringFromEnv()`, module-level `cachedDefaultKeyring` 缓存 single instance — `cachedKey` field 跨 12+ 启动 caller 复用, 启动 6-9s (17-28x, warm 6.2s / cold 9.5s, 2026-08-22 用 `measure-startup.sh` 实测).
     - **env var 激活**: `OPENCLAW_WRAP_KEY_FILE=/path/wrap.bin` (chmod 0600, base64url 32 字节) + 可选 `OPENCLAW_WRAP_KEY_ID` (默认 `file-keyring`)。设置后 fork 启动自动 wrap, 0 配置。
     - **设备身份存储 hook**: `loadOrCreateDeviceIdentityOwned` 检测 caller 未传 `wrappingKeyProvider` → 自动 inject `getDefaultKeyringFromEnv()` (不 mutate caller's options, 走 `{ ...options, wrappingKeyProvider: defaultKeyring }`)。
     - **关键坑 (latent bug fix)**: `generateStoredDeviceIdentity(Date.now(), wrappingKeyProvider?)` 必须传 wrappingKeyProvider, 否则 candidate 是 plaintext。原 v3 部署时这个参数没传, sqlite 列 7 写 plaintext, 列 8 wrap NULL。修法: `insertStoredDeviceIdentityIfAbsent(generateStoredDeviceIdentity(Date.now(), resolvedOptions.wrappingKeyProvider), resolvedOptions)`。
@@ -258,12 +258,12 @@ flowchart TD
     H --> I{已有 device_identities row?}
     I -- 是 --> J[读 + unwrap 私钥]
     I -- 否 --> K[generateStoredDeviceIdentity<br/>now, wrappingKeyProvider<br/>写 wrapped row]
-    J --> L[fork ready 1.7s]
+    J --> L[fork ready 6-9s<br/>warm 6.2s / cold 9.5s]
     K --> L
     L --> M[定期 sign 走 wrapped key]
 ```
 
-> 关键设计: `cachedDefaultKeyring` 是 module-level 单例, 12+ 启动 caller 共享同一 FileKeyring 实例, 保留 `cachedKey: Buffer | null` 跨调用复用, 启动 167s → 1.7s (98x).
+> 关键设计: `cachedDefaultKeyring` 是 module-level 单例, 12+ 启动 caller 共享同一 FileKeyring 实例, 保留 `cachedKey: Buffer | null` 跨调用复用, 启动 167s → 6-9s (17-28x, 2026-08-22 实测).
 
 ---
 
@@ -551,7 +551,7 @@ daemon 648 / 0 0
 - PQC 算法切换自动监测：跟踪 NIST 新标准发布，自动提示升级
 - 长期签名迁移：SLH-DSA (FIPS 205) 和 FN-DSA (Falcon) 作为备选
 - 性能优化：
-  - ✅ **已完成 (M12 v3)**: FileKeyring instance cache + env auto-inject — 启动时间 167s → 1.7s (98x), 不需要 `secrets configure` wizard, +9 invariants
+  - ✅ **已完成 (M12 v3)**: FileKeyring instance cache + env auto-inject — 启动时间 167s → 6-9s (17-28x, warm 6.2s / cold 9.5s), 不需要 `secrets configure` wizard, +9 invariants
   - 内存中的 wrap key 用 mlock 防止转储
   - 签名/验签 cache 减少重复计算
 - 客户端迁移进度自动监控：
