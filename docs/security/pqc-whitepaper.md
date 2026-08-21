@@ -6,6 +6,35 @@
 
 ---
 
+## 目录
+
+1. [摘要](#1-摘要)
+2. [背景与动机](#2-背景与动机)
+   - 2.1 [量子威胁](#21-量子威胁)
+   - 2.2 [NIST 标准化](#22-nist-标准化)
+   - 2.3 [升级策略](#23-升级策略)
+3. [升级架构](#3-升级架构)
+   - 3.1 [OpenClaw 协议栈](#31-openclaw-协议栈)
+   - 3.2 [升级总览](#32-升级总览)
+4. [阶段详述](#4-阶段详述)
+   - 4.1 [阶段 1：网络传输层](#41-阶段-1网络传输层pqc-1x)
+   - 4.2 [阶段 2：设备身份 + 存储](#42-阶段-2设备身份--存储pqc-2x)
+5. [密码学设计](#5-密码学设计)
+   - 5.1 [算法选择与 NIST 标准对应](#51-算法选择与-nist-标准对应)
+   - 5.2 [混合模式的安全分析](#52-混合模式的安全分析)
+   - 5.3 [向后兼容策略](#53-向后兼容策略)
+6. [安全分析](#6-安全分析)
+   - 6.1 [HNDL 风险缓解](#61-hndl-风险缓解)
+   - 6.2 [密钥管理的威胁模型](#62-密钥管理的威胁模型)
+   - 6.3 [剩余风险与缓解](#63-剩余风险与缓解)
+7. [升级指南](#7-升级指南)
+8. [运维手册](#8-运维手册)
+9. [测试与验证](#9-测试与验证)
+10. [未来工作](#10-未来工作)
+11. [参考文献](#11-参考文献)
+
+---
+
 ## 1. 摘要
 
 本文档描述 OpenClaw 抗量子（Post-Quantum Cryptography, PQC）升级方案。OpenClaw 是一个安全的端到端消息系统，在量子计算机威胁日益临近的背景下，需要对其加密层进行升级，以抵御未来的"现在收获，以后解密"（Harvest Now, Decrypt Later, HNDL）攻击。
@@ -213,6 +242,29 @@ Apple 推送通知签名从纯 Ed25519 升级到 Ed25519 + ML-DSA-65 双签名�
 - [PQC] [1.1] nostr-decrypt nip44-v2 日志
 - [PQC-MIGRATION] nip04 日志（监控未迁移客户端）
 
+### 2.2.10 M12 v3 wrap 流程 (commit `f89f296687`)
+
+```mermaid
+flowchart TD
+    A[fork 启动] --> B{OPENCLAW_WRAP_KEY_FILE<br/>env 存在?}
+    B -- 否 --> Z1[走 plaintext 模式<br/>ML-DSA-65 私钥不 wrap]
+    B -- 是 --> C[getDefaultKeyringFromEnv<br/>构造 FileKeyring 实例]
+    C --> D{cachedDefaultKeyring<br/>已存在?}
+    D -- 是 --> E[复用缓存的 FileKeyring<br/>cachedKey 字段仍在]
+    D -- 否 --> F[new FileKeyring path, keyId<br/>读 wrap-key.bin + chmod 0600 check]
+    F --> G[缓存到 module-level<br/>cachedDefaultKeyring]
+    G --> E
+    E --> H[loadOrCreateDeviceIdentityOwned<br/>auto-inject wrappingKeyProvider]
+    H --> I{已有 device_identities row?}
+    I -- 是 --> J[读 + unwrap 私钥]
+    I -- 否 --> K[generateStoredDeviceIdentity<br/>now, wrappingKeyProvider<br/>写 wrapped row]
+    J --> L[fork ready 1.7s]
+    K --> L
+    L --> M[定期 sign 走 wrapped key]
+```
+
+> 关键设计: `cachedDefaultKeyring` 是 module-level 单例, 12+ 启动 caller 共享同一 FileKeyring 实例, 保留 `cachedKey: Buffer | null` 跨调用复用, 启动 167s → 1.7s (98x).
+
 ---
 
 ## 5. 密码学设计
@@ -270,6 +322,36 @@ wrap_key = randomBytes(32) # 32-byte CSPRNG
 keyId = UUID # 唯一标识 wrap key 实例
 
 安全保证：AES-256 抗量子（Grover 算法需 2^128 操作，128-bit 量子安全）。
+
+```mermaid
+flowchart LR
+    subgraph Client[客户端]
+        CP[payload<br/>UTF-8 字符串]
+    end
+    subgraph Sign[signDevicePayloadDual]
+        S1[signEd25519<br/>node:crypto<br/>64 bytes]
+        S2[signMlDsa65<br/>@noble/post-quantum<br/>3309 bytes]
+    end
+    subgraph Verify[verifyDevicePayload]
+        V1{verifyEd25519<br/>fast path}
+        V2{verifyMlDsa65<br/>PQC fallback}
+    end
+    subgraph VerifyResult[结果]
+        OK[✅ accept]
+        FAIL[❌ reject]
+    end
+
+    CP --> S1
+    CP --> S2
+    S1 --> V1
+    S2 --> V2
+    V1 -- valid --> OK
+    V1 -- invalid --> V2
+    V2 -- valid --> OK
+    V2 -- invalid --> FAIL
+```
+
+> 性能特征: Ed25519 verify ~50μs (fast path 命中绝大多数), ML-DSA-65 verify ~600μs (fallback). 经典 + 抗量子任一通过即接受, 两个都失败才拒.
 
 ### 5.3 向后兼容策略
 
