@@ -1,8 +1,8 @@
 # OpenClaw Post-Quantum Cryptography (PQC) 升级白皮书
 
 **作者:** 吴昊天
-**日期:** 2026 年 8 月 20 日
-**最近更新:** §2.2.5.A 加入 M12 v3 source-level FileKeyring auto-inject (commit `f89f296687`, 启动时间 167s → 6-9s, 17-28x speedup; 8/22 用 `measure-startup.sh` 复测: cold 9.5s, warm 6.2s)
+**日期:** 2026 年 8 月 25 日
+**最近更新:** §1 + §2.2.5.B + §6.3 + §10 加入 sdk-alias source fix (c5ebf37846) + M6.B OsKeyring 真部署 (21bc128b6b) + dudect-style side-channel 测过 (40K ops, |t|<1, 0 leak)
 
 ---
 
@@ -48,6 +48,11 @@
 升级覆盖 ML-KEM-768（FIPS 203）、ML-DSA-65（FIPS 204）、AES-256-GCM、PBKDF2-SHA256 等 NIST 标准算法。所有 PQC 升级均采用混合模式（hybrid mode），与经典算法并存，向后兼容。
 
 **M12 v3 优化（2026-08-19 commit `f89f296687`）**: keyring 激活从"wizard 9 次 restart"简化为"设两个 env var"，fork 启动时间从 167s 降至 6-9s（17-28x speedup, warm ~6.2s / cold ~9.5s; 2026-08-22 用 `measure-startup.sh` 实测, 之前 commit message 写的 "1.7s" 是测量误差），且**不降低安全性**（fail-closed 保留, FileKeyring class `cachedKey` 复用）。详见 §2.2.5.A 末尾。
+
+**后续硬化 (2026-08-23 ~ 2026-08-25)**:
+- **M6.B OS keyring 真部署** (commit `21bc128b6b`): `OsKeyring` 类用 `@napi-rs/keyring` (1.3.0, optional dep) 动态加载, 走 macOS Keychain / Windows Credential Manager / Linux Secret Service (libsecret + gnome-keyring). 配合 `migrate-oskeyring.mjs` 一键把 file-based wrap key 迁到 OS keyring, composite keyring (os primary + file fallback) 期间零 downtime. 详见 §2.2.5.B.
+- **sdk-alias 双 dist bug source fix** (commit `c5ebf37846`): `openclaw-root.ts` 加 `BUILD_ARTIFACT_DIRS` 跳过 dist/src/build/out/lib, 走 ancestors 时不再误把 dist/ 当 package root. 之前 v3 fork 启动需要 30s `fix-plugin-runtime-symlink.sh` workaround 创 `dist/dist/plugins` 软链, 现在 source-level 修了, workaround 全去掉 (脚本 archive 到 `pqc-fork-scripts/archive/2026-08-25/`).
+- **Side-channel dudect-style 测过** (2026-08-25): `pqc-fork-scripts/sidechannel-test.mjs` 跑 40K ops (20K wrap + 20K unwrap), Welch's t-test 单 bit split: wrap |t|=0.85, unwrap |t|=0.06, 阈值 4.5, **0 leak** 在 Node 24 + OpenSSL 3.x AES-256-GCM 32B plaintext 路径上. 报告 `pqc-fork-scripts/sidechannel-report.json`, 详见 §6.3.
 
 ## 2. 背景与动机
 
@@ -214,6 +219,30 @@ Apple 推送通知签名从纯 Ed25519 升级到 Ed25519 + ML-DSA-65 双签名�
     - **测试覆盖**: 6 unit invariants (env unset/empty, env+keyId, default keyId, instance cache, relative path reject) + 3 integration invariants (env wrap+unwrap, env unset plaintext mode, explicit override 优先级) = +9 invariants.
   - **生态位**: v1/v2 runtime patch 完全 obsolete, 已 archive 到 `pqc-fork-scripts/archive/m5_5-v1v2/`. `m5_5-migrate.mjs` 保留, 用于从 v1/v2 状态 dir 一次性迁移到 v3.
 - 2.2.5.B OS keyring：@napi-rs/keyring（Keychain/libsecret/Credential Vault，optional dep）
+
+  **实现** (2026-08-25, commit `21bc128b6b`):
+  - `src/security/os-keyring.ts` 替换 stub 为真实现。用 `createRequire(import.meta.url)` 动态加载 `@napi-rs/keyring` (1.3.0, declared as `optionalDependencies` in `package.json`)。模块本身永远可加载, 失败延迟到 constructor / getActiveKey 时 (clear error message: "install libsecret-1-0 + a running Secret Service (gnome-keyring, KWallet, KeePassXC)").
+  - `KeyringProvider` 接口保留 (`getActiveKey` / `getKeyById`); 加 `setKeyBase64Url(base64urlKey)` / `deleteKey()` / `describe()` 给 migration + rotation 用.
+  - Wire format: OS keyring "password" 存的就是 base64url-encoded 32-byte AES-256 key, 跟 `FileKeyring` / `EnvKeyring` 一致, 所以 file → OS 迁移是 zero-conversion.
+
+  **Auto-inject (env vars)**:
+  - `OPENCLAW_WRAP_KEY_OS_SERVICE` + `OPENCLAW_WRAP_KEY_OS_ACCOUNT` (+ optional `OPENCLAW_WRAP_KEY_OS_ID`) 启用 OS provider.
+  - `OPENCLAW_WRAP_KEY_FILE` (M5.5 旧接口) 仍兼容.
+  - 两个都设 → `CompositeKeyring([OsKeyring, FileKeyring])`, OS 是 active source, file 是 migration window 内的 fallback (M6.B 推荐 post-migration 形态: OS 是 source of truth, file 是 recovery 备份, 直到 operator 删 file).
+
+  **Migration helper** (`pqc-fork-scripts/migrate-oskeyring.mjs`):
+  - 读 `OPENCLAW_WRAP_KEY_FILE` (默认 `/home/abc/openclaw-fork/wrap-key.bin`) 里的 32-byte key, 写到 OS keyring 的 (service, account).
+  - 检查 file 权限 0600/0400 (拒 world/group-readable), 验证 base64url 解码是 32 bytes.
+  - 写后 `--verify` 选项 read-back round-trip 校验.
+  - 输出 bashrc 片段: `export OPENCLAW_WRAP_KEY_OS_SERVICE='openclaw'` + `export OPENCLAW_WRAP_KEY_OS_ACCOUNT='wrap-key-2026-08'`.
+  - file 不自动删 (operator 决定什么时候清理).
+
+  **Test 覆盖**:
+  - `keyring-provider.test.ts` 用 `vi.mock("@napi-rs/keyring", ...)` 注入 in-memory Map-backed Entry, 不需真 keyring backend.
+  - 新增测试: round-trip getActiveKey after setKeyBase64Url; getKeyById null on mismatch; deleteKey removes; malformed base64url rejected; CompositeKeyring 走 OS primary + file fallback.
+  - `getDefaultKeyringFromEnv` 测试: 只 OS env vars → OsKeyring; 两个都设 → CompositeKeyring; OS 优先, 旧 entry 缺失时 fallback file.
+
+  **生态位**: M6.B 真实现完成, 之前论文 "API 集成, OS keyring backend 需 user 安装" 的 honest claim 升级成 "API 集成 + migration script + composite keyring 验证, libsecret 是唯一 OS dep". 生产部署步骤见 §7 (升级指南).
 - 2.2.5.C Wrap-key 轮换：rotateDeviceIdentityWrappingKey 工具函数
 - 2.2.5.D Wrap-key 备份/恢复：passphrase + PBKDF2-SHA256 600k + AES-256-GCM
 
@@ -407,15 +436,21 @@ wrap-key 轮换的威胁：
 ### 6.3 剩余风险与缓解
 
 风险 影响 缓解
-OS keyring native binary 加载失败 wrap key 降级到 file 自动 fallback + 日志告警
+OS keyring native binary 加载失败 wrap key 降级到 file clear error message (含 libsecret-1-0 + Secret Service 安装步骤); composite keyring 期间 fallback file; 日志告警
 wrap-key 备份 passphrase 丢失 灾难恢复不可用 1Password + 印刷备份双保险
 老客户端 (NIP-04 / Ed25519) 不升级 HNDL 风险残留 [PQC-MIGRATION] 日志监控
-设备物理被盗 state.db 可被提取 wrap key 在 OS keyring，解锁需 OS 认证
+设备物理被盗 state.db 可被提取 wrap key 在 OS keyring, 解锁需 OS 认证 (KWallet / login keyring 需 user session)
 OpenClaw 进程内存转储 wrap key 在内存 短寿命（用后清零）
 灾难恢复中 1Password 被攻击 备份 blob 泄露 PBKDF2 600k iter 抗暴力
 wrap-key 轮换期间断电 部分 rows 已轮换 立即事务回滚，下次启动自动修复
 M12 v3 env var 错配 (`OPENCLAW_WRAP_KEY_FILE` 指向不存在/无权限文件) fork 启动失败 (fail-closed) FileKeyring 构造时拒, 不静默 fallback plaintext — 比 v1/v2 runtime patch 的"chmodSync 救场"更安全
 老 plaintext row (M12 v3 部署前) 被 fail-closed 拒读 wrap 失败，fork 报错 手动 `DELETE FROM device_identities WHERE identity_key='primary'` + 重启 (重建走 wrap path)
+sdk-alias 双 dist bug (v3 dist 时 30s workaround) dist/dist/plugins/ 路径找不到 plugin runtime module c5ebf37846 source-level fix: `openclaw-root.ts` 加 `BUILD_ARTIFACT_DIRS` 跳过 dist/src/build/out/lib; `fix-plugin-runtime-symlink.sh` archived, 无需 workaround
+AES-256-GCM wrap/unwrap 时序泄漏 OpenSSL 在某些微架构上 cache-timing 可被利用 dudect-style 测过: 40K ops, |t| < 1 (阈值 4.5) ✓ 0 leak. dudect-ct / valgrind callgrind 仍 P0 backlog
+AES-NI 硬件 timing ML-DSA-65 inner loop timing 没测 用户态单 bit 测过, 硬件级仍 P0 backlog; 需要 Intel performance counter 工具
+ML-DSA-65 inner loop timing @noble 0.7.0 实现 timing 没测 没单独测; paulmillr 声称 auditable 但 self-verify 不算 P0 backlog
+EM / 功率 / 故障注入 旁路攻击完全没测 需要专业硬件 + 商业 cryptographer, P0 backlog
+第三方 cryptographer 审 没做 4-6 周 + 钱, P0 backlog
 
 ---
 
@@ -551,15 +586,24 @@ daemon 648 / 0 0
 - PQC 算法切换自动监测：跟踪 NIST 新标准发布，自动提示升级
 - 长期签名迁移：SLH-DSA (FIPS 205) 和 FN-DSA (Falcon) 作为备选
 - 性能优化：
-  - ✅ **已完成 (M12 v3)**: FileKeyring instance cache + env auto-inject — 启动时间 167s → 6-9s (17-28x, warm 6.2s / cold 9.5s), 不需要 `secrets configure` wizard, +9 invariants
-  - 内存中的 wrap key 用 mlock 防止转储
+  - ✅ **已完成 (M12 v3, commit `f89f296687`)**: FileKeyring instance cache + env auto-inject — 启动时间 167s → 6-9s (17-28x, warm 6.2s / cold 9.5s), 不需要 `secrets configure` wizard, +9 invariants
+  - ✅ **已完成 (c5ebf37846)**: sdk-alias 双 dist bug source fix — `openclaw-root.ts` 加 `BUILD_ARTIFACT_DIRS` 跳过 dist/src/build/out/lib, workaround `fix-plugin-runtime-symlink.sh` 全去掉 (archived `pqc-fork-scripts/archive/2026-08-25/`)
+  - ✅ **已完成 (21bc128b6b)**: M6.B OsKeyring 真实现 — `@napi-rs/keyring` 1.3.0 动态加载 + `migrate-oskeyring.mjs` + composite keyring (os primary + file fallback)
+  - 内存中的 wrap key 用 mlock 防止转储 (P0, 需 Node 24.6+ 升级)
   - 签名/验签 cache 减少重复计算
-- 客户端迁移进度自动监控：
+- 旁路测试:
+  - ✅ **已完成 (2026-08-25)**: dudect-style 软件层 timing test — 40K ops, |t| < 1, 0 leak. 报告 `pqc-fork-scripts/sidechannel-report.json`.
+  - valgrind callgrind / dudect-ct (完整 cache-timing, P0)
+  - AES-NI 硬件级 timing (Intel performance counter, P1)
+  - ML-DSA-65 inner loop timing (@noble 0.7.0 内部, P1)
+  - EM / 功率 / 故障注入 (P0)
+- 客户端迁移进度自动监控:
   - openclaw status --show-pqc-migration
   - 自动汇总 NIP-04 / Ed25519 客户端使用情况
-- 密钥硬件集成：
+- 密钥硬件集成:
   - YubiKey / TPM 2.0 存储 wrap key
   - HSM 集成（企业级）
+- 第三方 cryptographer 审 (P0, 4-6 周 + 钱)
 
 ## 11. 参考文献
 
