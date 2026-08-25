@@ -263,6 +263,33 @@ describe("resolveOpenClawPackageRoot", () => {
         expected: null,
       }),
     },
+    {
+      name: "skips a synthetic package.json inside a build-artifact dir (dist/)",
+      setup: () => {
+        // Reproduces the bug where tsdown-unified writes a synthetic
+        // package.json with name=openclaw into dist/. The resolver must
+        // skip it and return the real package root, otherwise the
+        // sdk-alias loader generates `dist/dist/plugins/runtime/index.js`
+        // as a candidate and silently times out.
+        const realPkg = fx("build-artifact-dist");
+        setPackageRoot(realPkg);
+        setPackageRoot(path.join(realPkg, "dist"), "openclaw");
+        const argv1 = path.join(realPkg, "dist", "plugins", "sdk-alias.js");
+        return { opts: { argv1 }, expected: realPkg };
+      },
+    },
+    {
+      name: "skips a synthetic package.json inside src/ build artifact",
+      setup: () => {
+        // Same hazard for the source tree: src/ may also receive a
+        // synthetic package.json in some build layouts.
+        const realPkg = fx("build-artifact-src");
+        setPackageRoot(realPkg);
+        setPackageRoot(path.join(realPkg, "src"), "openclaw");
+        const argv1 = path.join(realPkg, "src", "plugins", "sdk-alias.ts");
+        return { opts: { argv1 }, expected: realPkg };
+      },
+    },
   ])("$name", async ({ setup }) => {
     const { opts, expected } = setup();
     await expectResolvedPackageRoot(

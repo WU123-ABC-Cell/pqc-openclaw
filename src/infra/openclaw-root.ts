@@ -9,6 +9,19 @@ const packageRootCache = new Map<string, string | null>();
 const packageRootsCache = new Map<string, string[]>();
 const argv1CandidateCache = new Map<string, string[]>();
 
+// Build-output directories that bundlers (tsdown-unified, tsc, esbuild, ...)
+// write a synthetic package.json into. Walking up from
+// `dist/plugins/sdk-alias.js` must skip `dist/` and continue toward the real
+// package root — otherwise plugin-runtime candidates end up as
+// `dist/dist/plugins/runtime/index.js` and the loader silently times out
+// resolving them. The same hazard exists for any code shipped under
+// `src/`, `build/`, `out/`, or `lib/` of the package.
+const BUILD_ARTIFACT_DIRS = new Set(["dist", "src", "build", "out", "lib"]);
+
+function isBuildArtifactDir(dir: string): boolean {
+  return BUILD_ARTIFACT_DIRS.has(path.basename(dir));
+}
+
 function parsePackageName(raw: string): string | null {
   const parsed = JSON.parse(raw) as { name?: unknown };
   return typeof parsed.name === "string" ? parsed.name : null;
@@ -46,6 +59,9 @@ function readPackageNameSync(dir: string): string | null {
 
 async function findPackageRoot(startDir: string, maxDepth = 12): Promise<string | null> {
   for (const current of iterAncestorDirs(startDir, maxDepth)) {
+    if (isBuildArtifactDir(current)) {
+      continue;
+    }
     const name = await readPackageName(current);
     if (name && CORE_PACKAGE_NAMES.has(name)) {
       return current;
@@ -56,6 +72,9 @@ async function findPackageRoot(startDir: string, maxDepth = 12): Promise<string 
 
 function findPackageRootSync(startDir: string, maxDepth = 12): string | null {
   for (const current of iterAncestorDirs(startDir, maxDepth)) {
+    if (isBuildArtifactDir(current)) {
+      continue;
+    }
     const name = readPackageNameSync(current);
     if (name && CORE_PACKAGE_NAMES.has(name)) {
       return current;
