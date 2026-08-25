@@ -318,30 +318,46 @@ export { OsKeyring } from "./os-keyring.js";
  *  instance itself has to be reused for caching to be effective. */
 let cachedDefaultKeyring: KeyringProvider | null | undefined = undefined;
 
-/** Build a process-level cached `FileKeyring` from environment
- *  variables. Implements the M5.5 "auto-inject default keyring"
- *  path (whitepaper 2.2.5.A): when the operator sets
- *  `OPENCLAW_WRAP_KEY_FILE` (+ optional `OPENCLAW_WRAP_KEY_ID`),
- *  the runtime uses a single `FileKeyring` everywhere the device
- *  identity store is asked to wrap or unwrap a private key.
+/** Build a process-level cached keyring from environment variables.
+ *  Implements the M5.5 "auto-inject default keyring" path
+ *  (whitepaper 2.2.5.A) and the M6.B OS-keyring deployment
+ *  (whitepaper 2.2.5.B).
  *
  *  Reads:
- *  - `OPENCLAW_WRAP_KEY_FILE` (required): absolute path to the
+ *  - `OPENCLAW_WRAP_KEY_OS_SERVICE` (optional): OS keyring service
+ *    name (e.g. "openclaw"). Required together with
+ *    `OPENCLAW_WRAP_KEY_OS_ACCOUNT` to enable the OS-keyring
+ *    provider. M6.B.
+ *  - `OPENCLAW_WRAP_KEY_OS_ACCOUNT` (optional): OS keyring account
+ *    (per-key entry name, typically the keyId). M6.B.
+ *  - `OPENCLAW_WRAP_KEY_OS_ID` (optional): logical key id for the
+ *    OS-keyring entry, defaults to `"os-keyring"`. Mapped to
+ *    `mldsa_private_key_wrap_key_id`.
+ *  - `OPENCLAW_WRAP_KEY_FILE` (optional): absolute path to the
  *    base64url-encoded 32-byte AES-256 wrapping key. The `FileKeyring`
  *    constructor enforces absolute-path + 0600/0400 mode at construction.
- *  - `OPENCLAW_WRAP_KEY_ID` (optional): logical key id, defaults to
- *    `"file-keyring"`. Mapped to `mldsa_private_key_wrap_key_id` so
- *    wrapped rows record which key protected them.
+ *  - `OPENCLAW_WRAP_KEY_ID` (optional): logical key id for the
+ *    file-keyring entry, defaults to `"file-keyring"`.
  *
- *  Returns `null` when `OPENCLAW_WRAP_KEY_FILE` is unset/empty, so
- *  callers can "auto-inject if configured" without forcing a keyring
- *  on environments that don't need one (tests, the unwrapped mode
- *  that predates M5, etc.).
+ *  Composition:
+ *  - OS only → `OsKeyring`.
+ *  - File only → `FileKeyring` (backward compat with M5.5).
+ *  - Both → `CompositeKeyring([OsKeyring, FileKeyring])` so the
+ *    OS keyring is the active source and the file is the fallback
+ *    during the M6.B migration window. This is the recommended
+ *    post-migration shape: the OS keyring is the live source of
+ *    truth, the file is the recovery backup until the operator
+ *    deletes it.
  *
- *  The first call constructs and caches the `FileKeyring`; subsequent
- *  calls return the same instance, so the class-level `cachedKey`
- *  cache is preserved and `getActiveKey()` is a memory lookup after
- *  the first read.
+ *  Returns `null` when neither source is configured, so callers can
+ *  "auto-inject if configured" without forcing a keyring on
+ *  environments that don't need one (tests, the unwrapped mode that
+ *  predates M5, etc.).
+ *
+ *  The first call constructs and caches; subsequent calls return
+ *  the same instance, so per-class caches (FileKeyring.cachedKey,
+ *  OsKeyring's loaded Entry) are preserved and `getActiveKey()` is
+ *  a memory lookup after the first read.
  */
 export function getDefaultKeyringFromEnv(
   env: NodeJS.ProcessEnv = process.env,
@@ -350,12 +366,34 @@ export function getDefaultKeyringFromEnv(
     return cachedDefaultKeyring;
   }
   const keyPath = env.OPENCLAW_WRAP_KEY_FILE;
-  if (typeof keyPath !== "string" || keyPath.length === 0) {
+  const osService = env.OPENCLAW_WRAP_KEY_OS_SERVICE;
+  const osAccount = env.OPENCLAW_WRAP_KEY_OS_ACCOUNT;
+  const hasFile = typeof keyPath === "string" && keyPath.length > 0;
+  const hasOs =
+    typeof osService === "string" &&
+    osService.length > 0 &&
+    typeof osAccount === "string" &&
+    osAccount.length > 0;
+
+  if (!hasFile && !hasOs) {
     cachedDefaultKeyring = null;
     return null;
   }
-  const keyId = (env.OPENCLAW_WRAP_KEY_ID as KeyId | undefined) ?? "file-keyring";
-  cachedDefaultKeyring = new FileKeyring(keyPath, keyId);
+
+  const providers: KeyringProvider[] = [];
+  if (hasOs) {
+    const osKeyId =
+      (env.OPENCLAW_WRAP_KEY_OS_ID as KeyId | undefined) ?? "os-keyring";
+    providers.push(new OsKeyring(osService, osAccount, osKeyId));
+  }
+  if (hasFile) {
+    const fileKeyId =
+      (env.OPENCLAW_WRAP_KEY_ID as KeyId | undefined) ?? "file-keyring";
+    providers.push(new FileKeyring(keyPath, fileKeyId));
+  }
+
+  cachedDefaultKeyring =
+    providers.length === 1 ? providers[0] : new CompositeKeyring(providers);
   return cachedDefaultKeyring;
 }
 
