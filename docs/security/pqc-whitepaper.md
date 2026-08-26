@@ -1,8 +1,8 @@
 # OpenClaw Post-Quantum Cryptography (PQC) 升级白皮书
 
 **作者:** 吴昊天
-**日期:** 2026 年 8 月 25 日
-**最近更新:** §1 + §2.2.5.B + §6.3 + §10 加入 sdk-alias source fix (c5ebf37846) + M6.B OsKeyring 真部署 (21bc128b6b) + dudect-style side-channel 测过 (40K ops, |t|<1, 0 leak)
+**日期:** 2026 年 8 月 26 日
+**最近更新:** §9.1.1 + §9.1.2 + §9.1.3 加入集成验证数据 (6s startup, 174/174 KAT, 10 plugins, 184M dist) + ML-DSA-65 sign/verify side-channel 测过 (8K ops, |t|<0.4)
 
 ---
 
@@ -53,6 +53,8 @@
 - **M6.B OS keyring 真部署** (commit `21bc128b6b`): `OsKeyring` 类用 `@napi-rs/keyring` (1.3.0, optional dep) 动态加载, 走 macOS Keychain / Windows Credential Manager / Linux Secret Service (libsecret + gnome-keyring). 配合 `migrate-oskeyring.mjs` 一键把 file-based wrap key 迁到 OS keyring, composite keyring (os primary + file fallback) 期间零 downtime. 详见 §2.2.5.B.
 - **sdk-alias 双 dist bug source fix** (commit `c5ebf37846`): `openclaw-root.ts` 加 `BUILD_ARTIFACT_DIRS` 跳过 dist/src/build/out/lib, 走 ancestors 时不再误把 dist/ 当 package root. 之前 v3 fork 启动需要 30s `fix-plugin-runtime-symlink.sh` workaround 创 `dist/dist/plugins` 软链, 现在 source-level 修了, workaround 全去掉 (脚本 archive 到 `pqc-fork-scripts/archive/2026-08-25/`).
 - **Side-channel dudect-style 测过** (2026-08-25): `pqc-fork-scripts/sidechannel-test.mjs` 跑 40K ops (20K wrap + 20K unwrap), Welch's t-test 单 bit split: wrap |t|=0.85, unwrap |t|=0.06, 阈值 4.5, **0 leak** 在 Node 24 + OpenSSL 3.x AES-256-GCM 32B plaintext 路径上. 报告 `pqc-fork-scripts/sidechannel-report.json`, 详见 §6.3.
+- **ML-DSA-65 sign/verify dudect-style** (2026-08-26): `pqc-fork-scripts/sidechannel-mldsa.mjs` 跑 8K ops (2K sign + 2K verify × 2 class), sign |t|=0.39, verify |t|=0.30, 阈值 4.5, **0 leak** 在 Node 22 + @noble/post-quantum 0.7.0. 报告 `pqc-fork-scripts/sidechannel-mldsa-report.json`.
+- **集成验证 pass** (2026-08-26): v3 dist 184M / 10728 files, fork 启动 **6s**, **10 plugins 全加载** (含 memory-core / browser / device-pair, 之前没 symlink workaround 就挂), **KAT 174/174 invariants** 通过 (24 ML-DSA-65 FIPS 204 + 150 multi-parameter), device identity wrap 7306B / keyring=wrap-key-2026-08. Production build 含 16 PQC commits. 详见 §9.1.3.
 
 ## 2. 背景与动机
 
@@ -561,6 +563,55 @@ daemon 648 / 0 0
 总计 7376+ / 12 0
 
 10 个 PQC commit，50+ 新增测试。
+
+#### 9.1.1 PQC 算法 KAT (Known Answer Tests) — FIPS 203/204 全部 parameter set
+
+| 测试 | 通过 | 范围 | 来源 |
+|---|---|---|---|
+| ML-DSA-65 (FIPS 204) KAT | 24/24 invariants | sign + verify + encoding + tamper rejection | `pqc-fork-scripts/run-kat.mjs` |
+| ML-DSA-44 + ML-DSA-65 + ML-DSA-87 (FIPS 204) | 26 × 3 = 78 invariants | sign + verify + integrity × 6 rounds per parameter set | `pqc-fork-scripts/run-multi-kat.mjs` |
+| ML-KEM-512 + ML-KEM-768 + ML-KEM-1024 (FIPS 203) | 24 × 3 = 72 invariants | encap + decap + integrity × 8 rounds per parameter set | 同上 |
+| **总计** | **174/174 invariants** | 6 个 NIST parameter set 全部通过 | 2026-08-26 集成验证 |
+
+跑法:
+```bash
+node pqc-fork-scripts/run-kat.mjs          # ML-DSA-65 only (24 invariants)
+node pqc-fork-scripts/run-multi-kat.mjs    # 6 parameter sets (150 invariants)
+```
+
+#### 9.1.2 Side-channel dudect-style 时序测试 (software-layer)
+
+| Hot path | 工具 | Setup | mean | \|t\| | 结论 |
+|---|---|---|---|---|---|
+| AES-256-GCM wrap (§2.2) | `sidechannel-test.mjs` | Node 24 + OpenSSL 3.x, 32B plaintext, 20K rounds × 2 class = 40K ops | 7.2-7.5 µs (wrap) / 5.0 µs (unwrap) | 0.850 / 0.062 | ✓ no leak |
+| ML-DSA-65 sign (§2.2) | `sidechannel-mldsa.mjs` | Node 22 + @noble 0.7.0, 64B message, 2K rounds × 2 class × 2 ops = 8K ops | 6.95 ms (sign) / 1.64 ms (verify) | 0.390 / 0.300 | ✓ no leak |
+
+阈值 \|t\| < 4.5 (dudect standard Welch's t-test, 单 bit split)。两条主 hot path **用户态** 0 timing leak 观察到。**不代表**:
+- cache-timing (要 valgrind / dudect-ct, 仍 P0)
+- AES-NI 硬件 timing (要 Intel perf counter, P1)
+- ML-DSA-65 NTT inner loop cache-timing (要 valgrind, P0)
+- 旁路 (EM/power/fault, P0)
+
+跑法:
+```bash
+node pqc-fork-scripts/sidechannel-test.mjs --rounds 20000 --out sidechannel-report.json
+node pqc-fork-scripts/sidechannel-mldsa.mjs --rounds 2000 --out sidechannel-mldsa-report.json
+```
+
+#### 9.1.3 集成验证 (production build, 2026-08-26)
+
+| 验证项 | 结果 |
+|---|---|
+| v3 dist 编译 | ✅ 184M / 10728 files, tsdown-unified 9 invocations × ~50s |
+| Source fix (c5ebf37846 sdk-alias BUILD_ARTIFACT_DIRS) | ✅ 编译进 `openclaw-root-*.js`, `dist/dist/` 路径不再生成 |
+| M6.B OsKeyring (21bc128b6b @napi-rs/keyring) | ✅ 编译进 `device-identity-*.js`, 走 file fallback (WSL2 无 libsecret) |
+| Fork startup time | **6s** (10:01:32 → 10:01:38 /healthz ready) |
+| 10 plugins loaded (含 memory-core / browser / device-pair) | ✅ 全加载, 0 plugin error |
+| Live symlink workaround 必要性 | ❌ 不再需要 (source-level fix 验证 work) |
+| KAT 174/174 invariants | ✅ (见 §9.1.1) |
+| Device identity wrap | ✅ wrapped=7306B, keyring=wrap-key-2026-08 |
+
+注: fork 跑在 port 18791, dashboard collector 在 18800. Paper claim 用的所有数字 (6s startup, 174/174 KAT, 10 plugins loaded, dist size) 都是这次集成验证实测的.
 
 ### 9.2 测试方法
 
