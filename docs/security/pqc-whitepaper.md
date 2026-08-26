@@ -2,7 +2,7 @@
 
 **作者:** 吴昊天
 **日期:** 2026 年 8 月 26 日
-**最近更新:** §9.1.1 + §9.1.2 + §9.1.3 加入集成验证数据 (6s startup, 174/174 KAT, 10 plugins, 184M dist) + ML-DSA-65 sign/verify side-channel 测过 (8K ops, |t|<0.4)
+**最近更新:** §1 + §9.1.2 加 ML-KEM-768 encap/decap side-channel (20K ops, |t|<1.5) — 三条主 hot path (AES-GCM + ML-DSA-65 + ML-KEM-768) 软件层 0 timing leak 全部验证
 
 ---
 
@@ -54,6 +54,7 @@
 - **sdk-alias 双 dist bug source fix** (commit `c5ebf37846`): `openclaw-root.ts` 加 `BUILD_ARTIFACT_DIRS` 跳过 dist/src/build/out/lib, 走 ancestors 时不再误把 dist/ 当 package root. 之前 v3 fork 启动需要 30s `fix-plugin-runtime-symlink.sh` workaround 创 `dist/dist/plugins` 软链, 现在 source-level 修了, workaround 全去掉 (脚本 archive 到 `pqc-fork-scripts/archive/2026-08-25/`).
 - **Side-channel dudect-style 测过** (2026-08-25): `pqc-fork-scripts/sidechannel-test.mjs` 跑 40K ops (20K wrap + 20K unwrap), Welch's t-test 单 bit split: wrap |t|=0.85, unwrap |t|=0.06, 阈值 4.5, **0 leak** 在 Node 24 + OpenSSL 3.x AES-256-GCM 32B plaintext 路径上. 报告 `pqc-fork-scripts/sidechannel-report.json`, 详见 §6.3.
 - **ML-DSA-65 sign/verify dudect-style** (2026-08-26): `pqc-fork-scripts/sidechannel-mldsa.mjs` 跑 8K ops (2K sign + 2K verify × 2 class), sign |t|=0.39, verify |t|=0.30, 阈值 4.5, **0 leak** 在 Node 22 + @noble/post-quantum 0.7.0. 报告 `pqc-fork-scripts/sidechannel-mldsa-report.json`.
+- **ML-KEM-768 encap/decap dudect-style** (2026-08-26): `pqc-fork-scripts/sidechannel-mlkem.mjs` 跑 20K ops (5K encap + 5K decap × 2 class), encap |t|=1.14, decap |t|=1.50, 阈值 4.5, **0 leak** 在 Node 22 + @noble/post-quantum 0.7.0. 报告 `pqc-fork-scripts/sidechannel-mlkem-report.json`.
 - **集成验证 pass** (2026-08-26): v3 dist 184M / 10728 files, fork 启动 **6s**, **10 plugins 全加载** (含 memory-core / browser / device-pair, 之前没 symlink workaround 就挂), **KAT 174/174 invariants** 通过 (24 ML-DSA-65 FIPS 204 + 150 multi-parameter), device identity wrap 7306B / keyring=wrap-key-2026-08. Production build 含 16 PQC commits. 详见 §9.1.3.
 
 ## 2. 背景与动机
@@ -585,8 +586,9 @@ node pqc-fork-scripts/run-multi-kat.mjs    # 6 parameter sets (150 invariants)
 |---|---|---|---|---|---|
 | AES-256-GCM wrap (§2.2) | `sidechannel-test.mjs` | Node 24 + OpenSSL 3.x, 32B plaintext, 20K rounds × 2 class = 40K ops | 7.2-7.5 µs (wrap) / 5.0 µs (unwrap) | 0.850 / 0.062 | ✓ no leak |
 | ML-DSA-65 sign (§2.2) | `sidechannel-mldsa.mjs` | Node 22 + @noble 0.7.0, 64B message, 2K rounds × 2 class × 2 ops = 8K ops | 6.95 ms (sign) / 1.64 ms (verify) | 0.390 / 0.300 | ✓ no leak |
+| ML-KEM-768 encap/decap (§2.2) | `sidechannel-mlkem.mjs` | Node 22 + @noble 0.7.0, 5K rounds × 2 class × 2 ops = 20K ops | 0.46 ms (encap) / 0.58 ms (decap) | 1.136 / 1.496 | ✓ no leak |
 
-阈值 \|t\| < 4.5 (dudect standard Welch's t-test, 单 bit split)。两条主 hot path **用户态** 0 timing leak 观察到。**不代表**:
+阈值 \|t\| < 4.5 (dudect standard Welch's t-test, 单 bit split)。**三条主 hot path** (AES-GCM wrap + ML-DSA-65 sign/verify + ML-KEM-768 encap/decap) **用户态** 0 timing leak 观察到. **不代表**:
 - cache-timing (要 valgrind / dudect-ct, 仍 P0)
 - AES-NI 硬件 timing (要 Intel perf counter, P1)
 - ML-DSA-65 NTT inner loop cache-timing (要 valgrind, P0)
@@ -596,6 +598,7 @@ node pqc-fork-scripts/run-multi-kat.mjs    # 6 parameter sets (150 invariants)
 ```bash
 node pqc-fork-scripts/sidechannel-test.mjs --rounds 20000 --out sidechannel-report.json
 node pqc-fork-scripts/sidechannel-mldsa.mjs --rounds 2000 --out sidechannel-mldsa-report.json
+node pqc-fork-scripts/sidechannel-mlkem.mjs --rounds 5000 --out sidechannel-mlkem-report.json
 ```
 
 #### 9.1.3 集成验证 (production build, 2026-08-26)
