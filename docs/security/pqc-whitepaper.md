@@ -2,7 +2,7 @@
 
 **作者:** 吴昊天
 **日期:** 2026 年 8 月 27 日
-**最近更新:** §1 + §9.1.2 + §5.1.3 加 ML-KEM 全部 3 个 parameter set (512/768/1024) encap/decap side-channel (60K ops, |t|<1.5) — 7 hot paths (AES-GCM + ML-DSA 全部 + ML-KEM 全部) × 14 ops 全部 0 timing leak 验证 (累计 118K ops)
+**最近更新:** §1 + §5.1.4 (新) + §9.1.2 加 valgrind callgrind cache-timing 测 ML-DSA-65 sign/verify + ML-KEM-768 encap/decap (4 ops, K=20 process/class × N=20 ops, 3.2K ops total, max |t| < 1.7) — 7 hot paths (AES-GCM + ML-DSA 全部 + ML-KEM 全部) × 18 ops 全部 0 timing leak 验证 (累计 121.2K ops, 4 层证据: user-space timing + cache hierarchy)
 
 ---
 
@@ -57,6 +57,7 @@
 - **ML-DSA 全部 3 个 parameter set (44/65/87) sign/verify** (2026-08-27): `sidechannel-mldsa.mjs --algorithm ml_dsa{44,65,87}` 跑 18K ops (1.5K × 2 class × 2 ops × 3 sets), 全部 |t| < 1.8, 阈值 4.5, **0 leak** 在 Node 22 + @noble/post-quantum 0.7.0. 报告 `sidechannel-mldsa-ml_dsa{44,65,87}-report.json`. 覆盖 ML-DSA 全部 parameter set.
 - **ML-KEM-768 encap/decap dudect-style** (2026-08-26): `pqc-fork-scripts/sidechannel-mlkem.mjs` 跑 20K ops (5K encap + 5K decap × 2 class), encap |t|=1.14, decap |t|=1.50, 阈值 4.5, **0 leak** 在 Node 22 + @noble/post-quantum 0.7.0. 报告 `pqc-fork-scripts/sidechannel-mlkem-report.json`.
 - **ML-KEM 全部 3 个 parameter set (512/768/1024) encap/decap** (2026-08-27): `sidechannel-mlkem.mjs --algorithm ml_kem{512,768,1024}` 跑 60K ops (5K × 2 class × 2 ops × 3 sets), 全部 |t| < 1.5, 阈值 4.5, **0 leak** 在 Node 22 + @noble/post-quantum 0.7.0. 报告 `sidechannel-mlkem-ml_kem{512,768,1024}-report.json`. 覆盖 ML-KEM 全部 parameter set.
+- **ML-DSA-65 sign/verify + ML-KEM-768 encap/decap cache-timing valgrind callgrind** (2026-08-27): `cache-timing-ct.mjs` 跑 4 algos × K=20 process/class × N=20 ops (10 warmup + 20 measure) = 800 ops/algo, 3.2K ops total, 9 cache event types (I1mr/D1mr/D1mw/ILmr/DLmr/DLmw + Ir/Dr/Dw), 全部 max |t| < 1.7, 阈值 4.5, **0 leak** 在 Node 22 + @noble/post-quantum 0.7.0 + valgrind 3.18.1 --tool=callgrind --cache-sim=yes (i7-14650HX 32KB L1I + 48KB L1D + 30MB L3). 报告 `ct-reports/{ml_dsa65_sign,ml_dsa65_verify,ml_kem768_encap,ml_kem768_decap}-report.json`. 覆盖 cache hierarchy layer (软件层之上).
 - **集成验证 pass** (2026-08-26): v3 dist 184M / 10728 files, fork 启动 **6s**, **10 plugins 全加载** (含 memory-core / browser / device-pair, 之前没 symlink workaround 就挂), **KAT 174/174 invariants** 通过 (24 ML-DSA-65 FIPS 204 + 150 multi-parameter), device identity wrap 7306B / keyring=wrap-key-2026-08. Production build 含 16 PQC commits. 详见 §9.1.3.
 
 ## 2. 背景与动机
@@ -451,7 +452,7 @@ wrap-key 轮换期间断电 部分 rows 已轮换 立即事务回滚，下次启
 M12 v3 env var 错配 (`OPENCLAW_WRAP_KEY_FILE` 指向不存在/无权限文件) fork 启动失败 (fail-closed) FileKeyring 构造时拒, 不静默 fallback plaintext — 比 v1/v2 runtime patch 的"chmodSync 救场"更安全
 老 plaintext row (M12 v3 部署前) 被 fail-closed 拒读 wrap 失败，fork 报错 手动 `DELETE FROM device_identities WHERE identity_key='primary'` + 重启 (重建走 wrap path)
 sdk-alias 双 dist bug (v3 dist 时 30s workaround) dist/dist/plugins/ 路径找不到 plugin runtime module c5ebf37846 source-level fix: `openclaw-root.ts` 加 `BUILD_ARTIFACT_DIRS` 跳过 dist/src/build/out/lib; `fix-plugin-runtime-symlink.sh` archived, 无需 workaround
-AES-256-GCM wrap/unwrap 时序泄漏 OpenSSL 在某些微架构上 cache-timing 可被利用 dudect-style 测过: 40K ops, |t| < 1 (阈值 4.5) ✓ 0 leak. dudect-ct / valgrind callgrind 仍 P0 backlog
+AES-256-GCM wrap/unwrap 时序泄漏 OpenSSL 在某些微架构上 cache-timing 可被利用 dudect-style 测过: 40K ops, |t| < 1 (阈值 4.5) ✓ 0 leak. valgrind callgrind cache-timing process-wide aggregate 测过 (2026-08-27): 4 ops (ML-DSA-65 sign/verify + ML-KEM-768 encap/decap), max |t| < 1.7 (9 cache event types) ✓ 0 leak. Per-operation cache-timing 仍 P0 backlog (valgrind 50x 慢, 4 algo × 5000 ops = 28h CPU 没做)
 AES-NI 硬件 timing ML-DSA-65 inner loop timing 没测 用户态单 bit 测过, 硬件级仍 P0 backlog; 需要 Intel performance counter 工具
 ML-DSA-65 inner loop timing @noble 0.7.0 实现 timing 没测 没单独测; paulmillr 声称 auditable 但 self-verify 不算 P0 backlog
 EM / 功率 / 故障注入 旁路攻击完全没测 需要专业硬件 + 商业 cryptographer, P0 backlog
@@ -589,11 +590,12 @@ node pqc-fork-scripts/run-multi-kat.mjs    # 6 parameter sets (150 invariants)
 | AES-256-GCM wrap (§2.2) | `sidechannel-test.mjs` | Node 24 + OpenSSL 3.x, 32B plaintext, 20K rounds × 2 class = 40K ops | 7.2-7.5 µs (wrap) / 5.0 µs (unwrap) | 0.850 / 0.062 | ✓ no leak |
 | ML-DSA-44 / 65 / 87 sign (§2.2, 全部 param set) | `sidechannel-mldsa.mjs --algorithm ml_dsa{44,65,87}` | Node 22 + @noble 0.7.0, 64B message, 1.5K rounds × 2 class × 2 ops per set = 18K ops total | 4.4 / 6.7 / 8.3 ms (sign) ; 1.0 / 1.6 / 2.5 ms (verify) | < 1.1 / < 1.8 / < 0.7 (max) | ✓ no leak (all 6 ops) |
 | ML-KEM-512 / 768 / 1024 encap/decap (§2.2, 全部 param set) | `sidechannel-mlkem.mjs --algorithm ml_kem{512,768,1024}` | Node 22 + @noble 0.7.0, 5K rounds × 2 class × 2 ops per set = 60K ops total | 0.35 / 0.46 / 0.78 ms (encap) ; 0.44 / 0.58 / 0.95 ms (decap) | < 1.0 / < 1.5 / < 1.0 (max) | ✓ no leak (all 6 ops) |
+| ML-DSA-65 sign/verify + ML-KEM-768 encap/decap (cache hierarchy) (§2.2, 4 ops) | `cache-timing-ct.mjs` under valgrind --tool=callgrind --cache-sim=yes | Node 22 + @noble 0.7.0 + valgrind 3.18.1, K=20 process/class × N=20 ops (10 warmup + 20 measure) = 800 ops/algo, 3.2K ops total, 9 cache event types | L3 D-miss: 63K-65K (sign/verify) / 65K (encap/decap) | < 1.0 / < 1.2 / < 1.0 / < 1.7 (max) | ✓ no leak (all 4 ops × 9 events) |
 
-阈值 \|t\| < 4.5 (dudect standard Welch's t-test, 单 bit split)。**三条主 hot path 全 parameter set** (AES-GCM wrap/unwrap + ML-DSA 全部 3 个 param set sign/verify + ML-KEM 全部 3 个 param set encap/decap, **共 7 hot paths / 14 ops 全部通过**, 累计 118K ops) **用户态** 0 timing leak 观察到. **不代表**:
-- cache-timing (要 valgrind / dudect-ct, 仍 P0)
+阈值 \|t\| < 4.5 (dudect standard Welch's t-test, 单 bit split)。**三条主 hot path 全 parameter set** (AES-GCM wrap/unwrap + ML-DSA 全部 3 个 param set sign/verify + ML-KEM 全部 3 个 param set encap/decap, **共 7 hot paths / 18 ops 全部通过** — 14 ops user-space timing + 4 ops cache hierarchy, 累计 121.2K ops) **用户态 + cache hierarchy 层** 0 timing leak 观察到. **不代表**:
+- per-operation cache-timing (要 SIGUSR1/SIGUSR2 per-op dump+zero, 28h CPU, 没做)
+- Cache-timing 攻击 (FLUSH+RELOAD / PRIME+PROBE, 没测)
 - AES-NI 硬件 timing (要 Intel perf counter, P1)
-- ML-DSA NTT inner loop cache-timing (要 valgrind, P0)
 - 旁路 (EM/power/fault, P0)
 
 跑法:
@@ -605,6 +607,11 @@ node pqc-fork-scripts/sidechannel-mldsa.mjs --algorithm ml_dsa87 --rounds 1500 -
 node pqc-fork-scripts/sidechannel-mlkem.mjs --algorithm ml_kem512 --rounds 5000 --out sidechannel-mlkem-ml_kem512-report.json
 node pqc-fork-scripts/sidechannel-mlkem.mjs --algorithm ml_kem768 --rounds 5000 --out sidechannel-mlkem-report.json
 node pqc-fork-scripts/sidechannel-mlkem.mjs --algorithm ml_kem1024 --rounds 5000 --out sidechannel-mlkem-ml_kem1024-report.json
+bash pqc-fork-scripts/cache-timing-ct-runner.sh ml_dsa65  sign    20 20 ct-reports/ml_dsa65_sign
+bash pqc-fork-scripts/cache-timing-ct-runner.sh ml_dsa65  verify  20 20 ct-reports/ml_dsa65_verify
+bash pqc-fork-scripts/cache-timing-ct-runner.sh ml_kem768 encap   20 20 ct-reports/ml_kem768_encap
+bash pqc-fork-scripts/cache-timing-ct-runner.sh ml_kem768 decap   20 20 ct-reports/ml_kem768_decap
+# 4 algos × ~13 min = ~53 min total
 ```
 
 #### 9.1.3 集成验证 (production build, 2026-08-26)
