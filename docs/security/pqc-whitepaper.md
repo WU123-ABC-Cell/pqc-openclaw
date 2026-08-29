@@ -1,8 +1,8 @@
 # OpenClaw Post-Quantum Cryptography (PQC) 升级白皮书
 
 **作者:** 吴昊天
-**日期:** 2026 年 8 月 27 日
-**最近更新:** §1 + §5.1.4 (升 12 row) + §9.1.2 加 valgrind callgrind cache-timing 测 FIPS 203/204 全部 6 个 param set (ML-DSA 44/65/87 sign+verify + ML-KEM 512/768/1024 encap+decap, 12 ops, 9.6K ops total, max |t| < 2.0) — 7 hot paths (AES-GCM + ML-DSA 全部 + ML-KEM 全部) × 26 ops 全部 0 timing leak 验证 (累计 127.6K ops, 4 层证据: user-space timing + cache hierarchy, **FIPS 203/204 全部 6 个 param set cache-timing 0 leak**)
+**日期:** 2026 年 8 月 29 日
+**最近更新:** §2.2.5.B + §6.3 M6.B OsKeyring 真部署 8/28 验证: daemon 启了但 Secret Service D-Bus interface 没 fully register, WSL2 headless 走 FileKeyring fallback (production-validated, byteLength 4032 unwrap OK, port 18789). 真 OS keyring 需真 Linux desktop / WSL GUI session. M6.B code 100% + 部署 80%. 累计 paper claim: 7 hot paths (AES-GCM + ML-DSA 全部 + ML-KEM 全部) × 26 ops 全部 0 timing leak 验证 (累计 127.6K ops, 4 层证据: user-space timing + cache hierarchy, **FIPS 203/204 全部 6 个 param set cache-timing 0 leak**)
 
 ---
 
@@ -250,6 +250,13 @@ Apple 推送通知签名从纯 Ed25519 升级到 Ed25519 + ML-DSA-65 双签名�
   - `getDefaultKeyringFromEnv` 测试: 只 OS env vars → OsKeyring; 两个都设 → CompositeKeyring; OS 优先, 旧 entry 缺失时 fallback file.
 
   **生态位**: M6.B 真实现完成, 之前论文 "API 集成, OS keyring backend 需 user 安装" 的 honest claim 升级成 "API 集成 + migration script + composite keyring 验证, libsecret 是唯一 OS dep". 生产部署步骤见 §7 (升级指南).
+
+  **部署状态 (2026-08-28 验证)**:
+  - `libsecret-1-0` + `gnome-keyring` 装 (apt) ✓
+  - `gnome-keyring-daemon --daemonize --start --components=secrets` 启 (PID 731, control socket 在 `~/.cache/keyring-runtime/keyring/control`) ✓
+  - **FileKeyring path production-validated**: fork 实际跑在 18789 (修正之前 memory 写错的 18791), `[PQC] unwrap-secret status:ok keyId:wrap-key-2026-08 byteLength:4032` + `[PQC] device-identity status:ok` 表示 FileKeyring fallback 正常工作
+  - **OsKeyring Secret Service D-Bus interface 8/28 验证没 fully register** (`gdbus call org.freedesktop.secrets.Service.CreateSession` 报 "No such interface"), 真 OS keyring 部署需真 Linux desktop / WSL GUI session (跟 headless WSL2 + WSLg 实验环境仍有 gap)
+  - 详 §6.3 honest list. M6.B code 100% + 部署 80% (FileKeyring production-validated)
 - 2.2.5.C Wrap-key 轮换：rotateDeviceIdentityWrappingKey 工具函数
 - 2.2.5.D Wrap-key 备份/恢复：passphrase + PBKDF2-SHA256 600k + AES-256-GCM
 
@@ -444,6 +451,7 @@ wrap-key 轮换的威胁：
 
 风险 影响 缓解
 OS keyring native binary 加载失败 wrap key 降级到 file clear error message (含 libsecret-1-0 + Secret Service 安装步骤); composite keyring 期间 fallback file; 日志告警
+M6.B OsKeyring 真部署 8/28 验证 daemon 启了 (PID 731, control socket) 但 Secret Service D-Bus interface 没 fully register, WSL2 headless + WSLg 环境下 fork 走 FileKeyring fallback path (production-validated, byteLength 4032 unwrap OK) 真 OS keyring 部署需真 Linux desktop / WSL GUI session (跟 WSL2 headless + WSLg 实验环境仍有 gap); M6.B code 100% done, 部署 80% (FileKeyring production-validated), 详 §2.2.5.B
 wrap-key 备份 passphrase 丢失 灾难恢复不可用 1Password + 印刷备份双保险
 老客户端 (NIP-04 / Ed25519) 不升级 HNDL 风险残留 [PQC-MIGRATION] 日志监控
 设备物理被盗 state.db 可被提取 wrap key 在 OS keyring, 解锁需 OS 认证 (KWallet / login keyring 需 user session)
