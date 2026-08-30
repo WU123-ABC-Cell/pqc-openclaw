@@ -254,7 +254,7 @@ Apple 推送通知签名从纯 Ed25519 升级到 Ed25519 + ML-DSA-65 双签名�
 
   **生态位**: M6.B 真实现完成, 之前论文 "API 集成, OS keyring backend 需 user 安装" 的 honest claim 升级成 "API 集成 + migration script + composite keyring 验证, libsecret 是唯一 OS dep". 生产部署步骤见 §7 (升级指南).
 
-  **部署状态 (2026-08-29 验证)**:
+  **部署状态 (2026-08-29 验证, 2026-08-30 复现归档)**:
   - `libsecret-1-0` + `gnome-keyring` 装 (apt) ✓
   - `gnome-keyring-daemon --daemonize --start --components=secrets` 启 (用 `dbus-daemon --session --nofork` + `XDG_RUNTIME_DIR=$HOME/.cache/keyring-runtime` 替代 `/run/user/1000` tmpfs)
   - **OsKeyring 真部署 100%** (8/29 验证, fork 走 `@napi-rs/keyring` SecretService path 读出 wrap key):
