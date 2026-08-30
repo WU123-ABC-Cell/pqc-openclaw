@@ -228,3 +228,7 @@ extensions/discord/assets/embedded-app-sdk.mjs
 /.opengrep-out/
 /.crabbox-artifacts
 .comux*
+
+# WSL-specific IDE + plugin dirs (untracked, added 8/30 hygiene)
+/.vs/
+/plugin-sdk/
