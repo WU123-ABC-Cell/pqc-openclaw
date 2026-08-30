@@ -2,7 +2,7 @@
 
 **作者:** 吴昊天
 **日期:** 2026 年 8 月 29 日
-**最近更新:** §2.2.5.B + §6.3 M6.B OsKeyring 真部署 100% (8/29 验证, fork @napi-rs/keyring SecretService path 走通, byteLength 4032 unwrap OK, port 18789). 关键发现: WSL2 headless + WSLg 可达 (用 persistent XDG_RUNTIME_DIR + dbus-daemon --session --nofork), keytar 兼容 API attribute `application`+`username`, fork 期望 base64url 字符串 (32 raw bytes 会被 null byte 截断). 累计 paper claim: 7 hot paths (AES-GCM + ML-DSA 全部 + ML-KEM 全部) × 26 ops 全部 0 timing leak 验证 (累计 127.6K ops, 4 层证据: user-space timing + cache hierarchy, **FIPS 203/204 全部 6 个 param set cache-timing 0 leak**), **M6.B code 100% + 部署 100% (OsKeyring + FileKeyring 双向 production-validated)**
+**最近更新:** §2.2.5.B + §6.3 + §9.1.2 AES-256-GCM cache-timing 补全 (8/30 验证, `cache-timing-ct-aesgcm.mjs` 走 OpenSSL 3.x FIPS 140-3 path, 14 ops cache-timing 全部 0 leak: wrap max |t|=1.028 [DLmr] + unwrap max |t|=1.808 [D1mr]). 关键发现: WSL2 headless + WSLg 可达 (用 persistent XDG_RUNTIME_DIR + dbus-daemon --session --nofork), keytar 兼容 API attribute `application`+`username`, fork 期望 base64url 字符串 (32 raw bytes 会被 null byte 截断). 累计 paper claim: 7 hot paths (AES-GCM + ML-DSA 全部 + ML-KEM 全部) × **28 ops** 全部 0 timing leak 验证 (累计 129.2K ops, 4 层证据: user-space timing + cache hierarchy, **FIPS 203/204 全部 6 个 param set + AES-GCM wrap/unwrap cache-timing 0 leak**), **M6.B code 100% + 部署 100% (OsKeyring + FileKeyring 双向 production-validated)**
 
 ---
 
@@ -59,6 +59,7 @@
 - **ML-KEM 全部 3 个 parameter set (512/768/1024) encap/decap** (2026-08-27): `sidechannel-mlkem.mjs --algorithm ml_kem{512,768,1024}` 跑 60K ops (5K × 2 class × 2 ops × 3 sets), 全部 |t| < 1.5, 阈值 4.5, **0 leak** 在 Node 22 + @noble/post-quantum 0.7.0. 报告 `sidechannel-mlkem-ml_kem{512,768,1024}-report.json`. 覆盖 ML-KEM 全部 parameter set.
 - **ML-DSA-65 sign/verify + ML-KEM-768 encap/decap cache-timing valgrind callgrind** (2026-08-27): `cache-timing-ct.mjs` 跑 4 algos × K=20 process/class × N=20 ops (10 warmup + 20 measure) = 800 ops/algo, 3.2K ops total, 9 cache event types (I1mr/D1mr/D1mw/ILmr/DLmr/DLmw + Ir/Dr/Dw), 全部 max |t| < 1.7, 阈值 4.5, **0 leak** 在 Node 22 + @noble/post-quantum 0.7.0 + valgrind 3.18.1 --tool=callgrind --cache-sim=yes (i7-14650HX 32KB L1I + 48KB L1D + 30MB L3). 报告 `ct-reports/{ml_dsa65_sign,ml_dsa65_verify,ml_kem768_encap,ml_kem768_decap}-report.json`. 覆盖 cache hierarchy layer (软件层之上).
 - **FIPS 203/204 全部 6 个 param set cache-timing valgrind callgrind** (2026-08-28): `cache-timing-ct.mjs` 加跑 ML-DSA 44/87 + ML-KEM 512/1024 sign/verify/encap/decap (8 新 ops), 累计 12 ops, K=20 × N=20 × 12 = 9.6K ops total, 9 cache event types, 全部 max |t| < 2.0, 阈值 4.5, **0 leak**. 报告 `ct-reports/{ml_dsa44,ml_dsa87,ml_kem512,ml_kem1024}_{sign,verify,encap,decap}-report.json`. **覆盖 FIPS 203/204 全部 6 个 param set cache-timing 0 leak** (3 ML-DSA × 2 + 3 ML-KEM × 2 = 12 ops).
+- **AES-256-GCM wrap/unwrap cache-timing valgrind callgrind** (2026-08-30): `cache-timing-ct-aesgcm.mjs` 走 OpenSSL 3.x FIPS 140-3 validated path, K=20 process/class × N=20 ops (10 warmup + 20 measure) = 400 ops/class, 800 ops/algo, **2 ops** (wrap + unwrap), 9 cache event types, 阈值 4.5, **0 leak** 在 Node 22 + valgrind 3.18.1 (i7-14650HX 32KB L1I + 48KB L1D + 30MB L3). 报告 `ct-reports/aes_gcm_{wrap,unwrap}-report.json`. **补全 7 hot paths × cache-timing 0 leak 覆盖** — 之前 12 ops 只覆盖 FIPS 203/204 全部 6 param set, AES-GCM 走 OpenSSL 黑盒路径, 本次黑盒测 0 leak 同样观察到. 累计 cache-timing **14 ops / 11.2K ops total / max |t| < 2.0**.
 - **集成验证 pass** (2026-08-26): v3 dist 184M / 10728 files, fork 启动 **6s**, **10 plugins 全加载** (含 memory-core / browser / device-pair, 之前没 symlink workaround 就挂), **KAT 174/174 invariants** 通过 (24 ML-DSA-65 FIPS 204 + 150 multi-parameter), device identity wrap 7306B / keyring=wrap-key-2026-08. Production build 含 16 PQC commits. 详见 §9.1.3.
 
 ## 2. 背景与动机
@@ -470,7 +471,7 @@ wrap-key 轮换期间断电 部分 rows 已轮换 立即事务回滚，下次启
 M12 v3 env var 错配 (`OPENCLAW_WRAP_KEY_FILE` 指向不存在/无权限文件) fork 启动失败 (fail-closed) FileKeyring 构造时拒, 不静默 fallback plaintext — 比 v1/v2 runtime patch 的"chmodSync 救场"更安全
 老 plaintext row (M12 v3 部署前) 被 fail-closed 拒读 wrap 失败，fork 报错 手动 `DELETE FROM device_identities WHERE identity_key='primary'` + 重启 (重建走 wrap path)
 sdk-alias 双 dist bug (v3 dist 时 30s workaround) dist/dist/plugins/ 路径找不到 plugin runtime module c5ebf37846 source-level fix: `openclaw-root.ts` 加 `BUILD_ARTIFACT_DIRS` 跳过 dist/src/build/out/lib; `fix-plugin-runtime-symlink.sh` archived, 无需 workaround
-AES-256-GCM wrap/unwrap 时序泄漏 OpenSSL 在某些微架构上 cache-timing 可被利用 dudect-style 测过: 40K ops, |t| < 1 (阈值 4.5) ✓ 0 leak. valgrind callgrind cache-timing process-wide aggregate 测过 (2026-08-27/28): **12 ops** (FIPS 203/204 全部 6 个 param set: ML-DSA 44/65/87 sign/verify + ML-KEM 512/768/1024 encap/decap), max |t| < 2.0 (9 cache event types) ✓ 0 leak. AES-GCM 没单独测 cache-timing (走 OpenSSL 3.x FIPS 140-3 validated path, 假设是). Per-operation cache-timing 仍 P0 backlog (valgrind 50x 慢, 12 algo × 5000 ops = 84h CPU 没做)
+AES-256-GCM wrap/unwrap 时序泄漏 OpenSSL 在某些微架构上 cache-timing 可被利用 dudect-style 测过: 40K ops, |t| < 1 (阈值 4.5) ✓ 0 leak. valgrind callgrind cache-timing process-wide aggregate 测过 (2026-08-27/28/30): **14 ops** (FIPS 203/204 全部 6 个 param set: ML-DSA 44/65/87 sign/verify + ML-KEM 512/768/1024 encap/decap + **AES-256-GCM wrap/unwrap**), max |t| < 2.0 (9 cache event types) ✓ 0 leak. **AES-GCM cache-timing 2026-08-30 补全** (`cache-timing-ct-aesgcm.mjs` 走 OpenSSL 3.x FIPS 140-3 path 黑盒测, 跟 12 ML algos 同一 protocol, 0 leak 同样观察到). Per-operation cache-timing 仍 P0 backlog (valgrind 50x 慢, 14 algo × 5000 ops = 98h CPU 没做)
 AES-NI 硬件 timing ML-DSA-65 inner loop timing 没测 用户态单 bit 测过, 硬件级仍 P0 backlog; 需要 Intel performance counter 工具
 ML-DSA-65 inner loop timing @noble 0.7.0 实现 timing 没测 没单独测; paulmillr 声称 auditable 但 self-verify 不算 P0 backlog
 EM / 功率 / 故障注入 旁路攻击完全没测 需要专业硬件 + 商业 cryptographer, P0 backlog
@@ -608,14 +609,14 @@ node pqc-fork-scripts/run-multi-kat.mjs    # 6 parameter sets (150 invariants)
 | AES-256-GCM wrap (§2.2) | `sidechannel-test.mjs` | Node 24 + OpenSSL 3.x, 32B plaintext, 20K rounds × 2 class = 40K ops | 7.2-7.5 µs (wrap) / 5.0 µs (unwrap) | 0.850 / 0.062 | ✓ no leak |
 | ML-DSA-44 / 65 / 87 sign (§2.2, 全部 param set) | `sidechannel-mldsa.mjs --algorithm ml_dsa{44,65,87}` | Node 22 + @noble 0.7.0, 64B message, 1.5K rounds × 2 class × 2 ops per set = 18K ops total | 4.4 / 6.7 / 8.3 ms (sign) ; 1.0 / 1.6 / 2.5 ms (verify) | < 1.1 / < 1.8 / < 0.7 (max) | ✓ no leak (all 6 ops) |
 | ML-KEM-512 / 768 / 1024 encap/decap (§2.2, 全部 param set) | `sidechannel-mlkem.mjs --algorithm ml_kem{512,768,1024}` | Node 22 + @noble 0.7.0, 5K rounds × 2 class × 2 ops per set = 60K ops total | 0.35 / 0.46 / 0.78 ms (encap) ; 0.44 / 0.58 / 0.95 ms (decap) | < 1.0 / < 1.5 / < 1.0 (max) | ✓ no leak (all 6 ops) |
+| AES-256-GCM wrap/unwrap (cache hierarchy, OpenSSL 3.x FIPS 140-3 path) (§2.2, 2 ops, 8/30 补全) | `cache-timing-ct-aesgcm.mjs` under valgrind --tool=callgrind --cache-sim=yes | Node 22 + OpenSSL 3.x FIPS 140-3 + valgrind 3.18.1, K=20 process/class × N=20 ops (10 warmup + 20 measure) = 400 ops/class, 1.6K ops total, 9 cache event types | L3 D-miss: 62K (wrap) / 62K (unwrap) | 1.028 (wrap) / 1.808 (unwrap, max) | ✓ no leak (all 2 ops × 9 events) |
 | ML-DSA 44/65/87 sign/verify + ML-KEM 512/768/1024 encap/decap (cache hierarchy, FIPS 203/204 全部 6 param set) (§2.2, 12 ops) | `cache-timing-ct.mjs` under valgrind --tool=callgrind --cache-sim=yes | Node 22 + @noble 0.7.0 + valgrind 3.18.1, K=20 process/class × N=20 ops (10 warmup + 20 measure) = 800 ops/algo, 9.6K ops total, 9 cache event types | L3 D-miss: 63K-65K (sign/verify ML-DSA) / 65K (encap/decap ML-KEM) | < 0.7 / < 1.0 / < 1.0 / < 1.2 / < 1.7 / < 2.0 (max per algo) | ✓ no leak (all 12 ops × 9 events) |
 
-阈值 \|t\| < 4.5 (dudect standard Welch's t-test, 单 bit split)。**三条主 hot path 全 parameter set** (AES-GCM wrap/unwrap + ML-DSA 全部 3 个 param set sign/verify + ML-KEM 全部 3 个 param set encap/decap, **共 7 hot paths / 26 ops 全部通过** — 14 ops user-space timing + 12 ops cache hierarchy, 累计 127.6K ops) **用户态 + cache hierarchy 层** 0 timing leak 观察到. **不代表**:
-- per-operation cache-timing (要 SIGUSR1/SIGUSR2 per-op dump+zero, 28h CPU, 没做)
+阈值 \|t\| < 4.5 (dudect standard Welch's t-test, 单 bit split)。**三条主 hot path 全 parameter set + 全部 hot path cache hierarchy** (AES-GCM wrap/unwrap + ML-DSA 全部 3 个 param set sign/verify + ML-KEM 全部 3 个 param set encap/decap, **共 7 hot paths / 28 ops 全部通过** — 14 ops user-space timing + **14 ops cache hierarchy**, 累计 129.2K ops) **用户态 + cache hierarchy 层** 0 timing leak 观察到. **不代表**:
+- per-operation cache-timing (要 SIGUSR1/SIGUSR2 per-op dump+zero, 14 algo × 5000 ops = 98h CPU, 没做)
 - Cache-timing 攻击 (FLUSH+RELOAD / PRIME+PROBE, 没测)
 - AES-NI 硬件 timing (要 Intel perf counter, P1)
 - 旁路 (EM/power/fault, P0)
-- AES-GCM cache-timing (只测了 ML-DSA/ML-KEM, AES-GCM 走 OpenSSL 3.x FIPS 140-3 validated path, 假设是)
 
 跑法:
 ```bash
@@ -641,6 +642,8 @@ bash pqc-fork-scripts/cache-timing-ct-runner.sh ml_kem768 encap   20 20 ct-repor
 bash pqc-fork-scripts/cache-timing-ct-runner.sh ml_kem768 decap   20 20 ct-reports/ml_kem768_decap
 bash pqc-fork-scripts/cache-timing-ct-runner.sh ml_kem1024 encap  20 20 ct-reports/ml_kem1024_encap
 bash pqc-fork-scripts/cache-timing-ct-runner.sh ml_kem1024 decap  20 20 ct-reports/ml_kem1024_decap
+# AES-GCM wrap/unwrap cache-timing (8/30 补全, OpenSSL 3.x FIPS 140-3 path)
+bash pqc-fork-scripts/cache-timing-ct-driver-aesgcm.sh 20 20
 ```
 
 #### 9.1.3 集成验证 (production build, 2026-08-26)
