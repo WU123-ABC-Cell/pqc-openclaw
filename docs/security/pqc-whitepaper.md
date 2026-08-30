@@ -33,6 +33,16 @@
 10. [未来工作](#10-未来工作)
 11. [参考文献](#11-参考文献)
 
+**论文材料 (paper supplementary materials)** (同仓 `docs/security/`):
+- `verification-log-2026-08-29-30.md` (300 行) — 8/29 M6.B 真部署 100% + 8/30 AES-GCM cache-timing 补全 验证步骤 + 复现命令
+- `paper-reviewer-faq.md` (124 行) — 12 Q&A 提前回答 reviewer 质疑 (per-op CT 98h CPU / mlock 24.6+ / OpenSSL 限定 / 第三方 audit / 等)
+- `PAPER-SUBMISSION-CHECKLIST.md` (60 行) — paper-grade 提交就绪 checklist + audit-grade 4 个 P0 backlog
+- `constant-time-audit.md` (308 行) — Side-channel 攻击面 §5.1.1-5.1.4 详 14 ops × 0 leak 数据
+- `pqc-fork-scripts/ct-reports/*/report.json` (14 个) — 14 ops cache-timing 原始 Welch's t-test 数据
+- `pqc-fork-scripts/sidechannel-*.mjs` (3 个) — user-space dudect-style 脚本
+- `pqc-fork-scripts/cache-timing-ct*.{mjs,sh}` (5 个) — cache-timing 脚本
+- `pqc-fork-scripts/check-cache-timing-claims.sh` (regression guard) — 14 reports 自动验证, 防 stale
+
 ---
 
 ## 1. 摘要
