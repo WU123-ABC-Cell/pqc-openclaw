@@ -1,7 +1,7 @@
 # OpenClaw Post-Quantum Cryptography (PQC) 升级白皮书
 
 **作者:** 吴昊天
-**日期:** 2026 年 8 月 29 日
+**日期:** 2026 年 8 月 30 日
 **最近更新:** §2.2.5.B + §6.3 + §9.1.2 AES-256-GCM cache-timing 补全 (8/30 验证, `cache-timing-ct-aesgcm.mjs` 走 OpenSSL 3.x FIPS 140-3 path, 14 ops cache-timing 全部 0 leak: wrap max |t|=1.028 [DLmr] + unwrap max |t|=1.808 [D1mr]). 关键发现: WSL2 headless + WSLg 可达 (用 persistent XDG_RUNTIME_DIR + dbus-daemon --session --nofork), keytar 兼容 API attribute `application`+`username`, fork 期望 base64url 字符串 (32 raw bytes 会被 null byte 截断). 累计 paper claim: 7 hot paths (AES-GCM + ML-DSA 全部 + ML-KEM 全部) × **28 ops** 全部 0 timing leak 验证 (累计 129.2K ops, 4 层证据: user-space timing + cache hierarchy, **FIPS 203/204 全部 6 个 param set + AES-GCM wrap/unwrap cache-timing 0 leak**), **M6.B code 100% + 部署 100% (OsKeyring + FileKeyring 双向 production-validated)**
 
 ---
@@ -46,6 +46,8 @@
 - 设备身份私钥在 state.db 中存储的抗量子加密
 
 升级覆盖 ML-KEM-768（FIPS 203）、ML-DSA-65（FIPS 204）、AES-256-GCM、PBKDF2-SHA256 等 NIST 标准算法。所有 PQC 升级均采用混合模式（hybrid mode），与经典算法并存，向后兼容。
+
+**累计 side-channel paper claim (2026-08-30 验证)**: 7 hot paths (AES-256-GCM + ML-DSA 44/65/87 + ML-KEM 512/768/1024) × **28 ops** 全部 0 timing leak 验证 (累计 **129.2K ops**, 4 层证据: dudect-style user-space timing + valgrind callgrind cache hierarchy, FIPS 203/204 全部 6 个 param set + AES-GCM wrap/unwrap cache-timing 0 leak). 详见 §6.3 + §9.1.2.
 
 **M12 v3 优化（2026-08-19 commit `f89f296687`）**: keyring 激活从"wizard 9 次 restart"简化为"设两个 env var"，fork 启动时间从 167s 降至 6-9s（17-28x speedup, warm ~6.2s / cold ~9.5s; 2026-08-22 用 `measure-startup.sh` 实测, 之前 commit message 写的 "1.7s" 是测量误差），且**不降低安全性**（fail-closed 保留, FileKeyring class `cachedKey` 复用）。详见 §2.2.5.A 末尾。
 
@@ -692,7 +694,11 @@ bash pqc-fork-scripts/cache-timing-ct-driver-aesgcm.sh 20 20
   - 签名/验签 cache 减少重复计算
 - 旁路测试:
   - ✅ **已完成 (2026-08-25)**: dudect-style 软件层 timing test — 40K ops, |t| < 1, 0 leak. 报告 `pqc-fork-scripts/sidechannel-report.json`.
-  - valgrind callgrind / dudect-ct (完整 cache-timing, P0)
+  - ✅ **已完成 (2026-08-27)**: dudect-style 跑 ML-DSA 全部 3 个 param set (44/65/87 sign/verify) — 18K ops, |t| < 1.8, 0 leak
+  - ✅ **已完成 (2026-08-27)**: dudect-style 跑 ML-KEM 全部 3 个 param set (512/768/1024 encap/decap) — 60K ops, |t| < 1.5, 0 leak
+  - ✅ **已完成 (2026-08-27/28)**: valgrind callgrind per-process aggregate cache-timing FIPS 203/204 全部 6 个 param set (12 ops) — 9.6K ops, max |t| < 2.0, 0 leak
+  - ✅ **已完成 (2026-08-30)**: valgrind callgrind per-process aggregate cache-timing AES-256-GCM wrap/unwrap (2 ops, OpenSSL 3.x FIPS 140-3 path) — 1.6K ops, max |t|=1.808 [D1mr], 0 leak
+  - valgrind callgrind **per-op** cache-timing via SIGUSR1/SIGUSR2 dump+zero (完整 cache-timing, P0, 14 algo × 5000 ops = 98h CPU)
   - AES-NI 硬件级 timing (Intel performance counter, P1)
   - ML-DSA-65 inner loop timing (@noble 0.7.0 内部, P1)
   - EM / 功率 / 故障注入 (P0)
