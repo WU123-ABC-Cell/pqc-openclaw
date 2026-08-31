@@ -298,3 +298,10 @@ Cumulative paper claim: 14 ops cache-timing 0 leak (threshold |t| < 4.5)
 ---
 
 **日志时间**: 2026-08-30 20:04 北京, 16 commits in WSL local main, 等 push.
+
+## 关联文档
+
+- `pqc-whitepaper.md` (主 paper, §5.1.4 / §6.3 / §9.1.2 / §10)
+- `paper-reviewer-faq.md` (12 Q&A 提前回答 reviewer 质疑, Q11 解释 WSL2 headless 真生产)
+- `PAPER-SUBMISSION-CHECKLIST.md` (1-page 提交就绪状态盘)
+- `constant-time-audit.md` (Side-channel 攻击面 §5.1.1-5.1.4 详 14 ops × 0 leak 数据)

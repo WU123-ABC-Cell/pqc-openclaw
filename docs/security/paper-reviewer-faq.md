@@ -122,3 +122,10 @@
 ---
 
 **8/30 当前 paper-grade 状态**: 28 ops / 129.2K / 0 leak, 17 commits, 等 push. P0 backlog 4 件 + 6 weeks cryptographer audit 是 paper → audit-grade 距离.
+
+## 关联文档
+
+- `pqc-whitepaper.md` (主 paper, §5.1.4 / §6.3 / §9.1.2 / §10)
+- `verification-log-2026-08-29-30.md` (8/29 M6.B + 8/30 AES-GCM CT 验证步骤, 复现依据)
+- `PAPER-SUBMISSION-CHECKLIST.md` (1-page 提交就绪状态盘)
+- `constant-time-audit.md` (Side-channel 攻击面 §5.1.1-5.1.4 详 14 ops × 0 leak 数据)

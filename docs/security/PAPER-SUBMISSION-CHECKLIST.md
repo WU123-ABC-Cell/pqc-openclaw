@@ -61,3 +61,10 @@
 ---
 
 **8/30 20:55**: 18 commits in WSL local main, 全 ready push. 阻塞 user 1 步 (FlClash GUI 启 + 5 min push). paper-grade state 完整, audit-grade 4 个 P0 backlog 是 paper accept 后工作, 不阻塞提交.
+
+## 关联文档
+
+- `pqc-whitepaper.md` (主 paper, §5.1.4 / §6.3 / §9.1.2 / §10)
+- `paper-reviewer-faq.md` (12 Q&A 提前回答 reviewer 质疑)
+- `verification-log-2026-08-29-30.md` (8/29 + 8/30 验证步骤, 复现依据)
+- `constant-time-audit.md` (Side-channel 攻击面 §5.1.1-5.1.4 详 14 ops × 0 leak 数据)
