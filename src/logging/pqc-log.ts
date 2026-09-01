@@ -30,6 +30,10 @@ export const PQC_EVENT = {
   Backup: "backup",
   Restore: "restore",
   Doctor: "doctor",
+  // PQC §6.3 v2 (mlock): emitted by mlock-helper on success / failure / unavailability.
+  Mlock: "mlock",
+  Munlock: "munlock",
+  MlockUnavailable: "mlock-unavailable",
 } as const;
 
 export type PqcEventId = (typeof PQC_EVENT)[keyof typeof PQC_EVENT];

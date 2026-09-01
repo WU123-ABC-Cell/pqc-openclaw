@@ -14,6 +14,7 @@
 // this module, and the type would pull this file in at parse time.
 
 import { createRequire } from "node:module";
+import { mlockKey, munlockKey } from "./mlock-helper.js";
 
 export type ActiveWrappingKey = {
   key: Buffer;
@@ -95,6 +96,9 @@ function decodeKeyMaterial(encoded: string, label: string): Buffer {
 
 export class OsKeyring implements KeyringProvider {
   private readonly entry: NapiKeyringEntry;
+  // M6.B v2: cache the decoded wrap key so we can mlock it across the
+  // process lifetime (one mlock per key, not per wrap/unwrap call).
+  private cachedKey: Buffer | null = null;
 
   constructor(
     private readonly service: string,
@@ -125,8 +129,13 @@ export class OsKeyring implements KeyringProvider {
 
   /** Read the active key. Returns the decoded 32-byte buffer plus
    *  the configured keyId. Throws if the entry does not exist or
-   *  the stored password is malformed. */
+   *  the stored password is malformed. M6.B v2: caches the decoded
+   *  key + mlock once per process so repeated wrap/unwrap calls do
+   *  not pay the mlock cost. */
   getActiveKey(): ActiveWrappingKey {
+    if (this.cachedKey) {
+      return { key: this.cachedKey, keyId: this.keyId };
+    }
     let password: string;
     try {
       password = this.entry.getPassword();
@@ -139,17 +148,18 @@ export class OsKeyring implements KeyringProvider {
         cause instanceof Error ? { cause } : undefined,
       );
     }
-    return {
-      key: decodeKeyMaterial(password, `os:${this.service}/${this.account}`),
-      keyId: this.keyId,
-    };
+    const key = decodeKeyMaterial(password, `os:${this.service}/${this.account}`);
+    this.cachedKey = key;
+    mlockKey(this.cachedKey, `os:${this.service}/${this.account}`);
+    return { key: this.cachedKey, keyId: this.keyId };
   }
 
   /** Look up a specific keyId. The OS keyring identifies entries
    *  by (service, account) only; we treat the requested keyId as
    *  the account name so rotation just stores a new entry with a
    *  different keyId. Returns null on "not found" so the composite
-   *  can walk providers. */
+   *  can walk providers. M6.B v2: same mlock-once pattern as
+   *  `getActiveKey()`. */
   getKeyById(keyId: string): Buffer | null {
     if (keyId !== this.keyId) {
       // The active OsKeyring only "owns" one entry (the one it was
@@ -160,9 +170,15 @@ export class OsKeyring implements KeyringProvider {
       // branch is the escape hatch for callers that need it.
       return null;
     }
+    if (this.cachedKey) {
+      return this.cachedKey;
+    }
     try {
       const password = this.entry.getPassword();
-      return decodeKeyMaterial(password, `os:${this.service}/${this.account}`);
+      const key = decodeKeyMaterial(password, `os:${this.service}/${this.account}`);
+      this.cachedKey = key;
+      mlockKey(this.cachedKey, `os:${this.service}/${this.account}`);
+      return this.cachedKey;
     } catch {
       return null;
     }
@@ -204,5 +220,20 @@ export class OsKeyring implements KeyringProvider {
    *  code should not need this. */
   static __resetNapiCacheForTests(): void {
     cachedKeyringModule = undefined;
+  }
+
+  /** M6.B v2: release any mlocked buffer this keyring is holding.
+   *  Called on process shutdown by the module-level hook to munlock
+   *  before the OS reclaims the pages. Idempotent. */
+  release(): void {
+    if (this.cachedKey) {
+      munlockKey(this.cachedKey, `os:${this.service}/${this.account}`);
+    }
+  }
+
+  /** Test hook: drop the cached key + mlock (without munlock). Used
+   *  by tests to simulate a fresh process. */
+  __resetCachedKeyForTests(): void {
+    this.cachedKey = null;
   }
 }

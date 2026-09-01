@@ -26,6 +26,7 @@ import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { OsKeyring } from "./os-keyring.js";
+import { mlockKey, munlockKey, isMlockActive } from "./mlock-helper.js";
 
 /** Stable id of a keyring entry. The wrap envelope records this id so
  *  a rotation can re-encrypt the payload with the new active key
@@ -144,13 +145,28 @@ export class FileKeyring implements KeyringProvider {
     const raw = readFileSync(this.keyPath, "utf8").trim();
     const key = decodeBase64UrlKey(raw, `file:${this.keyPath}`);
     this.cachedKey = key;
+    // mlock: lock the wrap key in physical RAM. No-op on Node < 24.0.0.
+    // PQC whitepaper §6.3 v2 (2026-09-01 follow-up).
+    mlockKey(this.cachedKey, `file:${this.keyPath}`);
     return key;
   }
 
   /** Drop the in-memory cache. Used by M7 rotation after the file
    *  has been swapped on disk. */
   invalidate(): void {
+    if (this.cachedKey) {
+      munlockKey(this.cachedKey, `file:${this.keyPath}`);
+    }
     this.cachedKey = null;
+  }
+
+  /** M6.B v2: release any mlocked buffer this keyring is holding.
+   *  Called on process shutdown by the module-level hook to munlock
+   *  before the OS reclaims the pages. Idempotent. */
+  release(): void {
+    if (this.cachedKey) {
+      munlockKey(this.cachedKey, `file:${this.keyPath}`);
+    }
   }
 }
 
@@ -242,6 +258,20 @@ export class CompositeKeyring implements KeyringProvider {
    *  asserting that "auto-inject" added a primary + a fallback. */
   get size(): number {
     return this.providers.length;
+  }
+
+  /** M6.B v2: release mlocked buffers in any inner provider that
+   *  supports it. Used by the module-level shutdown hook. */
+  release(): void {
+    for (const provider of this.providers) {
+      if (typeof (provider as { release?: () => void }).release === "function") {
+        try {
+          (provider as { release: () => void }).release();
+        } catch {
+          // best-effort
+        }
+      }
+    }
   }
 }
 
@@ -402,4 +432,30 @@ export function getDefaultKeyringFromEnv(
  *  code should not need it. */
 export function resetDefaultKeyringCache(): void {
   cachedDefaultKeyring = undefined;
+}
+
+/** M6.B v2: release all mlocked buffers in the default keyring cache.
+ *  Called on process shutdown by the hook installed below. Idempotent
+ *  and safe to call multiple times. */
+export function releaseDefaultKeyring(): void {
+  const keyring = cachedDefaultKeyring;
+  if (!keyring) return;
+  if (typeof (keyring as { release?: () => void }).release === "function") {
+    (keyring as { release: () => void }).release();
+  }
+}
+
+/** M6.B v2: install a one-shot process-exit hook that releases mlocked
+ *  wrap-key buffers before the OS reclaims the pages. Best-effort:
+ *  `process.on("exit", ...)` is fire-and-forget and runs after Node
+ *  has shut down most subsystems, so we keep the work to a single
+ *  `releaseDefaultKeyring()` call. */
+if (typeof process !== "undefined" && typeof process.on === "function") {
+  process.on("exit", () => {
+    try {
+      releaseDefaultKeyring();
+    } catch {
+      // best-effort: ignore any error during shutdown
+    }
+  });
 }
