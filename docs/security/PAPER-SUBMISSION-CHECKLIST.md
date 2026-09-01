@@ -20,7 +20,7 @@
 | **Constant-time self-audit** | 14 ops 全部 0 leak, §5.1.4 14-row table | `pqc-fork-scripts/constant-time-audit.md` |
 | **Handoff prompt (2 docs)** | 8/30 增量更新 (M6.B + AES-GCM CT) | `pqc-fork-scripts/pqc-fork-handoff-prompt*.md` |
 | **Regression guard** | 14 reports 任何 stale 立即 exit 1 | `pqc-fork-scripts/check-cache-timing-claims.sh` |
-| **WSL local main commits** | 18 commits, 8/25-8/30, 全 ready push | `git log --oneline \| wc -l` |
+| **WSL local main commits** | 22 commits, 8/25-9/1, 全 ready push | `git log --oneline \| wc -l` |
 | **作者署名** | 吴昊天 (用户真名) | header **作者:** 字段 |
 
 ## ❌ 未就绪 (audit-grade 升级路径, paper 后 backlog)
@@ -28,7 +28,7 @@
 | 缺口 | 优先级 | 描述 | 估算 |
 |------|-------|------|------|
 | 第三方 cryptographer 审 | P0 | 4-6 周 + 钱 (50-150K USD) | paper accept 后 |
-| mlock Node 24.6+ | P0 | 2-3 天 + KAT 174/174 + 28 ops 回归 | paper accept 后 |
+| mlock Node 24.6+ | P0 | ✅ **code-side done (commit `d8c642df7d`, 9/1)**; Node 24.15+ 升级 + KAT 174/174 + 28 ops 回归仍 2-3 天 | paper accept 后 |
 | per-op cache-timing (SIGUSR1/SIGUSR2) | P0 | 14 algo × 5000 ops × 2 class = 98h CPU | 98h |
 | 旁路攻击 (EM/power/fault) | P0 | 需专业硬件 + 商业 cryptographer | 4-6 周 |
 | AES-NI 硬件 timing | P1 | Intel perf counter 测 | 1 天 |
@@ -51,7 +51,7 @@
 
 | 阶段 | 工作 | 当前状态 |
 |------|------|---------|
-| Push commits | user push 18 commits | ❌ 阻塞 user 启 FlClash |
+| Push commits | user push 22 commits | ❌ 阻塞 user 启 FlClash |
 | 选 paper venue | USENIX Security / IEEE S&P / IACR CHES / IACR TCHES | 待 user 决定 |
 | 写 cover letter | 引用 28 ops / 129.2K / 14 reports / 12 Q&A | user 决定 |
 | Submit | paper.pdf + supplementary materials (verification log + 14 reports) | 待 user 决定 |
@@ -61,6 +61,8 @@
 ---
 
 **8/30 20:55**: 18 commits in WSL local main, 全 ready push. 阻塞 user 1 步 (FlClash GUI 启 + 5 min push). paper-grade state 完整, audit-grade 4 个 P0 backlog 是 paper accept 后工作, 不阻塞提交.
+
+**9/1 14:30**: +4 commits (`67f1d543eb` cross-ref / `ad963b482e` gitignore / `bd52b85a5f` submission-checklist / `d8c642df7d` mlock), WSL local main 现在 22 commits. M6.B v2 mlock 实施完成 (5 files / 331 ins), Node 22 上 no-op + 单 warning, Node 24+ 锁 wrap key 在物理 RAM. 阻塞 user 1 步 (FlClash GUI 启 + 5 min push).
 
 ## 关联文档
 

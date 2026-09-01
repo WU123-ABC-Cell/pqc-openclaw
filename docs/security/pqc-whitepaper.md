@@ -1,7 +1,7 @@
 # OpenClaw Post-Quantum Cryptography (PQC) 升级白皮书
 
 **作者:** 吴昊天
-**日期:** 2026 年 8 月 30 日
+**日期:** 2026 年 9 月 1 日
 **最近更新:** §2.2.5.B + §6.3 + §9.1.2 AES-256-GCM cache-timing 补全 (8/30 验证, `cache-timing-ct-aesgcm.mjs` 走 OpenSSL 3.x FIPS 140-3 path, 14 ops cache-timing 全部 0 leak: wrap max |t|=1.028 [DLmr] + unwrap max |t|=1.808 [D1mr]). 关键发现: WSL2 headless + WSLg 可达 (用 persistent XDG_RUNTIME_DIR + dbus-daemon --session --nofork), keytar 兼容 API attribute `application`+`username`, fork 期望 base64url 字符串 (32 raw bytes 会被 null byte 截断). 累计 paper claim: 7 hot paths (AES-GCM + ML-DSA 全部 + ML-KEM 全部) × **28 ops** 全部 0 timing leak 验证 (累计 129.2K ops, 4 层证据: user-space timing + cache hierarchy, **FIPS 203/204 全部 6 个 param set + AES-GCM wrap/unwrap cache-timing 0 leak**), **M6.B code 100% + 部署 100% (OsKeyring + FileKeyring 双向 production-validated)**
 
 ---
@@ -58,6 +58,8 @@
 升级覆盖 ML-KEM-768（FIPS 203）、ML-DSA-65（FIPS 204）、AES-256-GCM、PBKDF2-SHA256 等 NIST 标准算法。所有 PQC 升级均采用混合模式（hybrid mode），与经典算法并存，向后兼容。
 
 **累计 side-channel paper claim (2026-08-30 验证)**: 7 hot paths (AES-256-GCM + ML-DSA 44/65/87 + ML-KEM 512/768/1024) × **28 ops** 全部 0 timing leak 验证 (累计 **129.2K ops**, 4 层证据: dudect-style user-space timing + valgrind callgrind cache hierarchy, FIPS 203/204 全部 6 个 param set + AES-GCM wrap/unwrap cache-timing 0 leak). 详见 §6.3 + §9.1.2.
+
+**M6.B v2 mlock 升级 (2026-09-01 实施)**: wrap key 32 字节 mlock(2) 物理 RAM 锁 (commit `d8c642df7d`, 5 files / 331 ins). `src/security/mlock-helper.ts` 新建, `FileKeyring` / `OsKeyring` 集成 mlock + module-level `process.on("exit", releaseDefaultKeyring)`. **Node 22.23.1 (current)**: `typeof process.mlock === undefined` → 全部 no-op + 单次 [PQC] mlock-unavailable warning, 已有 wrap/unwrap 行为不变. **Node 24.0.0+ (per `package.json engines.node >=24.15.0 <25`)**: 调 `process.mlock(buf)` 锁 32 字节在物理 RAM, 防止 core dump / swap 泄露. Deployment-side Node 24.15+ 升级仍 deferred (4-5h, KAT 174/174 + 28 ops side-channel 回归), code-side 已 ready. 详 `pqc-fork-scripts/mlock-plan.md`.
 
 **M12 v3 优化（2026-08-19 commit `f89f296687`）**: keyring 激活从"wizard 9 次 restart"简化为"设两个 env var"，fork 启动时间从 167s 降至 6-9s（17-28x speedup, warm ~6.2s / cold ~9.5s; 2026-08-22 用 `measure-startup.sh` 实测, 之前 commit message 写的 "1.7s" 是测量误差），且**不降低安全性**（fail-closed 保留, FileKeyring class `cachedKey` 复用）。详见 §2.2.5.A 末尾。
 
@@ -700,7 +702,7 @@ bash pqc-fork-scripts/cache-timing-ct-driver-aesgcm.sh 20 20
   - ✅ **已完成 (M12 v3, commit `f89f296687`)**: FileKeyring instance cache + env auto-inject — 启动时间 167s → 6-9s (17-28x, warm 6.2s / cold 9.5s), 不需要 `secrets configure` wizard, +9 invariants
   - ✅ **已完成 (c5ebf37846)**: sdk-alias 双 dist bug source fix — `openclaw-root.ts` 加 `BUILD_ARTIFACT_DIRS` 跳过 dist/src/build/out/lib, workaround `fix-plugin-runtime-symlink.sh` 全去掉 (archived `pqc-fork-scripts/archive/2026-08-25/`)
   - ✅ **已完成 (21bc128b6b)**: M6.B OsKeyring 真实现 — `@napi-rs/keyring` 1.3.0 动态加载 + `migrate-oskeyring.mjs` + composite keyring (os primary + file fallback)
-  - 内存中的 wrap key 用 mlock 防止转储 (P0, 需 Node 24.6+ 升级)
+  - 内存中的 wrap key 用 mlock 防止转储: ✅ **code-side 已 done (commit `d8c642df7d`, 2026-09-01)**, Node 24.6+ 升级 + 跑回归仍 P0 backlog (4-5h autonomous, 待 push 后)
   - 签名/验签 cache 减少重复计算
 - 旁路测试:
   - ✅ **已完成 (2026-08-25)**: dudect-style 软件层 timing test — 40K ops, |t| < 1, 0 leak. 报告 `pqc-fork-scripts/sidechannel-report.json`.
