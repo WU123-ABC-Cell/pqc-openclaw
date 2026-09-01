@@ -69,4 +69,5 @@
 - `pqc-whitepaper.md` (主 paper, §5.1.4 / §6.3 / §9.1.2 / §10)
 - `paper-reviewer-faq.md` (12 Q&A 提前回答 reviewer 质疑)
 - `verification-log-2026-08-29-30.md` (8/29 + 8/30 验证步骤, 复现依据)
+- `MLOCK.md` (9/1 新, M6.B v2 mlock 设计 + 验证 + 部署 1-page 全集)
 - `constant-time-audit.md` (Side-channel 攻击面 §5.1.1-5.1.4 详 14 ops × 0 leak 数据)
