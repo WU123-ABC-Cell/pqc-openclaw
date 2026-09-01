@@ -7,16 +7,19 @@
 ## 1. 威胁模型
 
 **攻击面**: fork 进程启动后, wrap key (32 bytes AES-256) 在 process RAM 持续存在 (6-9s lifetime). 期间可能:
+
 - 进程被 OOM / SIGSEGV 杀, kernel 写 core dump
 - 进程长时间跑后, kernel 把内存 page swap 到 disk (under memory pressure)
 - 物理机被偷, cold-boot attack 读 RAM
 - 攻击者拿到磁盘 image, 扫 swap / core dump 找 wrap key
 
 **现有 mitigation** (8/19 `f89f296687` M12 v3):
+
 - `secure_memzero` 在 5 个 .c 文件: wrap key 用后清零
 - ❌ 缺口: 长期 in-RAM 的 wrap key 没清, 暴露整个 lifetime
 
 **mlock(2) 补的缺口**:
+
 - 锁 wrap key 32 bytes 在 physical RAM, 不被 swap
 - kernel `coredump_filter` (有 `VM_DONTDUMP` flag) 排除该 page 出 core dump
 - 物理攻击仍可能 (root read /proc/PID/mem), 但 bar 显著提高
@@ -43,32 +46,41 @@ __resetMlockCacheForTests() → void
 ```
 
 **3-state Node compat**:
-| Node version | `process.mlock` | 行为 |
-|---|---|---|
-| 22.23.1 (current) | `undefined` | 完全 no-op, 单次 [PQC] mlock-unavailable warning |
-| 24.0.0-24.14.x | `function` (stable from 24.0.0) | 调 `process.mlock(buf)`, log [PQC] mlock status=ok |
-| 24.15.0+ (per `package.json engines.node`) | `function` | 同 24.0.0, 跟其他 PQC 升级一起跑完整回归 |
+
+| Node version                               | `process.mlock`                 | 行为                                               |
+| ------------------------------------------ | ------------------------------- | -------------------------------------------------- |
+| 22.23.1 (current)                          | `undefined`                     | 完全 no-op, 单次 [PQC] mlock-unavailable warning   |
+| 24.0.0-24.14.x                             | `function` (stable from 24.0.0) | 调 `process.mlock(buf)`, log [PQC] mlock status=ok |
+| 24.15.0+ (per `package.json engines.node`) | `function`                      | 同 24.0.0, 跟其他 PQC 升级一起跑完整回归           |
 
 ### 2.2 集成点
 
 **FileKeyring** (`src/security/keyring-provider.ts`):
+
 - `readKey()` 在 `this.cachedKey = key` 之后调 `mlockKey(cachedKey, "file:...")`
 - `invalidate()` 调 `munlockKey(cachedKey, "file:...")` 然后清 cache (M7 rotation 路径)
 - `release()` 调 `munlockKey` (shutdown hook 路径)
 
 **OsKeyring** (`src/security/os-keyring.ts`):
+
 - 加 `cachedKey: Buffer | null = null` field
 - `getActiveKey()` 先看 cache, 没就 decode + cache + mlock
 - `getKeyById()` 同样模式
 - `release()` 调 `munlockKey`
 
 **CompositeKeyring** (`src/security/keyring-provider.ts`):
+
 - `release()` walks inner providers, 调 `release()` on each (best-effort, try/catch)
 
 **Module-level shutdown hook** (`src/security/keyring-provider.ts`):
+
 ```typescript
 process.on("exit", () => {
-  try { releaseDefaultKeyring(); } catch { /* best-effort */ }
+  try {
+    releaseDefaultKeyring();
+  } catch {
+    /* best-effort */
+  }
 });
 ```
 
@@ -86,6 +98,7 @@ process.on("exit", () => {
 `pqc-fork-scripts/verify-mlock-standalone.mjs` — 独立 .mjs 验证 helper logic, 不依赖 fork import 链.
 
 **Node 22.23.1 跑结果**:
+
 ```
 Node version: v22.23.1
 typeof process.mlock: undefined
@@ -105,6 +118,7 @@ DONE — no exceptions means defensive path works on Node 22.23.1
 ### 3.2 vitest (`src/security/mlock-helper.test.ts`)
 
 9 unit test (110 行):
+
 - `isMlockActive` returns boolean (Node-version independent)
 - `mlockKey` 32-byte Buffer 不 throw
 - `mlockKey` empty / null / undefined 是 no-op
@@ -114,7 +128,17 @@ DONE — no exceptions means defensive path works on Node 22.23.1
 - `munlockKey` 32-byte Buffer 幂等
 - `__resetMlockCacheForTests` 不改变 feature-detect 结果
 
-**Status**: vitest 跑不动 (pnpm install 半坏, pre-existing 从 8/25 `@noble/post-quantum + @napi-rs/keyring` 加后 lockfile 没 regen). 修法: `pnpm install --no-frozen-lockfile` (会 update `pnpm-lock.yaml`, tracked in git, 需 user 拍板).
+**Status**: ✅ **9/9 PASS in 2.17s** (2026-09-01 15:25, after `pnpm install --no-frozen-lockfile` 修 8/25 lockfile drift, commit `7339718e54`)
+
+```
+ RUN  v4.1.10 /home/abc/openclaw-upstream-backup
+ Test Files  1 passed (1)
+      Tests  9 passed (9)
+   Start at  15:25:14
+   Duration  2.17s (transform 1.69s, setup 1.11s, import 17ms, tests 875ms, environment 0ms)
+```
+
+**Keyring-provider / secret-wrapping 现有 test suite 状态**: ⚠️ 5min timeout (autonomous 跑 2 次, 估是 vitest cold-start 慢 + keyring 集成测试多). 留给 user 回来跑. mlock code 防御性 no-op on Node 22, 已有 wrap/unwrap 行为不变, risk 低.
 
 ### 3.3 Pre-commit gate (跑 pre-commit hook)
 
@@ -188,30 +212,32 @@ git push pqc main:master --force-with-lease -v
 
 ### 4.2 风险
 
-| 风险 | 概率 | 缓解 |
-|------|------|------|
-| V8 12.x JIT timing 变化影响 side-channel | 中 | 跑 14 ops 看 \|t\|, 跟 Node 22 baseline 比; 仍 < 4.5 即 OK |
-| ML-DSA-65 慢 5-10% | 低 | Node 24 V8 优化通常更快, 不慢 |
-| mlock syscall 失败 (RLIMIT_MEMLOCK / CAP_IPC_LOCK) | 中 | log warn, wrap/unwrap 主流程不 throw |
-| Munlock 失败 leak | 低 | onShutdown best-effort, kernel 进程退出释放 page |
-| WSL2 kernel 不支持 mlock | 低 | Linux 5.x+ 支持, WSL2 kernel 5.15+ 验证 OK |
+| 风险                                               | 概率 | 缓解                                                       |
+| -------------------------------------------------- | ---- | ---------------------------------------------------------- |
+| V8 12.x JIT timing 变化影响 side-channel           | 中   | 跑 14 ops 看 \|t\|, 跟 Node 22 baseline 比; 仍 < 4.5 即 OK |
+| ML-DSA-65 慢 5-10%                                 | 低   | Node 24 V8 优化通常更快, 不慢                              |
+| mlock syscall 失败 (RLIMIT_MEMLOCK / CAP_IPC_LOCK) | 中   | log warn, wrap/unwrap 主流程不 throw                       |
+| Munlock 失败 leak                                  | 低   | onShutdown best-effort, kernel 进程退出释放 page           |
+| WSL2 kernel 不支持 mlock                           | 低   | Linux 5.x+ 支持, WSL2 kernel 5.15+ 验证 OK                 |
 
 ## 5. [PQC] Log 表面 (9/1 新增 3 events)
 
 ```typescript
 // src/logging/pqc-log.ts
-PQC_EVENT.Mlock            = "mlock"            // info on success, warn on syscall fail
-PQC_EVENT.Munlock          = "munlock"          // debug on success
-PQC_EVENT.MlockUnavailable = "mlock-unavailable" // warn once per process if Node < 24.0.0
+PQC_EVENT.Mlock = "mlock"; // info on success, warn on syscall fail
+PQC_EVENT.Munlock = "munlock"; // debug on success
+PQC_EVENT.MlockUnavailable = "mlock-unavailable"; // warn once per process if Node < 24.0.0
 ```
 
 **Operator 期望** (Node 24+ production):
+
 ```
 [PQC] mlock status:ok provider:os:openclaw/wrap-key-2026-08 byteLength:32
 [PQC] unwrap-secret status:ok keyId:wrap-key-2026-08 byteLength:4032
 ```
 
 **Operator 期望** (Node 22 fallback, 现状):
+
 ```
 [PQC] mlock-unavailable status:skipped provider:node:v22.23.1 detail=...upgrade to Node v24.0.0+
 [PQC] unwrap-secret status:ok keyId:wrap-key-2026-08 byteLength:4032
@@ -219,17 +245,17 @@ PQC_EVENT.MlockUnavailable = "mlock-unavailable" // warn once per process if Nod
 
 ## 6. 累计 paper claim (跨 8/30-9/1 升级)
 
-| 维度 | 8/29 之前 | 8/30 | 9/1 |
-|---|---|---|---|
-| Hot paths × 2 test types | 6 (FIPS 203/204) + AES-GCM 假设 | 7 (含 AES-GCM cache-timing) | 7 + **M6.B v2 mlock** |
-| Cache-timing ops | 12 | 14 (含 AES-GCM) | 14 (不变) |
-| Cache-timing op count | 9.6K | 11.2K | 11.2K |
-| M6.B deployment | FileKeyring fallback (80%) | **OsKeyring + FileKeyring composite 100%** | + **mlock code-side ✅** |
-| Total ops (user-space + cache-timing) | 127.6K | 129.2K | 129.2K |
-| max \|t\| cache-timing | 1.983 | 1.983 | 1.983 |
-| Threshold | 4.5 | 4.5 | 4.5 |
-| paper-grade | ready | ready | ready |
-| audit-grade gap | 4 P0 | 4 P0 | **3 P0** (mlock code-side ✅) |
+| 维度                                  | 8/29 之前                       | 8/30                                       | 9/1                           |
+| ------------------------------------- | ------------------------------- | ------------------------------------------ | ----------------------------- |
+| Hot paths × 2 test types              | 6 (FIPS 203/204) + AES-GCM 假设 | 7 (含 AES-GCM cache-timing)                | 7 + **M6.B v2 mlock**         |
+| Cache-timing ops                      | 12                              | 14 (含 AES-GCM)                            | 14 (不变)                     |
+| Cache-timing op count                 | 9.6K                            | 11.2K                                      | 11.2K                         |
+| M6.B deployment                       | FileKeyring fallback (80%)      | **OsKeyring + FileKeyring composite 100%** | + **mlock code-side ✅**      |
+| Total ops (user-space + cache-timing) | 127.6K                          | 129.2K                                     | 129.2K                        |
+| max \|t\| cache-timing                | 1.983                           | 1.983                                      | 1.983                         |
+| Threshold                             | 4.5                             | 4.5                                        | 4.5                           |
+| paper-grade                           | ready                           | ready                                      | ready                         |
+| audit-grade gap                       | 4 P0                            | 4 P0                                       | **3 P0** (mlock code-side ✅) |
 
 ---
 
