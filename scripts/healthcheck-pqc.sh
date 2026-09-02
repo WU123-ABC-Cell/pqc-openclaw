@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 # healthcheck-pqc.sh — production health check for the PQC OpenClaw fork.
 #
 # Verifies:
@@ -41,6 +41,17 @@ INSTALL_ROOT="${INSTALL_ROOT:-/opt/pqc-openclaw}"
 SERVICE_NAME="${SERVICE_NAME:-pqc-openclaw}"
 WRAP_KEY_FILE="${WRAP_KEY_FILE:-$STATE_DIR/wrap-key.b64}"
 WRAP_KEY_OS_SERVICE="${WRAP_KEY_OS_SERVICE:-pqc-openclaw}"
+# Detect OS once so the checks below (which compare against $OS) actually
+# run on Linux + macOS. Without this, ${OS:-} defaults to "" and every
+# `[[ $OS == "linux" ]]` evaluates false, silently skipping check 6
+# (wrap-key-file), check 7 (os-keyring platform branch), and check 8
+# (journal). The ${OS:-} form was a defense for set -u but it masked
+# the fact that $OS was never populated.
+case "$(uname -s 2>/dev/null | tr '[:upper:]' '[:lower:]')" in
+  linux*)  OS=linux ;;
+  darwin*) OS=macos ;;
+  *)       OS=unknown ;;
+esac
 WRAP_KEY_OS_ACCOUNT="${WRAP_KEY_OS_ACCOUNT:-wrap-key-current}"
 SKIP_KEYRING=0
 JSON_OUTPUT=0
@@ -213,7 +224,7 @@ fi
 # ----------------------------------------------------------------------
 
 if [[ -f "$WRAP_KEY_FILE" ]]; then
-  if [[ $OS == "linux" || $OS == "macos" ]]; then
+  if [[ "${OS:-}" == "linux" || "${OS:-}" == "macos" ]]; then
     if command -v stat >/dev/null 2>&1; then
       MODE=$(stat -c %a "$WRAP_KEY_FILE" 2>/dev/null || stat -f %p "$WRAP_KEY_FILE" 2>/dev/null | tail -c 4)
       # POSIX bits: world-readable is a security hole
