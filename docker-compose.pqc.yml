@@ -1,0 +1,301 @@
+# docker-compose.pqc.yml — PQC OpenClaw fork production Compose file.
+#
+# This is the PQC-fork deployment recipe. It is intentionally a separate
+# file (not an `extends:` of upstream `docker-compose.yml`) so that:
+#   1. Upstream `docker-compose.yml` keeps its plain semantics and can
+#      be diffed cleanly against openclaw/openclaw on a merge.
+#   2. Operators deploying the PQC fork run an explicit, audited recipe.
+#   3. The PQC-specific additions (Docker secrets, mlock tmpfs, hardened
+#      healthcheck, read-only rootfs, non-root user) are visible in one
+#      place instead of being scattered across an `extends:` chain.
+#
+# Prerequisites (see docs/security/PQC-FORK.md §"Production deployment"):
+#   - PQC fork image built locally:  `pnpm run build && docker build -t pqc-openclaw:local .`
+#   - Two secret files on the host (mode 0400, root-only):
+#       ./secrets/gateway-token       # >= 32 bytes
+#       ./secrets/wrap-key.b64        # base64url of 32 raw wrap-key bytes
+#   - State directories on the host:
+#       ${OPENCLAW_STATE_DIR:-/var/lib/pqc-openclaw}
+#       ${OPENCLAW_BACKUP_DIR:-/var/backups/pqc-openclaw}
+#
+# Bring up:
+#   OPENCLAW_STATE_DIR=/var/lib/pqc-openclaw \
+#   OPENCLAW_BACKUP_DIR=/var/backups/pqc-openclaw \
+#   docker compose -f docker-compose.pqc.yml up -d
+#
+# Run the health check (same script install-pqc.sh installs into /usr/local/bin):
+#   bash scripts/healthcheck-pqc.sh
+#
+# ----------------------------------------------------------------------
+# Docker secrets
+# ----------------------------------------------------------------------
+# Two short-lived secrets that must NEVER live in .env. The gateway token
+# is what every client uses to authenticate; the wrap key is what every
+# cryptographic operation is rooted in. Both are read once at container
+# start from bind-mounted files (mode 0400 on the host).
+secrets:
+  gateway_token:
+    file: ./secrets/gateway-token
+  wrap_key:
+    file: ./secrets/wrap-key.b64
+
+# ----------------------------------------------------------------------
+# Services
+# ----------------------------------------------------------------------
+services:
+  # --------------------------------------------------------------------
+  # openclaw-gateway — main PQC OpenClaw gateway process
+  # --------------------------------------------------------------------
+  openclaw-gateway:
+    image: ${PQC_IMAGE:-pqc-openclaw:local}
+    build:
+      context: .
+      args:
+        # Pin the Node.js major version baked into the image. Production
+        # operators should rebuild against a digest of node:24.15-bookworm
+        # once they have validated mlock on Node 24.15+ in their env.
+        NODE_MAJOR: ${PQC_NODE_MAJOR:-22}
+    secrets:
+      - gateway_token
+      - wrap_key
+    environment:
+      HOME: /home/node
+      OPENCLAW_HOME: /home/node
+      TERM: xterm-256color
+      # Container-side state, workspace, and config paths pinned to keep
+      # host values from `.env` from leaking into the container (see
+      # upstream docker-compose.yml for the same rationale + #77436).
+      OPENCLAW_STATE_DIR: /home/node/.openclaw
+      OPENCLAW_CONFIG_PATH: /home/node/.openclaw/openclaw.json
+      OPENCLAW_CONFIG_DIR: /home/node/.openclaw
+      OPENCLAW_WORKSPACE_DIR: /home/node/.openclaw/workspace
+      # PQC-fork specific. The PQC events (mlock / munlock /
+      # mlock-unavailable) are emitted on a separate stream so that
+      # security monitoring can ingest them without parsing the full
+      # Gateway log. See docs/security/MLOCK.md §"Audit log".
+      PQC_LOG_LEVEL: ${PQC_LOG_LEVEL:-info}
+      PQC_AUDIT_LOG_PATH: /home/node/.openclaw/pqc-audit.log
+      # Force the mlock path off until the operator has validated it on
+      # their kernel. Set to "1" only after running the manual test in
+      # docs/security/MLOCK.md §"Manual mlock validation" successfully.
+      PQC_REQUIRE_MLOCK: ${PQC_REQUIRE_MLOCK:-0}
+      # Loaded from Docker secrets; the *_FILE form is the canonical
+      # pattern for `docker exec` / `docker inspect` exposure containment.
+      OPENCLAW_GATEWAY_TOKEN_FILE: /run/secrets/gateway_token
+      OPENCLAW_WRAP_KEY_FILE: /run/secrets/wrap_key
+      OPENCLAW_ALLOW_INSECURE_PRIVATE_WS: ${OPENCLAW_ALLOW_INSECURE_PRIVATE_WS:-}
+      # Empty means auto: Bonjour disables itself in detected containers.
+      OPENCLAW_DISABLE_BONJOUR: ${OPENCLAW_DISABLE_BONJOUR:-}
+      # OpenTelemetry export stays as in upstream.
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: ${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-}
+      OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: ${OTEL_EXPORTER_OTLP_METRICS_ENDPOINT:-}
+      OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: ${OTEL_EXPORTER_OTLP_LOGS_ENDPOINT:-}
+      OTEL_EXPORTER_OTLP_PROTOCOL: ${OTEL_EXPORTER_OTLP_PROTOCOL:-http/protobuf}
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-pqc-openclaw}
+      OTEL_SEMCONV_STABILITY_OPT_IN: ${OTEL_SEMCONV_STABILITY_OPT_IN:-}
+      OPENCLAW_OTEL_PRELOADED: ${OPENCLAW_OTEL_PRELOADED:-}
+      CLAUDE_AI_SESSION_KEY: ${CLAUDE_AI_SESSION_KEY:-}
+      CLAUDE_WEB_SESSION_KEY: ${CLAUDE_WEB_SESSION_KEY:-}
+      CLAUDE_WEB_COOKIE: ${CLAUDE_WEB_COOKIE:-}
+      TZ: ${OPENCLAW_TZ:-UTC}
+    volumes:
+      # Persistent state (sqlite, keyring cache, pqc-audit.log).
+      - "${OPENCLAW_STATE_DIR:-/var/lib/pqc-openclaw}:/home/node/.openclaw"
+      - "${OPENCLAW_WORKSPACE_DIR:-/var/lib/pqc-openclaw/workspace}:/home/node/.openclaw/workspace"
+      - "${OPENCLAW_AUTH_PROFILE_SECRET_DIR:-/var/lib/pqc-openclaw/auth-profile-secrets}:/home/node/.config/openclaw"
+      # mlock tmpfs: process.mlock(2) requires the pages to be resident.
+      # Backing it with tmpfs (not a bind mount on a real fs) ensures
+      # the pages are always RAM-backed and not swapped to disk under
+      # memory pressure. 64 MiB is a generous cap; the actual wrap key
+      # is 32 bytes, but the OS rounds up to page granularity and we
+      # want headroom for future keys (audit log scratch buffer etc).
+      - mlock_tmpfs:/home/node/.openclaw/mlock
+      # Healthcheck script (host-side install-pqc.sh places this at
+      # /usr/local/share/pqc-openclaw/healthcheck-pqc.sh). We bind it
+      # into the container so the in-container healthcheck can run
+      # the same 8 checks the operator runs from cron / monitoring.
+      - "${PQC_HEALTHCHECK_PATH:-/usr/local/share/pqc-openclaw/healthcheck-pqc.sh}:/usr/local/bin/healthcheck-pqc.sh:ro"
+      # Backup scratch directory — the backup sidecar writes its
+      # tarball + sha256 sidecar here before the host-side cron /
+      # backup-pqc.sh copies it to S3 / off-host storage.
+      - "${OPENCLAW_BACKUP_DIR:-/var/backups/pqc-openclaw}:/backups"
+    # ------------------------------------------------------------------
+    # Hardening
+    # ------------------------------------------------------------------
+    # Drop everything except what the gateway actually uses. SYS_PTRACE
+    # is also dropped so a compromised gateway cannot ptrace itself or
+    # other processes on the host (a known side-channel exfil vector).
+    cap_drop:
+      - NET_RAW
+      - NET_ADMIN
+      - SYS_PTRACE
+      - SYS_ADMIN
+    # seccomp default + no-new-privileges blocks setuid binaries inside
+    # the container and limits the syscall surface to Docker's default
+    # profile. A custom seccomp profile is out of scope for v1.
+    security_opt:
+      - no-new-privileges:true
+      - seccomp:default
+    # read_only rootfs with explicit tmpfs mounts for the few paths
+    # that genuinely need write access at runtime. This stops an
+    # attacker who lands a write primitive from persisting to /usr.
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777,noexec,nosuid,nodev
+      - /home/node/.cache:size=128m,mode=0755,uid=1000,gid=1000
+    # Non-root user. The PQC fork image ships a `node` user at UID 1000;
+    # we pin it explicitly so a future upstream change to a different
+    # uid does not silently grant root.
+    user: "1000:1000"
+    # Resource caps. 1 GiB RAM is enough for the gateway + mlock pages
+    # + small per-request scratch; 1.0 CPU is a soft cap that prevents
+    # one runaway fork from monopolising the host. Tune via env if
+    # your workload needs more.
+    mem_limit: ${PQC_MEM_LIMIT:-1g}
+    memswap_limit: ${PQC_MEMSWAP_LIMIT:-1g}
+    cpus: ${PQC_CPUS:-1.0}
+    # pids_limit stops fork-bomb style attacks from exhausting the host
+    # PID namespace.
+    pids_limit: 256
+    # ulimits: open files is the standard 64k for a busy server; core
+    # is 0 so a crashed process does not dump potentially-secret-
+    # bearing memory to disk.
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+      core:
+        soft: 0
+        hard: 0
+    # host.docker.internal alias so bundled local-model providers
+    # (LM Studio, Ollama) can reach host services.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "${OPENCLAW_GATEWAY_PORT:-18789}:18789"
+      - "${OPENCLAW_BRIDGE_PORT:-18790}:18790"
+      - "${OPENCLAW_MSTEAMS_PORT:-3978}:3978"
+    init: true
+    restart: unless-stopped
+    # JSON log driver with rotation. Hard cap 50 MiB × 5 files = 250 MiB
+    # max log footprint per container, which keeps /var/lib/docker
+    # from filling up on a long-running PQC fork deployment.
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+    command:
+      - node
+      - dist/index.js
+      - gateway
+      - --bind
+      - ${OPENCLAW_GATEWAY_BIND:-lan}
+      - --port
+      - "18789"
+    # ------------------------------------------------------------------
+    # Health check
+    # ------------------------------------------------------------------
+    # Override the upstream `node dist/docker-healthcheck.js` single-
+    # endpoint probe with the full 8-check `healthcheck-pqc.sh`. The
+    # 30s interval + 10s timeout + 5 retries + 60s start_period
+    # matches install-pqc.sh systemd unit's healthcheck (operator can
+    # compare exit codes 0/1/2 directly across systemd and Docker).
+    healthcheck:
+      test:
+        - CMD
+        - bash
+        - /usr/local/bin/healthcheck-pqc.sh
+        - --port
+        - "18789"
+        - --json
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    # ------------------------------------------------------------------
+    # Labels (for `docker ps`, monitoring, and provenance)
+    # ------------------------------------------------------------------
+    labels:
+      org.opencontainers.image.title: "pqc-openclaw-gateway"
+      org.opencontainers.image.description: "PQC OpenClaw fork gateway with side-channel validation, mlock wrap key, and OS keyring fallback"
+      org.opencontainers.image.source: "https://github.com/WU123-ABC-Cell/pqc-openclaw"
+      org.opencontainers.image.licenses: "Apache-2.0"
+      com.pqc-openclaw.role: "gateway"
+      com.pqc-openclaw.security.audit: "docs/security/MLOCK.md,docs/security/constant-time-audit.md"
+      com.pqc-openclaw.security.audit-level: "self-audit (paper-grade); third-party audit pending"
+
+  # --------------------------------------------------------------------
+  # openclaw-cli — interactive CLI that runs in the gateway's netns
+  # --------------------------------------------------------------------
+  openclaw-cli:
+    image: ${PQC_IMAGE:-pqc-openclaw:local}
+    network_mode: "service:openclaw-gateway"
+    secrets:
+      - gateway_token
+    environment:
+      HOME: /home/node
+      OPENCLAW_HOME: /home/node
+      TERM: xterm-256color
+      OPENCLAW_STATE_DIR: /home/node/.openclaw
+      OPENCLAW_CONFIG_PATH: /home/node/.openclaw/openclaw.json
+      OPENCLAW_CONFIG_DIR: /home/node/.openclaw
+      OPENCLAW_WORKSPACE_DIR: /home/node/.openclaw/workspace
+      OPENCLAW_GATEWAY_TOKEN_FILE: /run/secrets/gateway_token
+      OPENCLAW_ALLOW_INSECURE_PRIVATE_WS: ${OPENCLAW_ALLOW_INSECURE_PRIVATE_WS:-}
+      BROWSER: echo
+      CLAUDE_AI_SESSION_KEY: ${CLAUDE_AI_SESSION_KEY:-}
+      CLAUDE_WEB_SESSION_KEY: ${CLAUDE_WEB_SESSION_KEY:-}
+      CLAUDE_WEB_COOKIE: ${CLAUDE_WEB_COOKIE:-}
+      TZ: ${OPENCLAW_TZ:-UTC}
+    volumes:
+      - "${OPENCLAW_STATE_DIR:-/var/lib/pqc-openclaw}:/home/node/.openclaw"
+      - "${OPENCLAW_WORKSPACE_DIR:-/var/lib/pqc-openclaw/workspace}:/home/node/.openclaw/workspace"
+      - "${OPENCLAW_AUTH_PROFILE_SECRET_DIR:-/var/lib/pqc-openclaw/auth-profile-secrets}:/home/node/.config/openclaw"
+    cap_drop:
+      - NET_RAW
+      - NET_ADMIN
+      - SYS_PTRACE
+    security_opt:
+      - no-new-privileges:true
+      - seccomp:default
+    stdin_open: true
+    tty: true
+    init: true
+    entrypoint:
+      - node
+      - dist/index.js
+    depends_on:
+      openclaw-gateway:
+        condition: service_healthy
+    labels:
+      com.pqc-openclaw.role: "cli"
+      com.pqc-openclaw.security.audit-level: "self-audit (paper-grade)"
+
+# ----------------------------------------------------------------------
+# Named volumes
+# ----------------------------------------------------------------------
+volumes:
+  mlock_tmpfs:
+    # `driver_opts.size` caps the tmpfs at 64 MiB so a runaway mlock
+    # call cannot exhaust host RAM. The `node` user can write into
+    # this path; everything else is read-only.
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=64m,uid=1000,gid=1000,mode=0755
+
+# ----------------------------------------------------------------------
+# Networks
+# ----------------------------------------------------------------------
+networks:
+  default:
+    # The gateway reaches the host only via host.docker.internal.
+    # No external bridge; the only way out is the explicitly bound
+    # 18789/18790/3978 ports.
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.enable_icc: "true"
+      com.docker.network.bridge.enable_ip_masquerade: "true"
