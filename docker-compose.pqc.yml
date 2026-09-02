@@ -111,11 +111,14 @@ services:
       # is 32 bytes, but the OS rounds up to page granularity and we
       # want headroom for future keys (audit log scratch buffer etc).
       - mlock_tmpfs:/home/node/.openclaw/mlock
-      # Healthcheck script (host-side install-pqc.sh places this at
-      # /usr/local/share/pqc-openclaw/healthcheck-pqc.sh). We bind it
-      # into the container so the in-container healthcheck can run
-      # the same 8 checks the operator runs from cron / monitoring.
-      - "${PQC_HEALTHCHECK_PATH:-/usr/local/share/pqc-openclaw/healthcheck-pqc.sh}:/usr/local/bin/healthcheck-pqc.sh:ro"
+      # Healthcheck script (host-side install-pqc.sh installs this at
+      # /usr/local/bin/healthcheck-pqc.sh). We bind it into the
+      # container so the in-container healthcheck can run the same
+      # 8 checks the operator runs from cron / monitoring. The
+      # container-side path is /usr/local/bin/healthcheck-pqc.sh to
+      # match the script's own default `HEALTHCHECK_BIN` so the
+      # in-container invocation works without any PATH override.
+      - "${PQC_HEALTHCHECK_PATH:-/usr/local/bin/healthcheck-pqc.sh}:/usr/local/bin/healthcheck-pqc.sh:ro"
       # Backup scratch directory — the backup sidecar writes its
       # tarball + sha256 sidecar here before the host-side cron /
       # backup-pqc.sh copies it to S3 / off-host storage.

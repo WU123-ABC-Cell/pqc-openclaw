@@ -13,7 +13,7 @@
 #   2. **Verifiable**: every backup gets a .sha256 sidecar; a separate
 #      `verify` mode (and a post-backup self-test) confirms the tarball
 #      extracts and the sqlite db opens before declaring success.
-#   3. **Idempotent under cron**: a flock-style lockfile in
+#   3. **Idempotent under cron**: a mkdir-based lock directory in
 #      $BACKUP_DIR/.backup.lock prevents two cron-triggered runs from
 #      stepping on each other (cron on most distros already runs in
 #      parallel shells).
@@ -134,9 +134,13 @@ EXAMPLES
   bash scripts/backup-pqc.sh --verify /var/backups/pqc-openclaw/pqc-openclaw-2026-08-30-030000.tar.gz
 
 REQUIREMENTS
-  - tar, gzip, sha256sum, find, flock (util-linux), sqlite3
+  - tar, gzip, sha256sum, ls, mkdir, sqlite3
   - aws cli (only required when --s3-bucket is set)
   - bash 4.0+ (uses arrays)
+  - All listed tools are POSIX / present on Ubuntu 22.04+, macOS 13+,
+    and WSL2 Ubuntu out of the box. flock is intentionally NOT used
+    because it is util-linux (Linux only); concurrency is guarded by
+    a mkdir-based lock instead, which is portable to macOS BSD.
 EOF
 }
 
@@ -183,19 +187,25 @@ else
 fi
 
 # ----------------------------------------------------------------------
-# Cleanup trap — always remove the scratch dir on exit, even on error.
+# Cleanup trap — always remove the scratch dir + release the lock on
+# exit, even on error. The lock is a directory (mkdir), not an fd, so
+# it survives across the trap and works on macOS (which has no flock).
 # ----------------------------------------------------------------------
 
 SCRATCH_DIR=""
-LOCK_FD=""
+LOCK_DIR=""
 
 cleanup() {
   local exit_code=$?
   if [[ -n "$SCRATCH_DIR" ]] && [[ -d "$SCRATCH_DIR" ]]; then
     rm -rf "$SCRATCH_DIR"
   fi
-  if [[ -n "$LOCK_FD" ]]; then
-    flock -u "$LOCK_FD" 2>/dev/null || true
+  if [[ -n "$LOCK_DIR" ]] && [[ -d "$LOCK_DIR" ]]; then
+    # Only remove if we still own it (a stale lock from a crashed
+    # previous run will not have a matching PID file).
+    if [[ -f "$LOCK_DIR/pid" ]] && [[ "$(cat "$LOCK_DIR/pid" 2>/dev/null)" == "$$" ]]; then
+      rm -rf "$LOCK_DIR"
+    fi
   fi
   exit "$exit_code"
 }
@@ -287,7 +297,9 @@ if [[ $DRY_RUN -eq 1 ]]; then
   SAFE_TS=$(echo "$TS" | tr ':' '-')
   LABEL_PART=""
   if [[ -n "$LABEL" ]]; then
-    SAFE_LABEL=$(echo "$LABEL" | tr -c 'A-Za-z0-9_-' '-')
+    # Use printf (no trailing newline) so `tr -c` does not turn
+    # the implicit newline into a trailing '-'.
+    SAFE_LABEL=$(printf '%s' "$LABEL" | tr -c 'A-Za-z0-9_-' '-')
     LABEL_PART=".${SAFE_LABEL}"
   fi
   BASENAME="pqc-openclaw-${SAFE_TS}${LABEL_PART}.tar.gz"
@@ -305,16 +317,24 @@ fi
 # ----------------------------------------------------------------------
 # Lock: prevent two backups from running concurrently
 # ----------------------------------------------------------------------
+# We use mkdir as a portable lock primitive (POSIX, present on Linux
+# and macOS BSD). The atomicity of mkdir is the lock: only one process
+# can create a directory at a given path. We stash our PID inside the
+# lock directory so a stale lock from a crashed run can be detected
+# (an operator can `cat .backup.lock/pid && ps -p <pid>` to decide
+# whether to `rm -rf .backup.lock` manually). The cleanup trap
+# releases the lock only if it still belongs to us (PID match).
 
-LOCK_FILE="$BACKUP_DIR/.backup.lock"
 mkdir -p "$BACKUP_DIR"
-LOCK_FD=$(mktemp)
-exec 9>"$LOCK_FILE"
-if ! flock -n 9; then
-  fail "lock" "another backup-pqc.sh is already running (lockfile $LOCK_FILE)"
+LOCK_DIR="$BACKUP_DIR/.backup.lock"
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+  # Lock held by someone else. Surface the holder's PID if available.
+  HOLDER_PID=$(cat "$LOCK_DIR/pid" 2>/dev/null || echo "unknown")
+  fail "lock" "another backup-pqc.sh is already running (PID $HOLDER_PID holds $LOCK_DIR)"
   exit 1
 fi
-ok "lock" "acquired $LOCK_FILE"
+echo "$$" > "$LOCK_DIR/pid"
+ok "lock" "acquired $LOCK_DIR (PID $$)"
 
 # ----------------------------------------------------------------------
 # Pre-flight: healthcheck
@@ -346,8 +366,10 @@ TS=$(date -u +%Y-%m-%dT%H%M%SZ)
 SAFE_TS=$(echo "$TS" | tr ':' '-')
 LABEL_PART=""
 if [[ -n "$LABEL" ]]; then
-  # Sanitize: only [A-Za-z0-9_-] survives; everything else becomes '-'
-  SAFE_LABEL=$(echo "$LABEL" | tr -c 'A-Za-z0-9_-' '-')
+  # Sanitize: only [A-Za-z0-9_-] survives; everything else becomes '-'.
+  # Use printf (no trailing newline) so `tr -c` does not turn the
+  # implicit newline into a trailing '-'.
+  SAFE_LABEL=$(printf '%s' "$LABEL" | tr -c 'A-Za-z0-9_-' '-')
   LABEL_PART=".${SAFE_LABEL}"
 fi
 BASENAME="pqc-openclaw-${SAFE_TS}${LABEL_PART}.tar.gz"
@@ -419,26 +441,21 @@ rm -rf "$VERIFY_DIR"
 # ----------------------------------------------------------------------
 # Retention: prune old backups (AFTER the new one is verified)
 # ----------------------------------------------------------------------
+# Grandfather-father-son lite: keep N daily + N weekly worth of the
+# most recent tarballs. Anything older gets pruned AFTER we have a
+# verified new tarball in place, so we never rotate the only good
+# copy on a failed run.
+#
+# We use `ls -1t` (sort by mtime, newest first) instead of GNU
+# `find -printf` so this works on macOS BSD `ls`. The head -n -K trick
+# drops the last K lines (i.e. keeps everything except the K oldest).
 
 PRUNE_COUNT=0
-# Daily: keep N most recent
-DAILY_TO_KEEP=$RETENTION_DAILY
-DAILY_LIST=$(find "$BACKUP_DIR" -maxdepth 1 -name 'pqc-openclaw-*.tar.gz' -type f -printf '%T@ %p\n' 2>/dev/null \
-  | sort -rn \
-  | awk '{
-      # Daily granularity: group by YYYY-MM-DD (the first 10 chars after pqc-openclaw-)
-      day=substr($2, length("pqc-openclaw-")+1, 10)
-      if (!seen[day]++) { print $0; count++; if (count >= '$DAILY_TO_KEEP') exit }
-    }')
-# Weekly: from the leftover (not in daily keep), keep N most recent (one per ISO week)
-WEEKLY_TO_KEEP=$RETENTION_WEEKLY
-# Simpler: just sort all by mtime, keep first (DAILY_TO_KEEP + WEEKLY_TO_KEEP) most recent,
-# delete the rest. This is the standard "grandfather-father-son" lite.
-TOTAL_KEEP=$(( DAILY_TO_KEEP + WEEKLY_TO_KEEP ))
-ALL_OLD=$(find "$BACKUP_DIR" -maxdepth 1 -name 'pqc-openclaw-*.tar.gz' -type f -printf '%T@ %p\n' 2>/dev/null \
-  | sort -rn \
-  | tail -n +$(( TOTAL_KEEP + 1 )) \
-  | awk '{print $2}')
+TOTAL_KEEP=$(( RETENTION_DAILY + RETENTION_WEEKLY ))
+# Collect all pqc-openclaw-*.tar.gz in BACKUP_DIR, newest first, then
+# drop the first $TOTAL_KEEP (those are the keepers) and prune the rest.
+ALL_OLD=$(ls -1t "$BACKUP_DIR"/pqc-openclaw-*.tar.gz 2>/dev/null \
+  | tail -n +$(( TOTAL_KEEP + 1 )) || true)
 if [[ -n "$ALL_OLD" ]]; then
   while IFS= read -r OLD; do
     [[ -z "$OLD" ]] && continue
@@ -450,7 +467,7 @@ if [[ -n "$ALL_OLD" ]]; then
     [[ $VERBOSE -eq 1 ]] && echo "[PRUNE] $OLD"
   done <<< "$ALL_OLD"
 fi
-ok "retention" "kept $TOTAL_KEEP (daily=$DAILY_TO_KEEP + weekly=$WEEKLY_TO_KEEP), pruned $PRUNE_COUNT"
+ok "retention" "kept $TOTAL_KEEP (daily=$RETENTION_DAILY + weekly=$RETENTION_WEEKLY), pruned $PRUNE_COUNT"
 
 # ----------------------------------------------------------------------
 # Optional: S3 upload
