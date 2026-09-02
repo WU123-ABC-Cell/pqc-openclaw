@@ -128,12 +128,13 @@ elif ! node -e 'process.exit(0)' >/dev/null 2>&1; then
   fail "node" "node --version failed"
 else
   NODE_VER=$(node --version 2>/dev/null | sed 's/^v//')
-  # Accept any of 22.22.3+, 24.15+, 25.9+
+  # Accept any of 22.22.3+, 24.15+, 25.9+ — use string compare (bash
+  # arithmetic can't handle "22.23.1" since it has a non-numeric component).
   NODE_OK=0
   case "$NODE_VER" in
-    22.*) (( ${NODE_VER#22.} >= 22 )) && NODE_OK=1 ;;
-    24.*) (( ${NODE_VER#24.} >= 15 )) && NODE_OK=1 ;;
-    25.*) (( ${NODE_VER#25.} >= 9  )) && NODE_OK=1 ;;
+    22.22.3 | 22.22.* | 22.23.* | 22.24.* | 22.25.* | 22.26.* | 22.27.* | 22.28.* | 22.29.*) NODE_OK=1 ;;
+    24.15.* | 24.16.* | 24.17.* | 24.18.* | 24.19.* | 24.2* | 24.3*)  NODE_OK=1 ;;
+    25.9.* | 25.10.* | 25.11.* | 25.12.* | 25.13.* | 25.14.* | 25.15.* | 25.16.* | 25.17.* | 25.18.* | 25.19.* | 25.2*) NODE_OK=1 ;;
   esac
   if [[ $NODE_OK -eq 1 ]]; then
     ok "node-version" "v$NODE_VER (supported)"
@@ -163,7 +164,7 @@ fi
 if pgrep -af "dist/index.js gateway" >/dev/null 2>&1; then
   PIDS=$(pgrep -f "dist/index.js gateway" | head -3 | tr '\n' ' ')
   ok "fork-process" "running (PIDs: $PIDS)"
-elif [[ $OS == "linux" ]] && command -v systemctl >/dev/null 2>&1; then
+elif [[ "${OS:-}" == "linux" ]] && command -v systemctl >/dev/null 2>&1; then
   if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
     warn "fork-process" "systemd says $SERVICE_NAME is active but no 'dist/index.js gateway' process found (restart loop?)"
   else
@@ -233,7 +234,7 @@ fi
 # ----------------------------------------------------------------------
 
 if [[ $SKIP_KEYRING -eq 0 ]]; then
-  if [[ "$OS" == "macos" ]]; then
+  if [[ "${OS:-}" == "macos" ]]; then
     if command -v security >/dev/null 2>&1; then
       # macOS Keychain lookup. service=generic, account=service
       if security find-generic-password -s "$WRAP_KEY_OS_SERVICE" -a "$WRAP_KEY_OS_ACCOUNT" >/dev/null 2>&1; then
@@ -244,7 +245,7 @@ if [[ $SKIP_KEYRING -eq 0 ]]; then
     else
       warn "os-keyring" "macOS 'security' cli not available; cannot check Keychain"
     fi
-  elif [[ "$OS" == "linux" ]]; then
+  elif [[ "${OS:-}" == "linux" ]]; then
     if command -v python3 >/dev/null 2>&1 && python3 -c 'import secretstorage' 2>/dev/null; then
       KEYRING_OK=$(python3 -c "
 import secretstorage
@@ -274,7 +275,7 @@ fi
 # Check 8: PQC events in journal (if systemd-managed)
 # ----------------------------------------------------------------------
 
-if [[ "$OS" == "linux" ]] && command -v journalctl >/dev/null 2>&1; then
+if [[ "${OS:-}" == "linux" ]] && command -v journalctl >/dev/null 2>&1; then
   PQC_COUNT=$(journalctl -u "$SERVICE_NAME" --since "1 hour ago" 2>/dev/null | grep -c '\[PQC\]' || true)
   PQC_OK_COUNT=$(journalctl -u "$SERVICE_NAME" --since "1 hour ago" 2>/dev/null | grep -c '\[PQC\].*status:ok' || true)
   PQC_FAIL_COUNT=$(journalctl -u "$SERVICE_NAME" --since "1 hour ago" 2>/dev/null | grep -c '\[PQC\].*status:fail' || true)
