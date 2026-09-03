@@ -25,8 +25,8 @@
 import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
+import { mlockKey, munlockKey } from "./mlock-helper.js";
 import { OsKeyring } from "./os-keyring.js";
-import { mlockKey, munlockKey, isMlockActive } from "./mlock-helper.js";
 
 /** Stable id of a keyring entry. The wrap envelope records this id so
  *  a rotation can re-encrypt the payload with the new active key
@@ -46,6 +46,10 @@ export interface ActiveWrappingKey {
 export interface KeyringProvider {
   getActiveKey(): ActiveWrappingKey;
   getKeyById(keyId: KeyId): Buffer | null;
+  /** M6.B v2: optional. Release any mlocked wrap-key buffer this
+   *  keyring is currently holding. Implementations that do not use
+   *  mlock may omit this; callers must type-guard before invoking. */
+  release?(): void;
 }
 
 /** Decode a 32-byte AES-256 key from a base64url (or base64) string.
@@ -412,19 +416,16 @@ export function getDefaultKeyringFromEnv(
 
   const providers: KeyringProvider[] = [];
   if (hasOs) {
-    const osKeyId =
-      (env.OPENCLAW_WRAP_KEY_OS_ID as KeyId | undefined) ?? "os-keyring";
+    const osKeyId = (env.OPENCLAW_WRAP_KEY_OS_ID as KeyId | undefined) ?? "os-keyring";
     providers.push(new OsKeyring(osService, osAccount, osKeyId));
   }
   if (hasFile) {
-    const fileKeyId =
-      (env.OPENCLAW_WRAP_KEY_ID as KeyId | undefined) ?? "file-keyring";
+    const fileKeyId = (env.OPENCLAW_WRAP_KEY_ID as KeyId | undefined) ?? "file-keyring";
     providers.push(new FileKeyring(keyPath, fileKeyId));
   }
 
-  cachedDefaultKeyring =
-    providers.length === 1 ? providers[0] : new CompositeKeyring(providers);
-  return cachedDefaultKeyring;
+  cachedDefaultKeyring = providers.length === 1 ? providers[0] : new CompositeKeyring(providers);
+  return cachedDefaultKeyring ?? null;
 }
 
 /** Drop the module-level default keyring cache. Tests use this to

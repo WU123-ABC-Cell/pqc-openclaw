@@ -52,9 +52,11 @@ export interface PqcLogPayload {
   provider?: string;
   /** Identity key (the row label, NOT the device id) for device-identity events. */
   identityKey?: string;
-  /** Status flag. Use "ok" for success, "fail" for a refused operation,
-   *  "rotate" for a rotation, "doctor" for a health-check finding. */
-  status?: "ok" | "fail" | "rotate" | "doctor" | "skipped";
+  /** Status flag. Use "ok" for success, "fail" for a runtime/IO
+   *  failure, "refused" for input validation refusals (e.g. mlock
+   *  on a too-large buffer), "rotate" for a key rotation, "doctor"
+   *  for a health-check finding. */
+  status?: "ok" | "fail" | "refused" | "rotate" | "doctor" | "skipped";
   /** Free-form operator-facing detail; the openclaw logger will
    *  redact any value that looks like a secret. */
   detail?: string;
@@ -63,11 +65,7 @@ export interface PqcLogPayload {
 /** Function the rest of the runtime calls to surface a PQC event.
  *  The default implementation writes through the openclaw logger
  *  (or, when the test environment has swapped it, the test sink). */
-export type PqcEmit = (
-  level: LogLevel,
-  event: PqcEventId,
-  payload: PqcLogPayload,
-) => void;
+export type PqcEmit = (level: LogLevel, event: PqcEventId, payload: PqcLogPayload) => void;
 
 let currentEmit: PqcEmit = defaultEmit;
 
