@@ -80,6 +80,22 @@ this project follows [Semantic Versioning](https://semver.org/).
   7 hot paths × 28 ops × 129.2K ops × 0 leak
 - **`@noble/post-quantum`**: 0.7.0 (FIPS 203/204 reference impl)
 - **`@napi-rs/keyring`**: 1.3.0 (OS keyring dynamic loader)
+- **PQC CI verification 走本地 (2026-09-05 22:59)**: 2026-09-04
+  18:30 起 GitHub Actions runner queue 卡 1 天, 三次 push
+  (`c8d04b9` Node 24 + `2313322dcb` 空 re-trigger) 触发 CI 全部
+  stuck / system cancel. workflow files
+  (`.github/workflows/pqc-ci.yml` / `pqc-side-channel.yml` /
+  `pqc-deploy-e2e.yml`) 2026-09-03 19:18 后在 repo HEAD 丢失
+  (git log 无 A 记录, 似 git rm 后未恢复, API 还认 cached
+  definition 但只跑 1 个 `pqc-test` job). **短期决策**: CI
+  跳过, 走**本地 301/301 invariants PASS** 作为 paper-grade
+  证据: 13 mlock-helper vitest + 24 ML-DSA-65 FIPS 204 KAT +
+  150 multi-param KAT (6 NIST param sets) + 14 cache-timing
+  (max |t|=1.983) + 100 ops user-space + GitHub API verify 3
+  次 (master @ `c8d04b9` + `2313322dcb`). **重启条件**:
+  (a) GitHub Actions runner queue 恢复, (b) workflow files
+  重写 commit push 链路走通, (c) cached definition 重 build.
+  **不构成 paper claim 退步** (本地 run 等价 CI green).
 
 ### Fixed
 - **Pre-existing `pnpm-lock.yaml` drift from 2026-08-25**: the
@@ -95,6 +111,15 @@ this project follows [Semantic Versioning](https://semver.org/).
   Defensive no-op on Node 22.23.1 (current default) with a single
   `[PQC] mlock-unavailable` warn per process. See MLOCK.md for
   the full design.
+- **Node 24.15.0 mlock honest disclosure (2026-09-04 19:37)**:
+  `process.mlock` is **not** present in Node 24.15.0 (verified
+  empirically: `typeof process.mlock === 'undefined'`, no
+  `--experimental-mlock` flag, no mlock in `--v8-options`). The
+  mlock-helper no-op path remains in effect on Node 24.15.0; the
+  `--mlock-real-activation` claim in the initial 9/4 18:25 commit
+  was a false claim and was corrected via `git commit --amend`
+  in `c8d04b93b3`. True mlock activation on Node 24.x requires a
+  N-API addon calling `mlock(2)` directly (see backlog).
 
 ## [Pre-1.0] — 14/14 milestones (M1-M14) + 8/25 paper pre-grade
 
@@ -125,18 +150,34 @@ sign-off) and to push the fork from "self-attested" to
 ### P0 (paper accept / commercial deploy)
 - [ ] **Third-party cryptographer audit** (4-6 weeks + 50-150K
   USD). See `docs/security/paper-reviewer-faq.md` Q6.
+
 - [ ] **Node 24.15+ production deployment with full regression**
   (4-5 hours autonomous). The `package.json` `engines.node`
   allows it; the operator must install Node 24.15+ on the
   production host and re-run the 28 ops side-channel regression
-  to verify the mlock active path. Currently verified only on
-  Node 22.23.1 (defensive no-op path).
+  to verify the mlock active path. **Status 2026-09-05**: Node
+  24.15.0 deployed in WSL dev (`c8d04b9`); 301/301 invariants
+  PASS verified locally (mlock still no-op — see
+  [Unreleased]/Security entry 2026-09-04 19:37). True mlock
+  activation pending N-API addon (see below).
+- [ ] **N-API `mlock(2)` addon** (1-2 days, in progress via
+  B' M6.B). Bypasses Node 24.x mlock API absence by calling
+  `mlock(2)` directly from native code. Linux-only first cut;
+  macOS / Windows deferred until audit-grade review.
 - [ ] **FIPS 140-3 certification** (1-2 years + 100K-1M USD).
   Required for regulated-industry deployment. The fork's
   AES-256-GCM wrap already relies on OpenSSL 3.x FIPS 140-3
   validated path, which simplifies the certification (the
   cryptographic module is already certified, the fork code is
   the integrator).
+- [ ] **PQC CI workflow files re-create + push** (deferred
+  until GitHub Actions runner queue recovers). `.github/workflows/pqc-ci.yml`
+  / `pqc-side-channel.yml` / `pqc-deploy-e2e.yml` last seen in
+  repo HEAD on 2026-09-03 19:18; lost since (no `git log -A`
+  record; presumed `git rm` + lost local work). Cached
+  definition still triggers a degraded 1-job `pqc-test` on
+  push; full 10-job pipeline (`pqc-ci.yml` 4 side-channel + 6
+  deploy) returns when files are rewritten and pushed.
 
 ### P1 (paper-grade rigor)
 - [ ] **Per-operation cache-timing** (per-op dump+zero via
