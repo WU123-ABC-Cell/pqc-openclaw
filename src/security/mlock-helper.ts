@@ -1,5 +1,6 @@
 // mlock-helper.ts — defensive mlock for in-memory secret material
-// (PQC whitepaper §6.3 v2, M6.B OsKeyring 真部署 100% follow-up, 9/1/2026).
+// (PQC whitepaper §6.3 v2, M6.B OsKeyring 真部署 100% follow-up, 9/1/2026,
+// N-API native addon fallback 9/5/2026).
 //
 // Why this exists: the wrap key is loaded into process RAM at fork
 // startup (via `OsKeyring.getActiveKey()` or `FileKeyring.readKey()`).
@@ -15,27 +16,28 @@
 // `RLIMIT_CORE` is set or when the kernel is configured with
 // `coredump_filter` that respects `VM_DONTDUMP`).
 //
-// Node support: process.mlock / process.munlock were added in Node
-// 24.0.0 (stable). Before that, `typeof process.mlock === undefined`.
-// We verified 2026-09-01 on Node 22.23.1:
-//
-//   $ node -e "console.log(typeof process.mlock)"
-//   undefined
-//   $ node --experimental-mlock -e "console.log(typeof process.mlock)"
-//   node: bad option: --experimental-mlock
-//   $ NODE_OPTIONS='--experimental-mlock' node -e "console.log(typeof process.mlock)"
-//   node: --experimental-mlock is not allowed in NODE_OPTIONS
-//
-// The fork's `package.json` `engines.node` accepts `>=24.15.0 <25`,
-// so a Node 24 LTS upgrade is the path to using this on a production
-// build. Until then, the helpers no-op + log a single warning so
-// the operator can see in the [PQC] log that mlock is skipped.
+// Three runtime paths, in priority order:
+//   1. `process.mlock` / `process.munlock` stable (Node >= 24.0.0
+//      stable). Verified for Node 24.15.0 on 2026-09-04 — NOT present
+//      in that build (the API was reverted/removed before 24.x
+//      shipped). On future Node 24.x / 25.x+ builds where the API
+//      returns, this path wins without code changes.
+//   2. N-API native addon (./native/mlock-addon) that calls
+//      `mlock(2)` directly. Linux-only first cut. Built via
+//      `pnpm run build:native`. Used when `process.mlock` is missing
+//      but the operator has compiled the addon. This is the
+//      M6.B v2 path documented in the PQC whitepaper §6.3 v2.
+//   3. Defensive no-op with a single [PQC] mlock-unavailable warn
+//      per process. Behavior preserved across Node versions and
+//      builds, so production never throws from the wrap/unwrap path.
 //
 // This is defense-in-depth, not a hard guarantee: even with mlock
 // active, an attacker with root on the host can read process memory.
 // The point is to raise the bar against passive attacks (cold-boot,
 // disk image after theft, kernel-privileged attacker without ptrace).
 import { pqcLog, PQC_EVENT, type PqcLogPayload } from "../logging/pqc-log.js";
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import nativeAddon from "./native/mlock-addon.cjs";
 
 /** Node version where process.mlock became stable (24.0.0). */
 const MLOCK_AVAILABLE_FROM_NODE = "v24.0.0";
@@ -61,21 +63,45 @@ interface MlockCapableProcess {
   munlock?: (buf: Buffer) => void;
 }
 
-/** Runtime feature-detect: does process.mlock exist as a callable
- *  function on this Node version? Cached after the first call. */
+/** Which backend won the feature-detect race. */
+type MlockBackend = "process" | "native" | null;
+
+/** Backend chosen for the current process. Computed once on the
+ *  first call to {@link mlockKey} / {@link munlockKey}. */
+let backendCache: MlockBackend = null;
+
+function detectBackend(): MlockBackend {
+  if (backendCache !== null) return backendCache;
+  const proc = process as unknown as MlockCapableProcess;
+  if (typeof proc.mlock === "function" && typeof proc.munlock === "function") {
+    backendCache = "process";
+    return backendCache;
+  }
+  if (nativeAddon.isAvailable()) {
+    backendCache = "native";
+    return backendCache;
+  }
+  backendCache = null;
+  return backendCache;
+}
+
+/** Runtime feature-detect: is mlock available through any path?
+ *  Cached after the first call. */
 function checkMlockAvailable(): boolean {
   if (mlockAvailableCache !== null) return mlockAvailableCache;
-  const proc = process as unknown as MlockCapableProcess;
-  mlockAvailableCache = typeof proc.mlock === "function" && typeof proc.munlock === "function";
+  const backend = detectBackend();
+  mlockAvailableCache = backend !== null;
   if (!mlockAvailableCache && !warnedUnavailable) {
     warnedUnavailable = true;
     pqcLog.warn(PQC_EVENT.MlockUnavailable, {
       status: "skipped",
       provider: `node:${process.version}`,
       detail:
-        `process.mlock not available; wrap key not mlocked in RAM. ` +
-        `Upgrade to Node ${MLOCK_AVAILABLE_FROM_NODE}+ for mlock ` +
-        `(PQC whitepaper §6.3 v2 follow-up).`,
+        `process.mlock not available and N-API addon not built; ` +
+        `wrap key not mlocked in RAM. ` +
+        `Upgrade to Node ${MLOCK_AVAILABLE_FROM_NODE}+ with stable ` +
+        `process.mlock, or run \`pnpm run build:native\` to enable ` +
+        `the M6.B v2 N-API fallback (PQC whitepaper §6.3 v2).`,
     } satisfies PqcLogPayload);
   }
   return mlockAvailableCache;
@@ -86,7 +112,8 @@ function checkMlockAvailable(): boolean {
  * and is excluded from core dumps (subject to kernel configuration).
  *
  * Defensive behavior:
- * - No-op on Node < 24.0.0 (one [PQC] mlock-unavailable warn per process).
+ * - No-op on Node < 24.0.0 without the native addon built (one
+ *   [PQC] mlock-unavailable warn per process).
  * - No-op on null / undefined / non-Buffer / empty input.
  * - Refuse to mlock buffers above {@link MAX_MLOCK_BYTES} (one warn
  *   per process) — protects against accidentally pinning a giant
@@ -117,22 +144,31 @@ export function mlockKey(buf: Buffer | null | undefined, label: string): void {
     return;
   }
   if (!checkMlockAvailable()) return;
-  const proc = process as unknown as MlockCapableProcess;
-  if (typeof proc.mlock !== "function") {
-    // Defensive: cache said yes, but the function disappeared
-    // (e.g. module reload, future Node API change). Invalidate cache
-    // and bail out for this call.
+  const backend = detectBackend();
+  if (backend === null) {
     mlockAvailableCache = false;
     return;
   }
   try {
-    proc.mlock(buf);
+    if (backend === "process") {
+      const proc = process as unknown as MlockCapableProcess;
+      if (typeof proc.mlock !== "function") {
+        mlockAvailableCache = false;
+        return;
+      }
+      proc.mlock(buf);
+    } else {
+      // backend === "native": N-API addon calling mlock(2) directly.
+      // Linux only. The addon throws on failure (e.g. EPERM,
+      // ENOMEM) — caught below and logged.
+      nativeAddon.mlockSync(buf);
+    }
     // Production run-once log: emit at debug so the [PQC] log is
     // not flooded. Operators who want to verify mlock is active can
     // run the fork with PQC log level set to debug.
     pqcLog.debug(PQC_EVENT.Mlock, {
       status: "ok",
-      provider: label,
+      provider: `${label} (backend=${backend})`,
       byteLength: buf.length,
       detail: `${process.platform}/${process.arch} node=${process.version}`,
     } satisfies PqcLogPayload);
@@ -142,8 +178,8 @@ export function mlockKey(buf: Buffer | null | undefined, label: string): void {
       provider: label,
       byteLength: buf.length,
       detail:
-        `mlock(2) syscall failed on ${process.platform}/${process.arch}: ` +
-        `${(error as Error).message}. ` +
+        `mlock(2) syscall failed on ${process.platform}/${process.arch} ` +
+        `(backend=${backend}): ${(error as Error).message}. ` +
         `Operator action: set RLIMIT_MEMLOCK >= ${buf.length} ` +
         `(e.g. 'ulimit -l unlimited' as root, or grant CAP_IPC_LOCK).`,
     } satisfies PqcLogPayload);
@@ -152,23 +188,32 @@ export function mlockKey(buf: Buffer | null | undefined, label: string): void {
 
 /**
  * Unlock a previously mlocked Buffer. Idempotent. No-op on Node
- * < 24.0.0. Failures are swallowed: the kernel releases pages on
- * process exit anyway, and a failed munlock does not indicate a
- * security incident.
+ * < 24.0.0 without the native addon built. Failures are swallowed:
+ * the kernel releases pages on process exit anyway, and a failed
+ * munlock does not indicate a security incident.
  */
 export function munlockKey(buf: Buffer | null | undefined, label: string): void {
   if (!buf || !Buffer.isBuffer(buf) || buf.length === 0) return;
   if (!checkMlockAvailable()) return;
-  const proc = process as unknown as MlockCapableProcess;
-  if (typeof proc.munlock !== "function") {
+  const backend = detectBackend();
+  if (backend === null) {
     mlockAvailableCache = false;
     return;
   }
   try {
-    proc.munlock(buf);
+    if (backend === "process") {
+      const proc = process as unknown as MlockCapableProcess;
+      if (typeof proc.munlock !== "function") {
+        mlockAvailableCache = false;
+        return;
+      }
+      proc.munlock(buf);
+    } else {
+      nativeAddon.munlockSync(buf);
+    }
     pqcLog.debug(PQC_EVENT.Munlock, {
       status: "ok",
-      provider: label,
+      provider: `${label} (backend=${backend})`,
     } satisfies PqcLogPayload);
   } catch {
     // Munlock failures are non-fatal. The page is freed when the
@@ -177,11 +222,18 @@ export function munlockKey(buf: Buffer | null | undefined, label: string): void 
   }
 }
 
-/** True iff process.mlock is available on this Node version. Tests
- *  use this to assert defensive behavior on Node 22 (no-op path) and
- *  real behavior on Node 24+ (active path). */
+/** True iff mlock is available through any path. Tests use this to
+ *  assert defensive behavior on Node 22 (no-op path) and real
+ *  behavior on Node 24+ (process path) or when the native addon
+ *  is built (native path). */
 export function isMlockActive(): boolean {
   return checkMlockAvailable();
+}
+
+/** Which backend won the feature-detect race. Exported for tests
+ *  and the [PQC] status log; not for production use. */
+export function mlockBackend(): MlockBackend {
+  return detectBackend();
 }
 
 /** Test hook: clear the cached feature-detect result and any
@@ -189,6 +241,7 @@ export function isMlockActive(): boolean {
  *  cache is set once and read. */
 export function __resetMlockCacheForTests(): void {
   mlockAvailableCache = null;
+  backendCache = null;
   warnedUnavailable = false;
   warnedOversize = false;
 }
