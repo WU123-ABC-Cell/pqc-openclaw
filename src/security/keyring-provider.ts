@@ -158,19 +158,19 @@ export class FileKeyring implements KeyringProvider {
   /** Drop the in-memory cache. Used by M7 rotation after the file
    *  has been swapped on disk. */
   invalidate(): void {
-    if (this.cachedKey) {
-      munlockKey(this.cachedKey, `file:${this.keyPath}`);
-    }
+    const key = this.cachedKey;
     this.cachedKey = null;
+    if (key) {
+      key.fill(0);
+      munlockKey(key, `file:${this.keyPath}`);
+    }
   }
 
   /** M6.B v2: release any mlocked buffer this keyring is holding.
    *  Called on process shutdown by the module-level hook to munlock
    *  before the OS reclaims the pages. Idempotent. */
   release(): void {
-    if (this.cachedKey) {
-      munlockKey(this.cachedKey, `file:${this.keyPath}`);
-    }
+    this.invalidate();
   }
 }
 
@@ -432,6 +432,7 @@ export function getDefaultKeyringFromEnv(
  *  verify that env-var changes between calls are picked up; production
  *  code should not need it. */
 export function resetDefaultKeyringCache(): void {
+  releaseDefaultKeyring();
   cachedDefaultKeyring = undefined;
 }
 

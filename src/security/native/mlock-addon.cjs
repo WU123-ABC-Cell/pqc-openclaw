@@ -1,4 +1,4 @@
-// mlock-addon.js — lazy loader for the native mlock(2) N-API addon.
+// mlock-addon.cjs — lazy loader for the native mlock(2) N-API addon.
 //
 // Why lazy: production builds on Node 22 must work without the addon
 // being built (e.g. developer machines, CI runners that only run
@@ -59,8 +59,9 @@ module.exports = {
   },
 
   /**
-   * Pin a Buffer in physical RAM via mlock(2). Throws on
-   * failure (RLIMIT_MEMLOCK exceeded, EPERM, etc.) — the caller
+   * Pin a Buffer in physical RAM via mlock(2). This prevents swapping but does
+   * not exclude shared Node slab pages from core dumps. Throws on failure
+   * (RLIMIT_MEMLOCK exceeded, EPERM, etc.) — the caller
    * in mlock-helper.ts catches and logs a single [PQC] warn per
    * process.
    *
@@ -73,8 +74,7 @@ module.exports = {
   },
 
   /**
-   * Reverse a previous mlock(2). Idempotent in the kernel sense:
-   * the page is allowed to be swapped and core-dumped again. Safe
+   * Reverse a previous mlock(2). Safe
    * to call on a buffer that was not mlocked (kernel returns 0).
    *
    * @param {Buffer} buf — buffer to unpin

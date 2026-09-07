@@ -53,9 +53,7 @@ function loadNapiKeyringModule(): NapiKeyringModule {
     const require = createRequire(import.meta.url);
     const mod = require("@napi-rs/keyring") as NapiKeyringModule;
     if (!mod || typeof mod.Entry !== "function") {
-      throw new Error(
-        "@napi-rs/keyring loaded but does not export Entry constructor",
-      );
+      throw new Error("@napi-rs/keyring loaded but does not export Entry constructor");
     }
     cachedKeyringModule = mod;
     return mod;
@@ -72,7 +70,7 @@ function loadNapiKeyringModuleWithThrow(cause?: unknown): never {
       "@napi-rs/keyring`). On Linux you also need libsecret-1-0 (apt: " +
       "`libsecret-1-0`, rpm: `libsecret`) and a running Secret Service " +
       "(gnome-keyring, KWallet, KeePassXC, etc.). Until then use " +
-      "{kind:\"file\"} or {kind:\"env\"} in the keyring config." +
+      '{kind:"file"} or {kind:"env"} in the keyring config.' +
       (cause instanceof Error ? ` Underlying error: ${cause.message}` : ""),
     cause instanceof Error ? { cause } : undefined,
   );
@@ -222,18 +220,34 @@ export class OsKeyring implements KeyringProvider {
     cachedKeyringModule = undefined;
   }
 
+  /** Test-only dependency injection for the native keyring adapter.
+   *  `vi.mock()` cannot intercept a package loaded through `createRequire`,
+   *  so tests install an in-memory Entry implementation explicitly. */
+  static __setNapiModuleForTests(mod: unknown): void {
+    if (
+      typeof mod !== "object" ||
+      mod === null ||
+      typeof (mod as { Entry?: unknown }).Entry !== "function"
+    ) {
+      throw new Error("OsKeyring: test module must export an Entry constructor");
+    }
+    cachedKeyringModule = mod as NapiKeyringModule;
+  }
+
   /** M6.B v2: release any mlocked buffer this keyring is holding.
    *  Called on process shutdown by the module-level hook to munlock
    *  before the OS reclaims the pages. Idempotent. */
   release(): void {
-    if (this.cachedKey) {
-      munlockKey(this.cachedKey, `os:${this.service}/${this.account}`);
+    const key = this.cachedKey;
+    this.cachedKey = null;
+    if (key) {
+      key.fill(0);
+      munlockKey(key, `os:${this.service}/${this.account}`);
     }
   }
 
-  /** Test hook: drop the cached key + mlock (without munlock). Used
-   *  by tests to simulate a fresh process. */
+  /** Test hook: securely release the cached key. */
   __resetCachedKeyForTests(): void {
-    this.cachedKey = null;
+    this.release();
   }
 }

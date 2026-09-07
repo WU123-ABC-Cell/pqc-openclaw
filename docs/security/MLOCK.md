@@ -18,10 +18,12 @@
 - `secure_memzero` 在 5 个 .c 文件: wrap key 用后清零
 - ❌ 缺口: 长期 in-RAM 的 wrap key 没清, 暴露整个 lifetime
 
-**mlock(2) 补的缺口**:
+**当前 native memory-lock backend 补的缺口**:
 
 - 锁 wrap key 32 bytes 在 physical RAM, 不被 swap
-- kernel `coredump_filter` (有 `VM_DONTDUMP` flag) 排除该 page 出 core dump
+- `mlock(2)` 本身不会设置 `VM_DONTDUMP`，所以当前版本**不声称阻止 core
+  dump 泄漏**；正确方案需要 addon-owned 独立 page mapping，不能直接修改
+  可能与其他 Node Buffer 共用的 slab page
 - 物理攻击仍可能 (root read /proc/PID/mem), 但 bar 显著提高
 
 ## 2. 设计
@@ -31,7 +33,7 @@
 ```typescript
 // Feature-detect on first call, cached
 function checkMlockAvailable(): boolean {
-  return typeof process.mlock === "function";
+  return detectBackend() !== null; // process API → native addon → null
 }
 
 // 调 mlock(2), 失败 warn 不 throw
@@ -45,13 +47,16 @@ isMlockActive() → boolean
 __resetMlockCacheForTests() → void
 ```
 
-**3-state Node compat**:
+**3-state runtime compat**:
 
-| Node version                               | `process.mlock`                 | 行为                                               |
-| ------------------------------------------ | ------------------------------- | -------------------------------------------------- |
-| 22.23.1 (current)                          | `undefined`                     | 完全 no-op, 单次 [PQC] mlock-unavailable warning   |
-| 24.0.0-24.14.x                             | `function` (stable from 24.0.0) | 调 `process.mlock(buf)`, log [PQC] mlock status=ok |
-| 24.15.0+ (per `package.json engines.node`) | `function`                      | 同 24.0.0, 跟其他 PQC 升级一起跑完整回归           |
+| Runtime                               | 行为                                                     |
+| ------------------------------------- | -------------------------------------------------------- |
+| Node 22.23.1 + built Linux addon      | native `mlock(2)` swap protection                        |
+| Node 24.15.0 + built Linux addon      | `process.mlock` 不存在，回退 native `mlock(2)`           |
+| 无 addon 且无未来 `process.mlock` API | defensive no-op + 单次 `[PQC] mlock-unavailable` warning |
+
+backend 选择完全依赖运行时 feature detection；文档不再按 Node 主版本推断
+`process.mlock` 存在。
 
 ### 2.2 集成点
 

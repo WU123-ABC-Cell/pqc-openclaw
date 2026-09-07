@@ -1,8 +1,12 @@
 # M6.B v2 N-API mlock(2) native addon
 
 Linux-first N-API addon that calls `mlock(2)` / `munlock(2)` directly
-from native code. Used as a fallback when `process.mlock` is missing
-on Node.js 24.x (verified absent on Node 24.15.0, 2026-09-04).
+from native code. This prevents the key buffer's pages from being swapped,
+but does not exclude them from core dumps. Correct `MADV_DONTDUMP` support
+requires an addon-owned page mapping; applying it to ordinary small Node
+Buffers is unsafe because multiple buffers can share one slab page. Used as a
+fallback when `process.mlock` is missing on Node.js 24.x (verified absent on
+Node 24.15.0, 2026-09-04).
 
 ## Build
 

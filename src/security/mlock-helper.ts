@@ -12,9 +12,9 @@
 // still exposed.
 //
 // mlock(2) tells the kernel to keep a buffer in physical RAM (never
-// swap to disk) and to exclude the pages from core dumps (when
-// `RLIMIT_CORE` is set or when the kernel is configured with
-// `coredump_filter` that respects `VM_DONTDUMP`).
+// swap to disk). It does not exclude the pages from core dumps. Safe core-dump
+// exclusion needs an addon-owned page mapping rather than a shared Node slab;
+// that work is deliberately separate from this swap-protection helper.
 //
 // Three runtime paths, in priority order:
 //   1. `process.mlock` / `process.munlock` stable (Node >= 24.0.0
@@ -108,8 +108,7 @@ function checkMlockAvailable(): boolean {
 }
 
 /**
- * Lock a Buffer in physical RAM so it cannot be swapped to disk
- * and is excluded from core dumps (subject to kernel configuration).
+ * Lock a Buffer in physical RAM so it cannot be swapped to disk.
  *
  * Defensive behavior:
  * - No-op on Node < 24.0.0 without the native addon built (one

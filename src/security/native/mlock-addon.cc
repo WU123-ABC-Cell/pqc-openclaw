@@ -5,8 +5,9 @@
 
 namespace {
 
-// Wrap a JS Buffer with mlock(2) so the underlying memory is pinned
-// in physical RAM and excluded from core dumps. Linux only.
+// Pin a JS Buffer with mlock(2). Linux locks every page intersecting the
+// range, so callers must not assume that mlock protects against core dumps;
+// that requires a separately owned mapping with MADV_DONTDUMP.
 Napi::Value Mlock(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
   if (info.Length() < 1 || !info[0].IsBuffer()) {
@@ -34,8 +35,9 @@ Napi::Value Mlock(const Napi::CallbackInfo& info) {
   return Napi::Number::New(env, static_cast<double>(len));
 }
 
-// Reverse mlock(2) so the buffer is allowed to be swapped and
-// included in core dumps again.
+// Reverse mlock(2) so the buffer is allowed to be swapped again. This API is
+// retained for compatibility; callers must avoid overlapping locked Buffers
+// because Linux page locks are not reference-counted per caller.
 Napi::Value Munlock(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
   if (info.Length() < 1 || !info[0].IsBuffer()) {

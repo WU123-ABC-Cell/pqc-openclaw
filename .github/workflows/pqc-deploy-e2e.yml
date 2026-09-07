@@ -1,240 +1,128 @@
-# .github/workflows/pqc-deploy-e2e.yml
-#
-# PQC OpenClaw fork — production deploy + E2E CI gate.
-#
-# Runs on every PR to main + every push to main + manual dispatch.
-# Blocks merge if any job fails. The jobs are:
-#
-#   1. static-validate   bash -n + yaml + cross-ref + quick-audit (seconds)
-#   2. install-e2e       real bash scripts/install-pqc.sh on ubuntu-22.04
-#                        (sudo available, full 6-step install verified)
-#   3. healthcheck-e2e   pqc-fork-scripts/pqc-fork-e2e-healthcheck.py
-#   4. backup-e2e        pqc-fork-scripts/pqc-fork-e2e-backup.py
-#   5. compose-e2e       docker compose up + healthcheck + down
-#                        (validates docker-compose.pqc.yml end-to-end)
-#   6. prom-e2e          pqc-fork-scripts/pqc-fork-e2e-prom.py
-#
-# Combined with the existing pqc-side-channel.yml (cache-timing +
-# mlock vitest + KAT), this gives the fork a full deploy / side-channel
-# / paper-grade gate. PRs cannot merge until every job is green.
-#
-# Why a separate workflow: the existing pqc-side-channel.yml gates
-# the cryptographic claims (constant-time, KAT, vitest). This
-# workflow gates the deploy claims (install + healthcheck + backup
-# + compose + monitoring). They are independent so a regression in
-# one does not block the other.
-#
-# Local reproduction: every job is also a stand-alone harness
-# (see pqc-fork-scripts/pqc-fork-e2e-*.py). A developer can run
-# `python3 pqc-fork-scripts/pqc-fork-e2e-backup.py` from the repo
-# root before pushing and see the same failures CI would.
+name: PQC deploy validation
 
-name: PQC deploy + E2E
+# An isolated install job validates the committed workspace without changing
+# host users, services, or keyrings. Additional harnesses validate the installer interface,
+# healthcheck, backup, Compose structure, and Prometheus collector. These jobs
+# do not claim to start a production gateway.
 
 on:
   push:
-    branches: [main]
+    branches: [master]
   pull_request:
-    branches: [main]
+    branches: [master]
   workflow_dispatch: {}
 
-# Cancel in-flight runs on the same PR
+permissions:
+  contents: read
+
 concurrency:
   group: pqc-deploy-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# Every job blocks merge
-permissions: {}
-
 jobs:
-  # --------------------------------------------------------------------
-  # 1. static-validate: fail fast on bash / yaml / cross-ref errors
-  # --------------------------------------------------------------------
   static-validate:
-    name: "static: bash -n + yaml + cross-ref"
-    runs-on: ubuntu-22.04
+    name: Static deploy-script validation
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
-          submodules: false
-          lfs: false
+          persist-credentials: false
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: "bash -n (3 PQC scripts)"
+      - name: Check shell syntax and harness inventory
+        shell: bash
         run: |
-          for f in scripts/install-pqc.sh scripts/healthcheck-pqc.sh scripts/backup-pqc.sh scripts/pqc-textfile-collector.sh; do
-            bash -n "$f" || { echo "::error file=$f::bash -n failed"; exit 1; }
+          set -euo pipefail
+          for file in \
+            scripts/install-pqc.sh \
+            scripts/healthcheck-pqc.sh \
+            scripts/backup-pqc.sh \
+            scripts/pqc-textfile-collector.sh; do
+            bash -n "$file"
+          done
+          for harness in install healthcheck backup compose prom; do
+            test -f "scripts/pqc-e2e/${harness}.py"
           done
 
-      - name: "yaml.safe_load docker-compose.pqc.yml"
-        run: |
-          python3 -c '
-          import yaml, sys
-          d = yaml.safe_load(open("docker-compose.pqc.yml"))
-          assert "openclaw-gateway" in d["services"]
-          assert "openclaw-cli" in d["services"]
-          assert "gateway_token" in d["secrets"]
-          assert "wrap_key" in d["secrets"]
-          assert "mlock_tmpfs" in d["volumes"]
-          print("OK yaml, services=", list(d["services"]))
-          '
+  deploy-harness:
+    name: "Harness: ${{ matrix.harness }}"
+    needs: static-validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        harness: [install, healthcheck, backup, compose, prom]
 
-      - name: "cross-ref check (OPERATIONS + MIGRATION + 8 PQC docs)"
-        run: |
-          python3 -c '
-          import os, re, sys
-          repo = "."
-          for doc in ["OPERATIONS.md", "MIGRATION.md", "PQC-FORK.md",
-                      "PAPER-SUBMISSION-CHECKLIST.md", "constant-time-audit.md",
-                      "pqc-whitepaper.md", "paper-reviewer-faq.md",
-                      "verification-log-2026-08-29-30.md", "MLOCK.md",
-                      "CHANGELOG.md"]:
-              path = os.path.join("docs/security", doc)
-              if not os.path.isfile(path):
-                  continue
-              with open(path) as f:
-                  content = f.read()
-              for m in re.findall(r"docs/security/[A-Za-z0-9_./-]+\.md", content):
-                  if not os.path.isfile(m):
-                      print(f"::error file={path}::missing ref: {m}")
-                      sys.exit(1)
-              for s in re.findall(r"scripts/[A-Za-z0-9_-]+\.sh", content):
-                  if not os.path.isfile(s):
-                      print(f"::error file={path}::missing ref: {s}")
-                      sys.exit(1)
-          print("OK cross-refs")
-          '
-
-  # --------------------------------------------------------------------
-  # 2. install-e2e: real install on ubuntu-22.04 with sudo
-  # --------------------------------------------------------------------
-  install-e2e:
-    name: "install: real bash scripts/install-pqc.sh"
-    runs-on: ubuntu-22.04
-    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
-          submodules: false
-          lfs: false
+          persist-credentials: false
 
-      - name: "apt install system deps (libsecret, sqlite3, dbus)"
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libsecret-1-0 libsecret-1-dev gnome-keyring dbus-x11 sqlite3
-
-      - name: "Setup Node.js 22 + pnpm 11 (matches install-pqc.sh expectations)"
-        uses: actions/setup-node@v4
+      - name: Setup repository YAML parser
+        if: matrix.harness == 'compose'
+        uses: ./.github/actions/setup-node-env
         with:
-          node-version: "22.23.1"
-      - name: "Install pnpm globally (install-pqc.sh does this if missing, but we make it explicit)"
-        run: |
-          npm install -g pnpm@11
-          pnpm --version
+          node-version: "24.x"
+          install-bun: "false"
 
-      - name: "Run install-pqc.sh in /tmp/pqc-install-test (no real /opt/, no systemd, no keyring)"
-        env:
-          PQC_E2E_NON_ROOT: "1"
+      - name: Run isolated harness
+        run: python3 "scripts/pqc-e2e/${{ matrix.harness }}.py"
+
+  install-workspace:
+    name: Install committed workspace in an isolated prefix
+    needs: static-validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Setup Node and pnpm
+        uses: ./.github/actions/setup-node-env
+        with:
+          node-version: "24.x"
+          install-bun: "false"
+          install-deps: "false"
+
+      - name: Run complete installer without host service changes
+        shell: bash
         run: |
-          sudo mkdir -p /tmp/pqc-install-test
-          sudo chown -R "$USER" /tmp/pqc-install-test
+          set -euo pipefail
+          sandbox_root=$(mktemp -d "${RUNNER_TEMP}/pqc-install.XXXXXX")
+          node_version=$(node -p 'process.versions.node')
           bash scripts/install-pqc.sh \
-              --install-root /tmp/pqc-install-test \
-              --state-dir /tmp/pqc-install-test/state \
-              --service-user pqc-test \
-              --skip-systemd \
-              --skip-keyring \
-              --skip-build \
-              --node-version 22.23.1 \
-              2>&1 | tee /tmp/install-pqc.log
+            --sandbox-root "$sandbox_root" \
+            --node-version "$node_version"
 
-      - name: "Verify install created the expected file tree"
-        run: |
-          test -d /tmp/pqc-install-test/src/security && \
-              test -f /tmp/pqc-install-test/src/security/mlock-helper.ts && \
-              test -f /tmp/pqc-install-test/package.json && \
-              test -f /tmp/pqc-install-test/scripts/healthcheck-pqc.sh && \
-              test -f /tmp/pqc-install-test/scripts/backup-pqc.sh && \
-              test -x /usr/local/bin/healthcheck-pqc.sh && \
-              test -x /usr/local/bin/backup-pqc.sh || \
-              { echo "::error::install did not create expected tree"; exit 1; }
+          install_root="$sandbox_root/opt/pqc-openclaw"
+          state_dir="$sandbox_root/var/lib/pqc-openclaw"
+          bin_dir="$sandbox_root/usr/local/bin"
+          unit="$sandbox_root/etc/systemd/system/pqc-openclaw.service"
+          test -f "$install_root/pnpm-workspace.yaml"
+          test -d "$install_root/packages"
+          test -d "$install_root/extensions"
+          test -f "$install_root/src/security/native/mlock-addon.d.cts"
+          test -d "$install_root/node_modules"
+          test -f "$install_root/dist/index.js"
+          test -f "$unit"
+          test "$(stat -c %a "$state_dir/wrap-key.b64")" = "600"
+          test "$(stat -c %a "$state_dir/openclaw.env")" = "600"
+          test "$(wc -c < "$state_dir/wrap-key.b64")" -ge 43
+          grep -q '^OPENCLAW_GATEWAY_TOKEN=[0-9a-f]\{64\}$' "$state_dir/openclaw.env"
+          grep -Fq "WorkingDirectory=$install_root" "$unit"
+          grep -Fq "EnvironmentFile=-$state_dir/openclaw.env" "$unit"
+          grep -Fq "ReadWritePaths=$state_dir" "$unit"
+          grep -Fq "ExecStart=$(command -v node) $install_root/dist/index.js gateway" "$unit"
 
-      - name: "Smoke: --help on installed healthcheck and backup"
-        run: |
-          /usr/local/bin/healthcheck-pqc.sh --help > /dev/null
-          /usr/local/bin/backup-pqc.sh --help > /dev/null
-          /usr/local/bin/healthcheck-pqc.sh --json | python3 -c "import json,sys; d=json.loads(sys.stdin.read().split(chr(10))[0]); print('healthcheck JSON ok, summary=', d.get('summary'))"
-
-  # --------------------------------------------------------------------
-  # 3. healthcheck-e2e: pqc-fork-e2e-healthcheck.py
-  # --------------------------------------------------------------------
-  healthcheck-e2e:
-    name: "e2e: healthcheck-pqc.sh"
-    runs-on: ubuntu-22.04
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: "Run pqc-fork-e2e-healthcheck.py"
-        run: |
-          python3 pqc-fork-scripts/pqc-fork-e2e-healthcheck.py
-
-  # --------------------------------------------------------------------
-  # 4. backup-e2e: pqc-fork-e2e-backup.py
-  # --------------------------------------------------------------------
-  backup-e2e:
-    name: "e2e: backup-pqc.sh"
-    runs-on: ubuntu-22.04
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: "Run pqc-fork-e2e-backup.py"
-        run: |
-          python3 pqc-fork-scripts/pqc-fork-e2e-backup.py
-
-  # --------------------------------------------------------------------
-  # 5. compose-e2e: real docker compose up with healthcheck
-  # --------------------------------------------------------------------
-  compose-e2e:
-    name: "e2e: docker-compose.pqc.yml"
-    runs-on: ubuntu-22.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: "Run pqc-fork-e2e-compose.py (static + structural)"
-        run: |
-          python3 pqc-fork-scripts/pqc-fork-e2e-compose.py
-      # Note: a real `docker compose up` would also be useful, but
-      # requires building the PQC fork image (10+ min). Out of
-      # scope for this workflow; the static + structural check
-      # catches all the bugs the 7582ca01ba + dc845dc3ce commits
-      # fixed, and the install-e2e job covers the install path
-      # that the compose file relies on.
-
-  # --------------------------------------------------------------------
-  # 6. prom-e2e: pqc-fork-e2e-prom.py
-  # --------------------------------------------------------------------
-  prom-e2e:
-    name: "e2e: pqc-textfile-collector.sh"
-    runs-on: ubuntu-22.04
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: "Run pqc-fork-e2e-prom.py"
-        run: |
-          python3 pqc-fork-scripts/pqc-fork-e2e-prom.py
+          for wrapper in healthcheck-pqc.sh backup-pqc.sh pqc-textfile-collector.sh; do
+            test -x "$bin_dir/$wrapper"
+            "$bin_dir/$wrapper" --help >"$RUNNER_TEMP/$wrapper.out" 2>"$RUNNER_TEMP/$wrapper.err"
+            test ! -s "$RUNNER_TEMP/$wrapper.err"
+          done

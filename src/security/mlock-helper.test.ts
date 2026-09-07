@@ -148,11 +148,10 @@ describe("mlock-helper (defensive path on Node 22)", () => {
     expect(MAX_MLOCK_BYTES).toBe(1024 * 1024);
   });
 
-  it("mlockKey is idempotent for repeated calls on the same buffer", () => {
-    // The kernel reference-counts mlock on a page; calling mlock
-    // twice on the same buffer should be safe (and a no-op the
-    // second time). This test guards against accidental ref-count
-    // bugs introduced in future refactors.
+  it("mlockKey tolerates repeated calls on the same buffer", () => {
+    // Linux page locks are not reference-counted per caller. This only asserts
+    // that repeated defensive calls do not throw; it does not grant multiple
+    // independent unlock leases for a shared page.
     const buf = Buffer.alloc(32, 0x42);
     expect(() => {
       mlockKey(buf, "test:idem-1");

@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 # healthcheck-pqc.sh — production health check for the PQC OpenClaw fork.
 #
 # Verifies:
@@ -8,7 +8,7 @@
 #   4. state.db (SQLite) is accessible
 #   5. Wrap key file exists and is mode 0600/0400
 #   6. OS keyring entry exists (if not --skip-keyring)
-#   7. mlock is available (Node 24.15+) or in defensive no-op mode (Node 22)
+#   7. process or native-addon mlock is available, otherwise warn
 #   8. PQC events appear in journal (if systemd-managed)
 #
 # Exit codes:
@@ -159,10 +159,15 @@ fi
 # ----------------------------------------------------------------------
 
 if [[ -d "$INSTALL_ROOT" ]] && [[ -f "$INSTALL_ROOT/src/security/mlock-helper.ts" ]]; then
-  if node -e 'process.exit(typeof process.mlock === "function" ? 0 : 1)' >/dev/null 2>&1; then
-    ok "mlock" "process.mlock available (Node 24.15+ active path)"
+  if node -e 'process.exit(typeof process.mlock === "function" && typeof process.munlock === "function" ? 0 : 1)' >/dev/null 2>&1; then
+    ok "mlock" "process.mlock/process.munlock available"
+  elif [[ -f "$INSTALL_ROOT/src/security/native/mlock-addon.cjs" ]] && (
+    cd "$INSTALL_ROOT" &&
+      node -e 'const addon=require("./src/security/native/mlock-addon.cjs"); process.exit(addon.isAvailable() ? 0 : 1)'
+  ) >/dev/null 2>&1; then
+    ok "mlock" "native N-API mlock backend available"
   else
-    warn "mlock" "process.mlock unavailable; wrap key NOT pinned in physical RAM. Upgrade to Node 24.15+ for mlock active path."
+    warn "mlock" "process and native mlock backends unavailable; wrap key is not pinned in physical RAM"
   fi
 else
   warn "mlock" "install root not found; skipping mlock check"

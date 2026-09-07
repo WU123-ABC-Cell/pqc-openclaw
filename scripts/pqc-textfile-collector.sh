@@ -17,7 +17,6 @@
 #   pqc_backup_last_run_timestamp_seconds
 #   pqc_backup_last_run_success
 #   pqc_backup_last_bytes
-#   pqc_backup_pruned_count
 #   pqc_backup_s3_uploaded
 # Plus per-check gauges:
 #   pqc_healthcheck_check_status{check="node-version|mlock|fork-process|healthz|state-db|wrap-key-file|os-keyring|pqc-events"} 0|1|2
@@ -208,7 +207,6 @@ fi
 
 BACKUP_SUCCESS=0
 BACKUP_BYTES=0
-BACKUP_PRUNED=0
 BACKUP_S3_OK=0
 BACKUP_TIMESTAMP=0
 

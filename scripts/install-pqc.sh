@@ -27,6 +27,7 @@
 #   bash scripts/install-pqc.sh --help
 
 set -euo pipefail
+umask 077
 
 # ----------------------------------------------------------------------
 # Defaults and option parsing
@@ -39,6 +40,7 @@ SERVICE_USER="${SERVICE_USER:-pqc-openclaw}"
 SKIP_KEYRING=0
 SKIP_BUILD=0
 SKIP_SYSTEMD=0
+SANDBOX_ROOT=""
 
 print_help() {
   cat <<'EOF'
@@ -52,7 +54,8 @@ OPTIONS
   --state-dir PATH      Where to put state (sqlite, key backups). [default: /var/lib/pqc-openclaw]
   --node-version VER    Node.js version to install.    [default: 22.23.1]
   --service-user USER   System user for the service.   [default: pqc-openclaw]
-  --skip-keyring        Skip OS keyring provisioning (file-keyring only).
+  --sandbox-root PATH   Install and build inside an empty 0700 test root.
+  --skip-keyring        Skip wrap-key file provisioning.
   --skip-build          Skip pnpm build (use existing dist/).
   --skip-systemd        Skip systemd unit install.
   --help                Show this message.
@@ -87,6 +90,7 @@ while [[ $# -gt 0 ]]; do
     --state-dir)     STATE_DIR="$2"; shift 2 ;;
     --node-version)  NODE_VERSION="$2"; shift 2 ;;
     --service-user)  SERVICE_USER="$2"; shift 2 ;;
+    --sandbox-root)  SANDBOX_ROOT="$2"; shift 2 ;;
     --skip-keyring)  SKIP_KEYRING=1; shift ;;
     --skip-build)    SKIP_BUILD=1; shift ;;
     --skip-systemd)  SKIP_SYSTEMD=1; shift ;;
@@ -108,25 +112,47 @@ ok()   { printf '\033[1;32m[ok]\033[0m %s\n' "$*"; }
 # Pre-flight: root, OS, tools
 # ----------------------------------------------------------------------
 
-if [[ $EUID -ne 0 ]]; then
-  die "this script must run as root (use sudo bash scripts/install-pqc.sh)"
-fi
-
 case "$(uname -s)" in
   Linux)  OS=linux ;;
   Darwin) OS=macos ;;
   *)      die "unsupported OS: $(uname -s). Use Linux or macOS." ;;
 esac
 
-for tool in curl tar; do
+for tool in curl git tar; do
   command -v "$tool" >/dev/null 2>&1 || die "missing required tool: $tool"
 done
+
+SOURCE_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || die "run this installer from a Git checkout"
+SOURCE_ROOT=$(cd "$SOURCE_ROOT" && pwd -P)
+
+if [[ -n "$SANDBOX_ROOT" ]]; then
+  [[ $OS == "linux" ]] || die "--sandbox-root is supported on Linux only"
+  [[ "$SANDBOX_ROOT" == /* ]] || die "--sandbox-root must be an absolute path"
+  [[ -d "$SANDBOX_ROOT" && ! -L "$SANDBOX_ROOT" ]] || die "--sandbox-root must be an existing directory, not a symlink"
+  SANDBOX_ROOT=$(cd "$SANDBOX_ROOT" && pwd -P)
+  [[ "$SANDBOX_ROOT" != "/" ]] || die "--sandbox-root must not be /"
+  [[ $(stat -c %u "$SANDBOX_ROOT") == "$EUID" ]] || die "--sandbox-root must be owned by the current user"
+  [[ $(stat -c %a "$SANDBOX_ROOT") == "700" ]] || die "--sandbox-root must have mode 0700"
+  [[ -z $(find "$SANDBOX_ROOT" -mindepth 1 -maxdepth 1 -print -quit) ]] || die "--sandbox-root must be empty"
+
+  INSTALL_ROOT="$SANDBOX_ROOT/opt/pqc-openclaw"
+  STATE_DIR="$SANDBOX_ROOT/var/lib/pqc-openclaw"
+  BIN_DIR="$SANDBOX_ROOT/usr/local/bin"
+  SYSTEMD_UNIT_DIR="$SANDBOX_ROOT/etc/systemd/system"
+  SERVICE_USER=$(id -un)
+else
+  if [[ $EUID -ne 0 ]]; then
+    die "this script must run as root (use sudo bash scripts/install-pqc.sh)"
+  fi
+  BIN_DIR="/usr/local/bin"
+  SYSTEMD_UNIT_DIR="/etc/systemd/system"
+fi
 
 # ----------------------------------------------------------------------
 # 1. Create service user (Linux only)
 # ----------------------------------------------------------------------
 
-if [[ $OS == "linux" ]] && ! id -u "$SERVICE_USER" >/dev/null 2>&1; then
+if [[ -z "$SANDBOX_ROOT" && $OS == "linux" ]] && ! id -u "$SERVICE_USER" >/dev/null 2>&1; then
   log "creating service user: $SERVICE_USER"
   useradd --system --home "$STATE_DIR" --shell /usr/sbin/nologin "$SERVICE_USER"
 fi
@@ -158,7 +184,13 @@ install_node() {
       ok "node $current already installed"
       return 0
     fi
+    if [[ -n "$SANDBOX_ROOT" ]]; then
+      die "sandbox mode requires existing node $NODE_VERSION (found $current)"
+    fi
     warn "node $current found, want $NODE_VERSION — re-installing"
+  fi
+  if [[ -n "$SANDBOX_ROOT" ]]; then
+    die "sandbox mode requires node $NODE_VERSION in PATH"
   fi
   if command -v nvm >/dev/null 2>&1; then
     log "installing node $NODE_VERSION via nvm"
@@ -183,10 +215,19 @@ install_node
 # ----------------------------------------------------------------------
 
 log "step 2/6: pnpm"
+PNPM_VERSION=$(node -e '
+  const value = require(process.argv[1]).packageManager || "";
+  const match = /^pnpm@([^+]+)/.exec(value);
+  if (!match) process.exit(1);
+  process.stdout.write(match[1]);
+' "$SOURCE_ROOT/package.json") || die "package.json does not pin packageManager to pnpm"
 if ! command -v pnpm >/dev/null 2>&1; then
-  npm install -g pnpm@11
+  [[ -z "$SANDBOX_ROOT" ]] || die "sandbox mode requires pnpm $PNPM_VERSION in PATH"
+  npm install -g "pnpm@$PNPM_VERSION"
 fi
-ok "pnpm $(pnpm --version)"
+CURRENT_PNPM_VERSION=$(pnpm --version)
+[[ "$CURRENT_PNPM_VERSION" == "$PNPM_VERSION" ]] || die "pnpm $CURRENT_PNPM_VERSION found, require pinned $PNPM_VERSION"
+ok "pnpm $CURRENT_PNPM_VERSION"
 
 # ----------------------------------------------------------------------
 # 4. Copy the fork and install dependencies
@@ -194,12 +235,29 @@ ok "pnpm $(pnpm --version)"
 
 log "step 3/6: install the fork to $INSTALL_ROOT"
 mkdir -p "$INSTALL_ROOT"
-# Copy from the current working directory (the repo). The operator
-# runs this from inside the repo. We do NOT delete $INSTALL_ROOT
-# first; existing files are overwritten in place (idempotent).
-cp -r ./src ./docs ./scripts ./package.json ./pnpm-lock.yaml ./tsconfig*.json "$INSTALL_ROOT/" 2>/dev/null || true
+INSTALL_ROOT=$(cd "$INSTALL_ROOT" && pwd -P)
+case "$INSTALL_ROOT/" in
+  "$SOURCE_ROOT/"*) die "--install-root must be outside the source checkout" ;;
+esac
+
+# Install exactly the committed tree. This includes the complete pnpm
+# workspace (packages/, extensions/, patches/, pnpm-workspace.yaml, and build
+# configuration) without copying .git, node_modules, ignored build output, or
+# unrelated untracked files that may contain operator secrets.
+if ! git -C "$SOURCE_ROOT" diff --quiet || ! git -C "$SOURCE_ROOT" diff --cached --quiet; then
+  warn "source checkout has uncommitted changes; installing committed HEAD only"
+fi
+git -C "$SOURCE_ROOT" archive --format=tar HEAD | tar -xf - -C "$INSTALL_ROOT"
 chmod -R u+rwX,go+rX "$INSTALL_ROOT"
-chown -R "$SERVICE_USER":"$SERVICE_USER" "$INSTALL_ROOT" 2>/dev/null || true
+if [[ -z "$SANDBOX_ROOT" ]]; then
+  chown -R "$SERVICE_USER" "$INSTALL_ROOT" || die "failed to assign install tree to $SERVICE_USER"
+fi
+
+log "installing operator wrappers to $BIN_DIR"
+mkdir -p "$BIN_DIR"
+for wrapper in healthcheck-pqc.sh backup-pqc.sh pqc-textfile-collector.sh; do
+  install -m 0755 "$INSTALL_ROOT/scripts/$wrapper" "$BIN_DIR/$wrapper"
+done
 
 log "step 4/6: pnpm install"
 (
@@ -226,16 +284,18 @@ fi
 # 6. Provision OS keyring with a fresh wrap key
 # ----------------------------------------------------------------------
 
-if [[ $SKIP_KEYRING -eq 0 ]]; then
-  log "step 6/6: OS keyring provisioning"
-  mkdir -p "$STATE_DIR"
-  chmod 0700 "$STATE_DIR"
-  chown -R "$SERVICE_USER":"$SERVICE_USER" "$STATE_DIR" 2>/dev/null || true
+mkdir -p "$STATE_DIR"
+chmod 0700 "$STATE_DIR"
+if [[ -z "$SANDBOX_ROOT" ]]; then
+  chown -R "$SERVICE_USER" "$STATE_DIR" || die "failed to assign state directory to $SERVICE_USER"
+fi
 
-  # Generate a fresh 32-byte wrap key and write to a recovery file.
-  # The OS keyring is the live source of truth; the file is the
-  # recovery backup (see PQC-FORK.md §Disaster Recovery).
-  local keyfile="$STATE_DIR/wrap-key.b64"
+if [[ $SKIP_KEYRING -eq 0 ]]; then
+  log "step 6/6: wrap-key file provisioning"
+
+  # Generate a fresh 32-byte wrap key. The generated service unit uses this
+  # file directly; operators can migrate it to a platform keyring separately.
+  keyfile="$STATE_DIR/wrap-key.b64"
   if [[ ! -f "$keyfile" ]]; then
     log "generating fresh 32-byte wrap key"
     node -e "
@@ -243,21 +303,19 @@ if [[ $SKIP_KEYRING -eq 0 ]]; then
       process.stdout.write(c.randomBytes(32).toString('base64url'));
     " > "$keyfile"
     chmod 0600 "$keyfile"
-    chown "$SERVICE_USER":"$SERVICE_USER" "$keyfile" 2>/dev/null || true
+    if [[ -z "$SANDBOX_ROOT" ]]; then
+      chown "$SERVICE_USER" "$keyfile" || die "failed to assign wrap key to $SERVICE_USER"
+    fi
     ok "wrap key written to $keyfile (backup)"
   else
     ok "wrap key file already exists at $keyfile (keeping)"
   fi
 
-  # Migrate the key to the OS keyring. The fork ships
-  # pqc-fork-scripts/migrate-oskeyring.mjs as a reference; on Linux
-  # the operator typically uses Python `secretstorage` instead
-  # because @napi-rs/keyring 1.3.0 hangs in WSL2 (see MLOCK.md
-  # §1.2). On macOS / Windows the native path works fine.
+  # OS-keyring migration remains an explicit operator step because it can
+  # require an interactive platform unlock prompt.
   if [[ "$OS" == "macos" || "$OS" == "linux" ]]; then
     if [[ -f "$INSTALL_ROOT/scripts/migrate-oskeyring.mjs" ]] || [[ -f "$INSTALL_ROOT/src/security/os-keyring.ts" ]]; then
-      log "migrating wrap key to OS keyring (see PQC-FORK.md §Wrap-key provisioning for fallback methods)"
-      warn "automatic keyring provisioning skipped — run 'migrate-oskeyring.mjs' manually or use the Python secretstorage path documented in PQC-FORK.md"
+      warn "automatic OS-keyring migration skipped; follow PQC-FORK.md §Wrap-key provisioning if required"
     fi
   fi
 else
@@ -269,9 +327,12 @@ fi
 # ----------------------------------------------------------------------
 
 if [[ $OS == "linux" && $SKIP_SYSTEMD -eq 0 ]]; then
-  log "installing systemd unit"
-  local keyfile="$STATE_DIR/wrap-key.b64"
-  cat > /etc/systemd/system/pqc-openclaw.service <<EOF
+  log "rendering systemd unit"
+  keyfile="$STATE_DIR/wrap-key.b64"
+  NODE_BIN=$(command -v node)
+  [[ "$NODE_BIN" == /* ]] || die "node executable path must be absolute"
+  mkdir -p "$SYSTEMD_UNIT_DIR"
+  cat > "$SYSTEMD_UNIT_DIR/pqc-openclaw.service" <<EOF
 # Generated by scripts/install-pqc.sh on $(date -u +%Y-%m-%dT%H:%M:%SZ)
 # Edit and 'sudo systemctl daemon-reload' to apply changes.
 
@@ -290,7 +351,7 @@ Environment=OPENCLAW_WRAP_KEY_OS_ACCOUNT=wrap-key-$(date +%Y-%m)
 Environment=OPENCLAW_WRAP_KEY_OS_ID=wrap-key-$(date +%Y-%m)
 Environment=OPENCLAW_WRAP_KEY_FILE=$keyfile
 EnvironmentFile=-$STATE_DIR/openclaw.env
-ExecStart=/usr/bin/node $INSTALL_ROOT/dist/index.js gateway
+ExecStart=$NODE_BIN $INSTALL_ROOT/dist/index.js gateway
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
@@ -304,16 +365,43 @@ PrivateTmp=true
 [Install]
 WantedBy=multi-user.target
 EOF
-  ok "systemd unit installed at /etc/systemd/system/pqc-openclaw.service"
+  ok "systemd unit rendered at $SYSTEMD_UNIT_DIR/pqc-openclaw.service"
 fi
 
 # ----------------------------------------------------------------------
 # 8. Print next steps
 # ----------------------------------------------------------------------
 
-local GATEWAY_TOKEN
 GATEWAY_TOKEN=$(node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))")
-local keyfile="$STATE_DIR/wrap-key.b64"
+keyfile="$STATE_DIR/wrap-key.b64"
+ENV_FILE="$STATE_DIR/openclaw.env"
+if [[ ! -f "$ENV_FILE" ]]; then
+  printf 'OPENCLAW_GATEWAY_TOKEN=%s\n' "$GATEWAY_TOKEN" > "$ENV_FILE"
+  chmod 0600 "$ENV_FILE"
+  if [[ -z "$SANDBOX_ROOT" ]]; then
+    chown "$SERVICE_USER" "$ENV_FILE" || die "failed to assign environment file to $SERVICE_USER"
+  fi
+fi
+unset GATEWAY_TOKEN
+
+if [[ -n "$SANDBOX_ROOT" ]]; then
+  cat <<EOF
+
+=========================================================================
+  PQC OpenClaw sandbox install complete
+=========================================================================
+  Install root: $INSTALL_ROOT
+  State dir:    $STATE_DIR
+  Wrapper dir:  $BIN_DIR
+  Systemd unit: $SYSTEMD_UNIT_DIR/pqc-openclaw.service (rendered only)
+  Gateway env:  $ENV_FILE (mode 0600; token not printed)
+
+  No host users, system services, OS keyrings, /etc, or /usr/local paths
+  were modified.
+=========================================================================
+EOF
+  exit 0
+fi
 
 cat <<EOF
 
@@ -324,19 +412,15 @@ cat <<EOF
   Node.js:      $(node --version)
   pnpm:         $(pnpm --version)
   State dir:    $STATE_DIR
-  Wrap key:     $keyfile (file backup; OS keyring is live source)
+  Wrap key:     $keyfile (service file source; mode 0600)
   Service user: $SERVICE_USER (Linux only)
 
-  Env vars to set in $STATE_DIR/openclaw.env:
-    OPENCLAW_GATEWAY_TOKEN=$GATEWAY_TOKEN
+  Gateway env:   $ENV_FILE (mode 0600; token not printed)
 
 NEXT STEPS
-  1. Edit /etc/systemd/system/pqc-openclaw.service (verify the paths
+  1. Edit $SYSTEMD_UNIT_DIR/pqc-openclaw.service (verify the paths
      and env vars above match your environment).
-  2. Save the env var file:
-       sudo tee $STATE_DIR/openclaw.env > /dev/null <<E2
-       OPENCLAW_GATEWAY_TOKEN=$GATEWAY_TOKEN
-       E2
+  2. Review the generated environment file at $ENV_FILE.
   3. Reload and start the service:
        sudo systemctl daemon-reload
        sudo systemctl enable --now pqc-openclaw

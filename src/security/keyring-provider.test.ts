@@ -1,9 +1,9 @@
 // PQC fork M6: Keyring providers — File / Env / Composite (whitepaper 2.2.5 + 2.2.5.A).
 //
-// The OS keyring (@napi-rs/keyring, M6.B) is exercised through a
-// `vi.mock` shim so the test suite does not require a real
-// platform keyring backend (libsecret / Keychain / Credential
-// Manager). The shim's API matches @napi-rs/keyring's `Entry`:
+// The OS keyring (@napi-rs/keyring, M6.B) is exercised through an
+// explicitly injected in-memory adapter so the test suite does not require
+// a real platform keyring backend (libsecret / Keychain / Credential
+// Manager). The adapter's API matches @napi-rs/keyring's `Entry`:
 // `getPassword` / `setPassword` / `deletePassword`.
 //
 // Tests focus on the cryptographic / encoding contract — the 32-byte
@@ -14,7 +14,7 @@ import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   type ActiveWrappingKey,
   CompositeKeyring,
@@ -37,37 +37,34 @@ import { unwrapSecret, wrapSecret } from "./secret-wrapping.js";
 // matches the real @napi-rs/keyring behaviour where the OS keyring
 // backend persists across Entry instances.
 const mockKeyringStore = new Map<string, string>();
-const mockKeyringStoreKey = (service: string, username: string) =>
-  `${service}\0${username}`;
+const mockKeyringStoreKey = (service: string, username: string) => `${service}\0${username}`;
 
-vi.mock("@napi-rs/keyring", () => {
-  class MockEntry {
-    private readonly key: string;
-    constructor(
-      private readonly service: string,
-      private readonly username: string,
-    ) {
-      this.key = mockKeyringStoreKey(service, username);
-    }
-    getPassword(): string {
-      const v = mockKeyringStore.get(this.key);
-      if (v === undefined) {
-        throw new Error(`MockEntry: no entry for ${this.service}/${this.username}`);
-      }
-      return v;
-    }
-    setPassword(password: string): void {
-      mockKeyringStore.set(this.key, password);
-    }
-    deletePassword(): void {
-      mockKeyringStore.delete(this.key);
-    }
+class MockEntry {
+  private readonly key: string;
+  constructor(
+    private readonly service: string,
+    private readonly username: string,
+  ) {
+    this.key = mockKeyringStoreKey(service, username);
   }
-  return { Entry: MockEntry };
-});
+  getPassword(): string {
+    const v = mockKeyringStore.get(this.key);
+    if (v === undefined) {
+      throw new Error(`MockEntry: no entry for ${this.service}/${this.username}`);
+    }
+    return v;
+  }
+  setPassword(password: string): void {
+    mockKeyringStore.set(this.key, password);
+  }
+  deletePassword(): void {
+    mockKeyringStore.delete(this.key);
+  }
+}
 
 beforeEach(() => {
   mockKeyringStore.clear();
+  OsKeyring.__setNapiModuleForTests({ Entry: MockEntry });
 });
 
 const tempDirs: string[] = [];
@@ -118,6 +115,7 @@ afterEach(() => {
   while (trackedKeys.length > 0) {
     trackedKeys.pop()?.fill(0);
   }
+  OsKeyring.__resetNapiCacheForTests();
 });
 
 describe("encodeBase64UrlKey / decodeBase64UrlKey (wire format)", () => {
@@ -164,9 +162,7 @@ describe("FileKeyring (whitepaper 2.2.5 — file backend)", () => {
   });
 
   it("rejects a relative path", () => {
-    expect(() => new FileKeyring("wrap.key", "wrap-key-2026-08")).toThrow(
-      /absolute/,
-    );
+    expect(() => new FileKeyring("wrap.key", "wrap-key-2026-08")).toThrow(/absolute/);
   });
 
   it("rejects an empty keyPath", () => {
@@ -212,6 +208,20 @@ describe("FileKeyring (whitepaper 2.2.5 — file backend)", () => {
     expect(after.key).toEqual(newKeyBuf);
   });
 
+  it("zeroes and drops the cached key on release", () => {
+    const dir = makeTempDir();
+    const keyPath = path.join(dir, "wrap.key");
+    const key = newKey();
+    writeKeyFile(keyPath, key);
+
+    const ring = new FileKeyring(keyPath);
+    const held = ring.getActiveKey().key;
+    ring.release();
+    expect(held.equals(Buffer.alloc(32))).toBe(true);
+    expect(() => ring.release()).not.toThrow();
+    expect(ring.getActiveKey().key).toEqual(key);
+  });
+
   it("survives a wrap + unwrap round-trip through the device-identity wrap envelope", () => {
     const dir = makeTempDir();
     const keyPath = path.join(dir, "wrap.key");
@@ -220,9 +230,7 @@ describe("FileKeyring (whitepaper 2.2.5 — file backend)", () => {
     const ring = new FileKeyring(keyPath, "wrap-key-2026-08");
     const wrapped = wrapSecret(Buffer.from("the quick brown fox"), ring);
     expect(wrapped.keyId).toBe("wrap-key-2026-08");
-    expect(Buffer.from(unwrapSecret(wrapped, ring)).toString("utf8")).toBe(
-      "the quick brown fox",
-    );
+    expect(Buffer.from(unwrapSecret(wrapped, ring)).toString("utf8")).toBe("the quick brown fox");
   });
 });
 
@@ -322,7 +330,7 @@ describe("CompositeKeyring (whitepaper 2.2.5.A — auto-inject default)", () => 
 });
 
 describe("createKeyring (factory)", () => {
-  it("builds a FileKeyring from {kind:\"file\"}", () => {
+  it('builds a FileKeyring from {kind:"file"}', () => {
     const dir = makeTempDir();
     const keyPath = path.join(dir, "wrap.key");
     const key = newKey();
@@ -332,7 +340,7 @@ describe("createKeyring (factory)", () => {
     expect(ring.getActiveKey().key).toEqual(key);
   });
 
-  it("builds an EnvKeyring from {kind:\"env\"}", () => {
+  it('builds an EnvKeyring from {kind:"env"}', () => {
     const key = newKey();
     const env: NodeJS.ProcessEnv = { OPENCLAW_TEST_KEY: encodeBase64UrlKey(key) };
     const originalEnv = process.env.OPENCLAW_TEST_KEY;
@@ -350,7 +358,7 @@ describe("createKeyring (factory)", () => {
     }
   });
 
-  it("builds an OsKeyring from {kind:\"os\"} that round-trips via the mock", () => {
+  it('builds an OsKeyring from {kind:"os"} that round-trips via the mock', () => {
     const ring = createKeyring({
       kind: "os",
       service: "openclaw",
@@ -372,7 +380,7 @@ describe("createKeyring (factory)", () => {
     expect(() => ring.getActiveKey()).toThrow(/migrate-oskeyring/);
   });
 
-  it("builds a CompositeKeyring from {kind:\"composite\"}", () => {
+  it('builds a CompositeKeyring from {kind:"composite"}', () => {
     const dir = makeTempDir();
     const filePath = path.join(dir, "wrap.key");
     const key = newKey();
@@ -396,7 +404,7 @@ describe("OsKeyring (whitepaper 2.2.5.B, M6.B)", () => {
   });
 
   it("getActiveKey returns the seeded key after setKeyBase64Url", () => {
-    const ring = new OsKeyring("openclaw", "wrap-key-2026-08");
+    const ring = new OsKeyring("openclaw", "wrap-key-2026-08", "wrap-key-2026-08");
     const key = newKey();
     ring.setKeyBase64Url(encodeBase64UrlKey(key));
     expect(ring.getActiveKey()).toEqual({ key, keyId: "wrap-key-2026-08" });
@@ -423,9 +431,7 @@ describe("OsKeyring (whitepaper 2.2.5.B, M6.B)", () => {
 
   it("rejects malformed base64url key material in setKeyBase64Url", () => {
     const ring = new OsKeyring("openclaw", "wrap-key-2026-08");
-    expect(() => ring.setKeyBase64Url("not-32-bytes-base64url!")).toThrow(
-      /setKeyBase64Url input/,
-    );
+    expect(() => ring.setKeyBase64Url("not-32-bytes-base64url!")).toThrow(/setKeyBase64Url input/);
   });
 });
 
@@ -449,6 +455,8 @@ describe("getDefaultKeyringFromEnv (M5.5 auto-inject — whitepaper 2.2.5.A)", (
   // observable on the next call.
   const originalFile = process.env.OPENCLAW_WRAP_KEY_FILE;
   const originalId = process.env.OPENCLAW_WRAP_KEY_ID;
+  const originalOsService = process.env.OPENCLAW_WRAP_KEY_OS_SERVICE;
+  const originalOsAccount = process.env.OPENCLAW_WRAP_KEY_OS_ACCOUNT;
 
   afterEach(() => {
     if (originalFile === undefined) {
@@ -460,6 +468,16 @@ describe("getDefaultKeyringFromEnv (M5.5 auto-inject — whitepaper 2.2.5.A)", (
       delete process.env.OPENCLAW_WRAP_KEY_ID;
     } else {
       process.env.OPENCLAW_WRAP_KEY_ID = originalId;
+    }
+    if (originalOsService === undefined) {
+      delete process.env.OPENCLAW_WRAP_KEY_OS_SERVICE;
+    } else {
+      process.env.OPENCLAW_WRAP_KEY_OS_SERVICE = originalOsService;
+    }
+    if (originalOsAccount === undefined) {
+      delete process.env.OPENCLAW_WRAP_KEY_OS_ACCOUNT;
+    } else {
+      process.env.OPENCLAW_WRAP_KEY_OS_ACCOUNT = originalOsAccount;
     }
     resetDefaultKeyringCache();
   });
@@ -545,7 +563,7 @@ describe("getDefaultKeyringFromEnv (M5.5 auto-inject — whitepaper 2.2.5.A)", (
 
     const ring = getDefaultKeyringFromEnv();
     expect(ring).toBeInstanceOf(OsKeyring);
-    expect(ring!.getActiveKey().keyId).toBe("os-keyring");
+    expect((ring as OsKeyring).describe().keyId).toBe("os-keyring");
   });
 
   it("returns a CompositeKeyring (OS primary, file fallback) when both env-var sets are present", () => {
@@ -567,7 +585,9 @@ describe("getDefaultKeyringFromEnv (M5.5 auto-inject — whitepaper 2.2.5.A)", (
       // Seed the OS entry and confirm the OS variant now wins.
       const providers = (ring as unknown as { providers: KeyringProvider[] }).providers;
       (providers[0] as OsKeyring).setKeyBase64Url(encodeBase64UrlKey(osKey));
-      expect(ring!.getActiveKey().key).toEqual(osKey);
+      resetDefaultKeyringCache();
+      const refreshedRing = getDefaultKeyringFromEnv();
+      expect(refreshedRing!.getActiveKey().key).toEqual(osKey);
     } finally {
       resetDefaultKeyringCache();
     }

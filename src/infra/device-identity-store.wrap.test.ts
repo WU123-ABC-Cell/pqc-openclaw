@@ -12,8 +12,17 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { closeOpenClawStateDatabaseForTest, openOpenClawStateDatabase } from "../state/openclaw-state-db.js";
-import { requireNodeSqlite } from "./node-sqlite.js";
+import { resetDefaultKeyringCache } from "../security/keyring-provider.js";
+import {
+  type ActiveWrappingKey,
+  serializeWrappedSecret,
+  type WrappingKeyProvider,
+  wrapSecret,
+} from "../security/secret-wrapping.js";
+import {
+  closeOpenClawStateDatabaseForTest,
+  openOpenClawStateDatabase,
+} from "../state/openclaw-state-db.js";
 import {
   generateStoredDeviceIdentity,
   insertStoredDeviceIdentityIfAbsent,
@@ -23,6 +32,7 @@ import {
   type StoredDeviceIdentity,
   type DeviceIdentityStoreOptions,
 } from "./device-identity-store.js";
+import { loadOrCreateDeviceIdentity } from "./device-identity.js";
 import {
   decodeMlDsa65PublicKey,
   decodeMlDsa65SecretKey,
@@ -31,13 +41,7 @@ import {
   fingerprintMlDsa65PublicKey,
   generateMlDsa65KeyPair,
 } from "./mldsa65-key-storage.js";
-import {
-  type ActiveWrappingKey,
-  serializeWrappedSecret,
-  type WrappingKeyProvider,
-  wrapSecret,
-} from "../security/secret-wrapping.js";
-import { resetDefaultKeyringCache } from "../security/keyring-provider.js";
+import { requireNodeSqlite } from "./node-sqlite.js";
 
 class InMemoryKeyring implements WrappingKeyProvider {
   private readonly activeId: string;
@@ -407,19 +411,33 @@ describe("M5.5 auto-inject default keyring from env", () => {
       path: path.join(stateDir, "state", "openclaw.sqlite"),
     };
 
-    const candidate = generateStoredDeviceIdentity(1_700_000_000_000);
-    const inserted = insertStoredDeviceIdentityIfAbsent(candidate, options);
-    // Wrap form was applied even though the caller didn't pass a keyring.
-    expect(inserted.mldsaPrivateKeyPem).toBeNull();
-    expect(inserted.mldsaPrivateKeyWrapped).not.toBeNull();
-    expect(inserted.mldsaPrivateKeyWrapKeyId).toBe("wrap-key-2026-08");
-
-    // Read path also auto-injects — unwrap must restore the original secret.
-    const reloaded = readStoredDeviceIdentity(options);
-    expect(reloaded).not.toBeNull();
-    const recovered = decodeMlDsa65SecretKey(reloaded!.privateKeyPem);
+    // Auto-injection belongs to the high-level device identity API. The
+    // lower-level store deliberately accepts only explicit providers.
+    const identity = loadOrCreateDeviceIdentity(options);
+    const recovered = decodeMlDsa65SecretKey(identity.privateKeyPem);
     expect(recovered.length).toBe(4032);
-    expect(fingerprintMlDsa65PublicKey(decodeMlDsa65PublicKey(reloaded!.publicKeyPem))).toBe(candidate.deviceId);
+    expect(fingerprintMlDsa65PublicKey(decodeMlDsa65PublicKey(identity.publicKeyPem))).toBe(
+      identity.deviceId,
+    );
+
+    const { DatabaseSync } = requireNodeSqlite();
+    const database = new DatabaseSync(options.path);
+    try {
+      const row = database
+        .prepare(
+          "SELECT mldsa_private_key_pem, mldsa_private_key_wrapped, mldsa_private_key_wrap_key_id FROM device_identities WHERE identity_key = ?",
+        )
+        .get(PRIMARY_DEVICE_IDENTITY_KEY) as {
+        mldsa_private_key_pem: string | null;
+        mldsa_private_key_wrapped: Uint8Array | null;
+        mldsa_private_key_wrap_key_id: string | null;
+      };
+      expect(row.mldsa_private_key_pem).toBeNull();
+      expect(row.mldsa_private_key_wrapped).not.toBeNull();
+      expect(row.mldsa_private_key_wrap_key_id).toBe("wrap-key-2026-08");
+    } finally {
+      database.close();
+    }
   });
 
   it("stays in plaintext mode when OPENCLAW_WRAP_KEY_FILE is unset (no auto-inject)", () => {
@@ -459,8 +477,21 @@ describe("M5.5 auto-inject default keyring from env", () => {
       path: path.join(stateDir, "state", "openclaw.sqlite"),
       wrappingKeyProvider: explicit,
     };
-    const candidate = generateStoredDeviceIdentity(1_700_000_000_000);
-    const inserted = insertStoredDeviceIdentityIfAbsent(candidate, options);
-    expect(inserted.mldsaPrivateKeyWrapKeyId).toBe("explicit-key");
+    loadOrCreateDeviceIdentity(options);
+
+    const { DatabaseSync } = requireNodeSqlite();
+    const database = new DatabaseSync(options.path);
+    try {
+      const row = database
+        .prepare(
+          "SELECT mldsa_private_key_wrap_key_id FROM device_identities WHERE identity_key = ?",
+        )
+        .get(PRIMARY_DEVICE_IDENTITY_KEY) as {
+        mldsa_private_key_wrap_key_id: string | null;
+      };
+      expect(row.mldsa_private_key_wrap_key_id).toBe("explicit-key");
+    } finally {
+      database.close();
+    }
   });
 });
