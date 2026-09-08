@@ -20,17 +20,19 @@ file says (new flag, new path, new check), file a PR to update it.
 
 After a default production run of `bash scripts/install-pqc.sh` on Linux:
 
-| Path                                       | What it is                                               | Why it is there                                          |
-| ------------------------------------------ | -------------------------------------------------------- | -------------------------------------------------------- |
-| `/opt/pqc-openclaw/`                       | committed source tree plus the generated build           | `INSTALL_ROOT`, the systemd unit's `WorkingDirectory`    |
-| `/var/lib/pqc-openclaw/`                   | state root, mode-0600 `wrap-key.b64`, and `openclaw.env` | `STATE_DIR`; runtime data is created beneath it          |
-| `/var/backups/pqc-openclaw/`               | local backup tarballs + `.sha256` sidecars               | default `BACKUP_DIR`; scheduling is operator-managed     |
-| `/etc/systemd/system/pqc-openclaw.service` | generated systemd unit                                   | written by the installer; fixed service name             |
-| `/usr/local/bin/healthcheck-pqc.sh`        | 8-check health probe                                     | installed wrapper; invoke from monitoring as desired     |
-| `/usr/local/bin/backup-pqc.sh`             | on-demand backup runner                                  | installed wrapper; no scheduler is created automatically |
-| `/usr/local/bin/pqc-textfile-collector.sh` | Prometheus textfile collector                            | installed wrapper; no scheduler is created automatically |
-| `OPENCLAW_GATEWAY_TOKEN` env var           | gateway client auth                                      | set in `$STATE_DIR/openclaw.env` (mode 0600)             |
-| `OPENCLAW_WRAP_KEY_FILE` env var           | path to the file-backed 32-byte wrap key                 | set directly in the generated unit                       |
+| Path                                              | What it is                                               | Why it is there                                          |
+| ------------------------------------------------- | -------------------------------------------------------- | -------------------------------------------------------- |
+| `/opt/pqc-openclaw/`                              | committed source tree plus the generated build           | `INSTALL_ROOT`, the systemd unit's `WorkingDirectory`    |
+| `/var/lib/pqc-openclaw/`                          | state root, mode-0600 `wrap-key.b64`, and `openclaw.env` | `STATE_DIR`; runtime data is created beneath it          |
+| `/var/backups/pqc-openclaw/`                      | local backup tarballs + `.sha256` sidecars               | default `BACKUP_DIR`; owned by the service user          |
+| `/etc/systemd/system/pqc-openclaw.service`        | generated systemd unit                                   | written by the installer; fixed service name             |
+| `/etc/systemd/system/pqc-openclaw-backup.service` | verified one-shot backup unit                            | accepts warning-only exit 2 as successful completion     |
+| `/etc/systemd/system/pqc-openclaw-backup.timer`   | daily persistent backup schedule                         | enabled automatically when systemd is active             |
+| `/usr/local/bin/healthcheck-pqc.sh`               | 8-check health probe                                     | installed wrapper; invoke from monitoring as desired     |
+| `/usr/local/bin/backup-pqc.sh`                    | on-demand and scheduled backup runner                    | installed wrapper; timer uses file-key healthcheck mode  |
+| `/usr/local/bin/pqc-textfile-collector.sh`        | Prometheus textfile collector                            | installed wrapper; no scheduler is created automatically |
+| `OPENCLAW_GATEWAY_TOKEN` env var                  | gateway client auth                                      | set in `$STATE_DIR/openclaw.env` (mode 0600)             |
+| `OPENCLAW_WRAP_KEY_FILE` env var                  | path to the file-backed 32-byte wrap key                 | set directly in the generated unit                       |
 
 The systemd unit loads `$STATE_DIR/openclaw.env` before
 starting the gateway. **Do not** edit env vars in the unit file
@@ -251,8 +253,17 @@ The tarball preserves the `pqc-openclaw-state/` directory layout
 
 ### 3.3 Backup schedule
 
-The installer does not create a scheduler. After validating the command, an
-operator may add a cron entry such as:
+The Linux installer renders a persistent systemd timer for 03:00 daily with up
+to 15 minutes of jitter, and enables it when systemd is active. Verify both the
+schedule and a real run:
+
+```sh
+systemctl list-timers pqc-openclaw-backup.timer
+sudo systemctl start pqc-openclaw-backup.service
+sudo systemctl status pqc-openclaw-backup.service --no-pager
+```
+
+If systemd is unavailable, an operator may instead add a cron entry such as:
 
 ```cron
 0 3 * * * /usr/local/bin/backup-pqc.sh --json >> /var/log/pqc-backup.log 2>&1

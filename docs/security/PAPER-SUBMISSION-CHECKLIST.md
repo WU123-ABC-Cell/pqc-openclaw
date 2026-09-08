@@ -72,7 +72,8 @@ claiming CI success.
   environment-specific historical measurements.
 - `mlock` prevents core dumps. It protects against swap only.
 - Node 24.15.0 provides `process.mlock`; it does not.
-- The installer automatically writes an OS keyring or configures backup cron.
+- The installer automatically writes an OS keyring or a cron entry. Linux uses
+  a systemd backup timer; other schedulers remain operator-managed.
 - The project has received an independent third-party cryptographic audit or
   FIPS 140-3 validation.
 

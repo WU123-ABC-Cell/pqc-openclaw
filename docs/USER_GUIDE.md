@@ -300,10 +300,16 @@ version you are upgrading to.
 
 ## 4. Backups
 
-The installer does not create cron or systemd timer entries. Configure a
-scheduler explicitly after an on-demand backup succeeds. To inspect results:
+On Linux, the installer renders `pqc-openclaw-backup.service` and
+`pqc-openclaw-backup.timer` and enables the timer when systemd is active. The
+timer runs daily at 03:00 with up to 15 minutes of jitter and catches up after
+downtime. On WSL without systemd, the units are rendered but not enabled. Verify
+the schedule and run one on-demand backup before relying on it:
 
 ```sh
+systemctl list-timers pqc-openclaw-backup.timer
+sudo systemctl start pqc-openclaw-backup.service
+sudo systemctl status pqc-openclaw-backup.service --no-pager
 ls -la /var/backups/pqc-openclaw/
 # Should show ~7 daily + 4 weekly tarballs, each with a
 # matching .sha256 sidecar
@@ -315,7 +321,7 @@ sudo bash /usr/local/bin/backup-pqc.sh --verify "$LATEST"
 ```
 
 For off-host storage, set these variables in the scheduler environment (the
-gateway's `$STATE_DIR/openclaw.env` is not loaded by cron automatically):
+gateway's `$STATE_DIR/openclaw.env` is not loaded by the backup service):
 
 ```sh
 S3_BUCKET=my-pqc-backups

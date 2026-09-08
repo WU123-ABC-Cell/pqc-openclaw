@@ -117,9 +117,9 @@ def main():
         fail(f"non-root check reached the wrong failure path: {err}")
     log(f"  RC={r.returncode}, exact root/sudo guidance: OK")
 
-    # 3. --skip-systemd / --skip-keyring / --skip-build accepted by case
-    log("3. --skip-systemd / --skip-keyring / --skip-build are accepted by the case statement")
-    for skip_flag in ("--skip-systemd", "--skip-keyring", "--skip-build"):
+    # 3. Every skip option is accepted by the case statement.
+    log("3. all --skip-* options are accepted by the case statement")
+    for skip_flag in ("--skip-systemd", "--skip-backup-timer", "--skip-keyring", "--skip-build"):
         # Will still fail at EUID check, but only AFTER successful case
         # parsing; if the case branch is missing, the script will emit
         # 'Unknown option' and exit 1 from a different code path. We
@@ -153,6 +153,7 @@ def main():
     value_flags = [
         "--install-root",
         "--state-dir",
+        "--backup-dir",
         "--node-version",
         "--service-user",
         "--sandbox-root",

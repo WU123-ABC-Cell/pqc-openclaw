@@ -58,6 +58,7 @@ RETENTION_DAILY="${RETENTION_DAILY:-7}"
 RETENTION_WEEKLY="${RETENTION_WEEKLY:-4}"
 HEALTHCHECK_BIN="${HEALTHCHECK_BIN:-/usr/local/bin/healthcheck-pqc.sh}"
 SKIP_HEALTHCHECK=0
+HEALTHCHECK_SKIP_KEYRING=0
 SKIP_S3=0
 S3_BUCKET="${S3_BUCKET:-}"
 S3_ENDPOINT="${S3_ENDPOINT:-}"
@@ -86,6 +87,7 @@ OPTIONS
   --retention-weekly N      Keep N weekly backups.       [default: 4]
   --healthcheck-bin PATH    Path to healthcheck-pqc.sh.  [default: /usr/local/bin/healthcheck-pqc.sh]
   --skip-healthcheck        Do not block on a failed healthcheck.
+  --healthcheck-skip-keyring  Tell the pre-flight healthcheck to validate the file key only.
   --s3-bucket BUCKET        Upload to s3://BUCKET after local write.
   --s3-endpoint URL         S3 endpoint (for non-AWS providers like MinIO/Wasabi/B2).
   --s3-prefix PREFIX        S3 key prefix.               [default: pqc-openclaw]
@@ -153,6 +155,7 @@ while [[ $# -gt 0 ]]; do
     --retention-weekly)  RETENTION_WEEKLY="$2"; shift 2 ;;
     --healthcheck-bin)   HEALTHCHECK_BIN="$2"; shift 2 ;;
     --skip-healthcheck)  SKIP_HEALTHCHECK=1; shift ;;
+    --healthcheck-skip-keyring) HEALTHCHECK_SKIP_KEYRING=1; shift ;;
     --s3-bucket)         S3_BUCKET="$2"; shift 2 ;;
     --s3-endpoint)       S3_ENDPOINT="$2"; shift 2 ;;
     --s3-prefix)         S3_PREFIX="$2"; shift 2 ;;
@@ -380,15 +383,21 @@ ok "lock" "acquired $LOCK_DIR (PID $$)"
 if [[ $SKIP_HEALTHCHECK -eq 0 ]]; then
   if [[ ! -x "$HEALTHCHECK_BIN" ]]; then
     warn "healthcheck" "$HEALTHCHECK_BIN not executable; proceeding without pre-flight check"
-  elif "$HEALTHCHECK_BIN" --json >/dev/null 2>&1; then
-    ok "healthcheck" "exit 0 (all checks pass)"
   else
-    HC_EXIT=$?
-    if [[ $HC_EXIT -eq 2 ]]; then
-      warn "healthcheck" "healthcheck exit 2 (warnings); proceeding with backup anyway"
+    HEALTHCHECK_ARGS=(--json --state-dir "$STATE_DIR")
+    if [[ $HEALTHCHECK_SKIP_KEYRING -eq 1 ]]; then
+      HEALTHCHECK_ARGS+=(--skip-keyring)
+    fi
+    if "$HEALTHCHECK_BIN" "${HEALTHCHECK_ARGS[@]}" >/dev/null 2>&1; then
+    ok "healthcheck" "exit 0 (all checks pass)"
     else
-      fail "healthcheck" "healthcheck exit $HC_EXIT; aborting backup to avoid snapshotting a broken state"
-      exit 1
+      HC_EXIT=$?
+      if [[ $HC_EXIT -eq 2 ]]; then
+        warn "healthcheck" "healthcheck exit 2 (warnings); proceeding with backup anyway"
+      else
+        fail "healthcheck" "healthcheck exit $HC_EXIT; aborting backup to avoid snapshotting a broken state"
+        exit 1
+      fi
     fi
   fi
 else
