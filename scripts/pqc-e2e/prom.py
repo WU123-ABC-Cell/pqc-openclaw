@@ -14,8 +14,8 @@ verifies:
   5. The emitted textfile matches Prometheus exposition format
      (every metric has a # HELP and # TYPE line, values are
      integers, no Python str(...) artifacts)
-  6. pqc_healthcheck_check_status lines are emitted only when
-     healthcheck produced parseable JSON (none in this scenario)
+  6. A failing but parseable healthcheck still exports all check
+     counts/statuses, while the collector returns partial-failure RC 1
 
 This harness is the same shape as the other scripts/pqc-e2e
 harnesses, so the pattern is consistent
@@ -40,8 +40,11 @@ def fail(msg):
 
 def main():
     script = "scripts/pqc-textfile-collector.sh"
+    healthcheck = os.path.abspath("scripts/healthcheck-pqc.sh")
     if not os.path.isfile(script):
         fail(f"{script} not found")
+    if not os.path.isfile(healthcheck):
+        fail(f"{healthcheck} not found")
 
     # 0. bash -n
     log("0. bash -n")
@@ -86,6 +89,7 @@ def main():
         r = subprocess.run([
             "bash", script,
             "--textfile-dir", tf_dir,
+            "--healthcheck-bin", healthcheck,
             "--healthcheck-state-dir", state,
             "--healthcheck-install-root", install,
             "--backup-dir", backup,
@@ -135,11 +139,17 @@ def main():
         if "pqc_backup_last_bytes 1234" not in text:
             fail("pqc_backup_last_bytes does not match the tarball size (1234)")
         log(f"  pqc_backup_last_bytes 1234 matches tarball size: OK")
-        # Healthcheck did not produce JSON in this scenario (no state)
-        # so pqc_healthcheck_last_run_success should be 0
-        if "pqc_healthcheck_last_run_success 0" not in text:
-            fail("pqc_healthcheck_last_run_success should be 0 (no healthcheck JSON)")
-        log(f"  pqc_healthcheck_last_run_success 0: OK")
+        # The healthcheck is unhealthy but its schema-v1 JSON is parseable, so
+        # the collector must preserve counts/per-check metrics while returning 1.
+        if "pqc_healthcheck_last_run_success 1" not in text:
+            fail("pqc_healthcheck_last_run_success should be 1 for parseable JSON")
+        fail_match = re.search(r"^pqc_healthcheck_fail_checks_total (\d+)$", text, re.MULTILINE)
+        if not fail_match or int(fail_match.group(1)) == 0:
+            fail("healthcheck failure count was lost while parsing JSON")
+        check_lines = re.findall(r'^pqc_healthcheck_check_status\{check="[^"]+"\} [012]$', text, re.MULTILINE)
+        if len(check_lines) != 8:
+            fail(f"expected 8 per-check metrics, got {len(check_lines)}")
+        log("  parseable unhealthy healthcheck retained 8 check metrics: OK")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -158,6 +168,7 @@ def main():
             f.write(b"X")
         subprocess.run([
             "bash", script, "--textfile-dir", tf_dir,
+            "--healthcheck-bin", healthcheck,
             "--healthcheck-state-dir", state,
             "--healthcheck-install-root", install,
             "--backup-dir", backup,

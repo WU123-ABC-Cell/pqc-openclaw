@@ -159,17 +159,59 @@ def main():
             "--json",
             "--skip-keyring",
         )
-        # Even if some checks fail, --json must emit a parseable JSON document.
+        # Even if some checks fail, --json must emit exactly one JSON document.
+        stdout_lines = r.stdout.strip().splitlines()
+        if len(stdout_lines) != 1:
+            fail(f"--json emitted {len(stdout_lines)} stdout lines, expected exactly one")
         try:
-            doc = json.loads(r.stdout.split("\n", 1)[0])
+            doc = json.loads(stdout_lines[0])
         except (json.JSONDecodeError, IndexError) as e:
             log(f"  raw stdout (first 500 chars):\n{r.stdout[:500]}")
             log(f"  raw stderr (first 500 chars):\n{r.stderr[:500]}")
             fail(f"--json output is not valid JSON: {e}")
-        log(f"  JSON OK, summary pass={doc.get('summary', {}).get('pass', '?')} "
-            f"warn={doc.get('summary', {}).get('warn', '?')} "
-            f"fail={doc.get('summary', {}).get('fail', '?')}, "
-            f"{len(doc.get('checks', []))} checks reported")
+        if doc.get("schemaVersion") != 1:
+            fail(f"unexpected healthcheck schemaVersion: {doc.get('schemaVersion')}")
+        summary = doc.get("summary", {})
+        checks = doc.get("checks", [])
+        counts = [summary.get(key) for key in ("pass", "warn", "fail")]
+        if not all(isinstance(value, int) for value in counts):
+            fail(f"summary counts are not integers: {summary}")
+        if sum(counts) != len(checks):
+            fail(f"summary total {sum(counts)} does not match {len(checks)} checks")
+        names = [check.get("check") for check in checks]
+        if len(names) != len(set(names)):
+            fail(f"healthcheck names are not unique: {names}")
+        expected_status = "fail" if counts[2] else ("warn" if counts[1] else "ok")
+        if doc.get("status") != expected_status:
+            fail(f"status {doc.get('status')} does not match summary {summary}")
+        expected_exit = {"ok": 0, "warn": 2, "fail": 1}[expected_status]
+        if r.returncode != expected_exit:
+            fail(f"status {expected_status} requires RC {expected_exit}, got {r.returncode}")
+        log(
+            f"  schema v1 JSON OK, status={expected_status}, pass={counts[0]} "
+            f"warn={counts[1]} fail={counts[2]}, {len(checks)} unique checks"
+        )
+
+        # A quote in an operator-controlled path must remain valid JSON.
+        quoted_key = wrap_key_file + '\"missing'
+        escaped = run(
+            args.script,
+            "--install-root", install_root,
+            "--state-dir", state_dir,
+            "--wrap-key-file", quoted_key,
+            "--port", str(port),
+            "--json",
+            "--skip-keyring",
+        )
+        try:
+            escaped_doc = json.loads(escaped.stdout)
+        except json.JSONDecodeError as e:
+            fail(f"quoted path corrupted JSON output: {e}")
+        wrap_detail = next(
+            check["detail"] for check in escaped_doc["checks"] if check["check"] == "wrap-key-file"
+        )
+        if quoted_key not in wrap_detail:
+            fail("quoted wrap-key path was not preserved in JSON detail")
     finally:
         shutil.rmtree(base, ignore_errors=True)
 
@@ -190,6 +232,8 @@ def main():
         log(f"  RC={r.returncode}")
         if r.returncode == 0:
             fail("expected non-zero exit on broken deployment, got RC=0")
+        if r.returncode != 1:
+            fail(f"critical healthcheck must return RC 1, got {r.returncode}")
         if "[FAIL]" not in r.stderr:
             fail("expected [FAIL] lines in stderr on broken deployment, got none")
         fail_count = r.stderr.count("[FAIL]")

@@ -176,7 +176,7 @@ or `log show --predicate 'process == "pqc-openclaw"' --last 1m`
 ### 2.3 Run the 8-check healthcheck
 
 ```sh
-sudo bash /usr/local/bin/healthcheck-pqc.sh --json --skip-keyring | sed -n '1p' | jq
+sudo bash /usr/local/bin/healthcheck-pqc.sh --json --skip-keyring | jq
 ```
 
 Require `summary.fail` to be zero. The exact pass/warn split varies with

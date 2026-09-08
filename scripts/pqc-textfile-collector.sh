@@ -8,7 +8,7 @@
 # node_exporter textfile collector watches (default
 # /var/lib/prometheus/node-exporter/pqc.prom).
 #
-# Metrics emitted (8 gauge / counter pairs):
+# Metrics emitted (9 gauges):
 #   pqc_healthcheck_pass_checks_total
 #   pqc_healthcheck_warn_checks_total
 #   pqc_healthcheck_fail_checks_total
@@ -134,71 +134,73 @@ HC_PASS=0
 HC_WARN=0
 HC_FAIL=0
 HC_SUCCESS=0
-declare -A CHECK_STATUS
-CHECKS_RAW=""
+HC_EXIT=1
+HC_SOURCE_FAILED=1
+declare -a CHECK_NAMES=()
+declare -a CHECK_STATES=()
 
 if [[ -x "$HEALTHCHECK_BIN" ]]; then
   HC_OUTPUT=$("$HEALTHCHECK_BIN" \
     --state-dir "$HEALTHCHECK_STATE_DIR" \
     --install-root "$HEALTHCHECK_INSTALL_ROOT" \
     --json 2>/dev/null)
+  HC_EXIT=$?
   if [[ -n "$HC_OUTPUT" ]]; then
-    # First non-empty line is the JSON document; later lines are
-    # the human-readable [OK]/[WARN]/[FAIL] summary table.
-    HC_JSON=$(echo "$HC_OUTPUT" | head -1)
-    # Use python for portable JSON parsing (jq is not always installed).
-    CHECKS_RAW=$(python3 -c "
+    # Healthcheck --json is one complete document on stdout. Validate its
+    # schema and internal counts before publishing any derived metrics.
+    HC_PARSED=$(python3 -c "
 import json, sys
 try:
     doc = json.loads(sys.argv[1])
-    summary = doc.get('summary', {})
-    print('PASS=' + str(summary.get('pass', 0)))
-    print('WARN=' + str(summary.get('warn', 0)))
-    print('FAIL=' + str(summary.get('fail', 0)))
-    for c in doc.get('checks', []):
-        name = c.get('check', '?')
-        status = c.get('status', 'fail')
-        s = {'ok': 0, 'warn': 1, 'fail': 2}.get(status, 2)
-        print('CHECK ' + name + ' ' + str(s))
-except Exception as e:
-    print('FAIL=0', file=sys.stderr)
-    print('WARN=0', file=sys.stderr)
-    print('PASS=0', file=sys.stderr)
-    print('PARSE_ERROR=' + str(e), file=sys.stderr)
-" "$HC_JSON" 2>/dev/null)
-    if [[ -n "$CHECKS_RAW" ]]; then
+    if doc.get('schemaVersion') != 1:
+        raise ValueError('unsupported schemaVersion')
+    summary = doc['summary']
+    counts = [int(summary[k]) for k in ('pass', 'warn', 'fail')]
+    checks = doc['checks']
+    if sum(counts) != len(checks):
+        raise ValueError('summary count does not match checks')
+    expected = 'fail' if counts[2] else ('warn' if counts[1] else 'ok')
+    if doc.get('status') != expected:
+        raise ValueError('overall status does not match summary')
+    names = set()
+    rows = []
+    for check in checks:
+        name = check['check']
+        status = check['status']
+        if not isinstance(name, str) or not name or name in names:
+            raise ValueError('invalid or duplicate check name')
+        if status not in {'ok', 'warn', 'fail'}:
+            raise ValueError('invalid check status')
+        names.add(name)
+        rows.append((name, {'ok': 0, 'warn': 1, 'fail': 2}[status]))
+    print('SUMMARY\t' + '\t'.join(str(v) for v in counts))
+    for name, state in rows:
+        print(f'CHECK\t{name}\t{state}')
+except Exception:
+    sys.exit(1)
+" "$HC_OUTPUT" 2>/dev/null)
+    HC_PARSE_EXIT=$?
+    if [[ $HC_PARSE_EXIT -eq 0 ]] && [[ -n "$HC_PARSED" ]]; then
       HC_SUCCESS=1
-      while IFS=' ' read -r k v; do
-        case "$k" in
-          PASS) HC_PASS=$v ;;
-          WARN) HC_WARN=$v ;;
-          FAIL) HC_FAIL=$v ;;
-          CHECK) CHECK_STATUS["$v"]="${CHECK_STATUS[$v]:-} $v" ;;  # name captured in next line
+      while IFS=$'\t' read -r kind first second third; do
+        case "$kind" in
+          SUMMARY)
+            HC_PASS=$first
+            HC_WARN=$second
+            HC_FAIL=$third
+            ;;
+          CHECK)
+            CHECK_NAMES+=("$first")
+            CHECK_STATES+=("$second")
+            ;;
         esac
-      done <<< "$CHECKS_RAW"
+      done <<< "$HC_PARSED"
     fi
   fi
-  [[ $VERBOSE -eq 1 ]] && echo "[healthcheck] pass=$HC_PASS warn=$HC_WARN fail=$HC_FAIL success=$HC_SUCCESS" >&2
-fi
-
-# Re-parse for per-check status (the simple read above did not
-# preserve check names cleanly). Re-run a more targeted parse.
-if [[ $HC_SUCCESS -eq 1 ]] && [[ -n "${HC_JSON:-}" ]]; then
-  declare -ga CHECK_NAMES=()
-  declare -ga CHECK_STATES=()
-  while IFS=$'\t' read -r name state; do
-    CHECK_NAMES+=("$name")
-    CHECK_STATES+=("$state")
-  done < <(python3 -c "
-import json, sys
-try:
-    doc = json.loads(sys.argv[1])
-    for c in doc.get('checks', []):
-        s = {'ok': 0, 'warn': 1, 'fail': 2}.get(c.get('status', 'fail'), 2)
-        print(c.get('check', '?') + '\t' + str(s))
-except Exception:
-    pass
-" "$HC_JSON" 2>/dev/null)
+  if [[ $HC_SUCCESS -eq 1 ]] && { [[ $HC_EXIT -eq 0 ]] || [[ $HC_EXIT -eq 2 ]]; }; then
+    HC_SOURCE_FAILED=0
+  fi
+  [[ $VERBOSE -eq 1 ]] && echo "[healthcheck] exit=$HC_EXIT pass=$HC_PASS warn=$HC_WARN fail=$HC_FAIL parseable=$HC_SUCCESS" >&2
 fi
 
 # ----------------------------------------------------------------------
@@ -295,7 +297,7 @@ mv "$TMP_PATH" "$TEXTFILE_PATH"
 
 [[ $VERBOSE -eq 1 ]] && echo "[collector] wrote $TEXTFILE_PATH" >&2
 
-if [[ $HC_SUCCESS -eq 0 ]] || [[ -z "$LATEST_TARBALL" ]]; then
+if [[ $HC_SOURCE_FAILED -eq 1 ]] || [[ -z "$LATEST_TARBALL" ]]; then
   exit 1
 fi
 exit 0

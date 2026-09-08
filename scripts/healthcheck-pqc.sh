@@ -114,11 +114,22 @@ done
 # ----------------------------------------------------------------------
 
 if [[ $JSON_OUTPUT -eq 1 ]]; then
-  # JSON output: accumulate results, emit at end.
+  # JSON output: accumulate results, emit one document on stdout at the end.
+  # Escape operator-controlled paths and command output so a quote, backslash,
+  # tab, or newline cannot corrupt the machine-readable contract.
   declare -a JSON_RESULTS=()
+  json_escape() {
+    local value="$1"
+    value=${value//\\/\\\\}
+    value=${value//\"/\\\"}
+    value=${value//$'\n'/\\n}
+    value=${value//$'\r'/\\r}
+    value=${value//$'\t'/\\t}
+    printf '%s' "$value"
+  }
   json_emit() {
     local status="$1" name="$2" detail="$3"
-    JSON_RESULTS+=("{\"check\":\"$name\",\"status\":\"$status\",\"detail\":\"$detail\"}")
+    JSON_RESULTS+=("{\"check\":\"$(json_escape "$name")\",\"status\":\"$(json_escape "$status")\",\"detail\":\"$(json_escape "$detail")\"}")
   }
   ok()    { PASS=$((PASS+1)); json_emit "ok"    "$1" "$2"; [[ $VERBOSE -eq 1 ]] && echo "[OK]   $1: $2"; }
   warn()  { WARN=$((WARN+1)); json_emit "warn"  "$1" "$2"; echo "[WARN] $1: $2" >&2; }
@@ -313,19 +324,26 @@ fi
 # ----------------------------------------------------------------------
 
 if [[ $JSON_OUTPUT -eq 1 ]]; then
-  printf '{"summary":{"pass":%d,"warn":%d,"fail":%d},"checks":[%s]}\n' \
-    "$PASS" "$WARN" "$FAIL" \
+  if [[ $FAIL -gt 0 ]]; then
+    OVERALL_STATUS=fail
+  elif [[ $WARN -gt 0 ]]; then
+    OVERALL_STATUS=warn
+  else
+    OVERALL_STATUS=ok
+  fi
+  printf '{"schemaVersion":1,"status":"%s","summary":{"pass":%d,"warn":%d,"fail":%d},"checks":[%s]}\n' \
+    "$OVERALL_STATUS" "$PASS" "$WARN" "$FAIL" \
     "$(IFS=,; echo "${JSON_RESULTS[*]}")"
+else
+  echo ""
+  echo "=========================================="
+  echo "PQC fork healthcheck summary"
+  echo "=========================================="
+  echo "  pass: $PASS"
+  echo "  warn: $WARN"
+  echo "  fail: $FAIL"
+  echo "=========================================="
 fi
-
-echo ""
-echo "=========================================="
-echo "PQC fork healthcheck summary"
-echo "=========================================="
-echo "  pass: $PASS"
-echo "  warn: $WARN"
-echo "  fail: $FAIL"
-echo "=========================================="
 
 if [[ $FAIL -gt 0 ]]; then
   exit 1  # critical

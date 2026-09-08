@@ -381,7 +381,7 @@ if [[ $SKIP_HEALTHCHECK -eq 0 ]]; then
   if [[ ! -x "$HEALTHCHECK_BIN" ]]; then
     warn "healthcheck" "$HEALTHCHECK_BIN not executable; proceeding without pre-flight check"
   elif "$HEALTHCHECK_BIN" --json >/dev/null 2>&1; then
-    ok "healthcheck" "8/8 checks pass"
+    ok "healthcheck" "exit 0 (all checks pass)"
   else
     HC_EXIT=$?
     if [[ $HC_EXIT -eq 2 ]]; then
