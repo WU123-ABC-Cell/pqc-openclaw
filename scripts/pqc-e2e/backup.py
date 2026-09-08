@@ -5,13 +5,15 @@ pqc-fork-e2e-backup.py — end-to-end round-trip test for scripts/backup-pqc.sh.
 Proves the full backup pipeline on a fake /tmp state directory:
   1. backup-pqc.sh (real run)   → tarball + sha256 sidecar
   2. tar -tzf                   → archive reads cleanly
-  3. sqlite3 .schema            → embedded state.db is a valid sqlite db
+  3. SQLite integrity + restore → current state/openclaw.sqlite survives intact
   4. backup-pqc.sh --verify     → standalone verify mode re-checks
                                    sha256 + tar + sqlite in one command
-  5. concurrent lock            → a held .backup.lock/pid makes a
+  5. layout compatibility       → current and legacy SQLite paths verify
+  6. corrupt-db rejection       → invalid current DB never gets published
+  7. concurrent lock            → a held .backup.lock/pid makes a
                                    second run fail with a [FAIL] lock
                                    line that names the holder's PID
-  6. retention                  → 15 fake-old tarballs + 1 new = 16,
+  8. retention                  → old archives are pruned only after success
                                    run real backup, expect 5-6 to be
                                    pruned (keep 11 = 7 daily + 4 weekly)
 
@@ -57,7 +59,8 @@ def make_state_dir():
     state = tempfile.mkdtemp(prefix="pqc-e2e-state-")
     os.makedirs(os.path.join(state, "mlock"), exist_ok=True)
     os.makedirs(os.path.join(state, "auth-profile-secrets"), exist_ok=True)
-    db_path = os.path.join(state, "state.db")
+    os.makedirs(os.path.join(state, "state"), exist_ok=True)
+    db_path = os.path.join(state, "state", "openclaw.sqlite")
     conn = sqlite3.connect(db_path)
     conn.execute("CREATE TABLE foo (id INTEGER PRIMARY KEY, name TEXT, ts INTEGER)")
     conn.execute("INSERT INTO foo (name, ts) VALUES ('hello', 1000), ('world', 2000), ('pqc', 3000)")
@@ -143,26 +146,37 @@ def main():
         with tarfile.open(latest) as tf:
             members = tf.getnames()
         log(f"4. tar -tzf: {len(members)} entries, no exception")
-        if not any(m.endswith("state.db") for m in members):
-            fail("no state.db inside the tarball")
+        if "pqc-openclaw-state/state/openclaw.sqlite" not in members:
+            fail("no current state/openclaw.sqlite inside the tarball")
         if any("/mlock/" in m for m in members):
             fail("mlock/ tmpfs was included in the tarball (should be excluded)")
 
-        # 5. sqlite3 .schema on extracted state.db
+        # 5. Restore the archive and prove the current database plus key material
+        #    survive with their contents intact, not merely as readable files.
         with tempfile.TemporaryDirectory() as v:
             with tarfile.open(latest) as tf:
                 tf.extractall(v)
-            db = None
-            for root, _, files in os.walk(v):
-                if "state.db" in files:
-                    db = os.path.join(root, "state.db")
-                    break
-            if not db:
-                fail("no state.db in extracted tarball")
-            r = subprocess.run(["sqlite3", db, ".schema"], capture_output=True, text=True)
+            restored_root = os.path.join(v, "pqc-openclaw-state")
+            db = os.path.join(restored_root, "state", "openclaw.sqlite")
+            if not os.path.isfile(db):
+                fail("no current state/openclaw.sqlite in restored tree")
+            r = subprocess.run(
+                [
+                    "sqlite3",
+                    db,
+                    "PRAGMA integrity_check; SELECT group_concat(name, ',') FROM (SELECT name FROM foo ORDER BY id);",
+                ],
+                capture_output=True,
+                text=True,
+            )
             if r.returncode != 0:
-                fail(f"sqlite3 .schema failed: {r.stderr}")
-            log("5. sqlite3 .schema: OK")
+                fail(f"sqlite3 restore verification failed: {r.stderr}")
+            lines = r.stdout.strip().splitlines()
+            if lines != ["ok", "hello,world,pqc"]:
+                fail(f"restored database contents differ: {lines}")
+            if not os.path.isfile(os.path.join(restored_root, "wrap-key.b64")):
+                fail("restored tree is missing wrap-key.b64")
+            log("5. restored current SQLite database + key material: OK")
 
         # 6. --verify standalone mode
         log(f"6. backup-pqc.sh --verify {latest}")
@@ -170,6 +184,55 @@ def main():
         if r.returncode != 0:
             fail(f"--verify returned {r.returncode}: {r.stdout} {r.stderr}")
         log(f"  --verify RC=0, last line: {r.stdout.strip().splitlines()[-1]}")
+
+        # 6b. Legacy state.db archives remain verifiable during migration.
+        legacy_root = tempfile.mkdtemp(prefix="pqc-e2e-legacy-state-")
+        try:
+            legacy_state = os.path.join(legacy_root, "pqc-openclaw-state")
+            os.makedirs(legacy_state, exist_ok=True)
+            legacy_db = os.path.join(legacy_state, "state.db")
+            conn = sqlite3.connect(legacy_db)
+            conn.execute("CREATE TABLE legacy (id INTEGER PRIMARY KEY)")
+            conn.commit()
+            conn.close()
+            legacy_tar = os.path.join(backup, "pqc-openclaw-legacy-fixture.tar.gz")
+            with tarfile.open(legacy_tar, "w:gz") as tf:
+                tf.add(legacy_state, arcname="pqc-openclaw-state")
+            legacy_sha = hashlib.sha256(open(legacy_tar, "rb").read()).hexdigest()
+            with open(legacy_tar + ".sha256", "w") as f:
+                f.write(f"{legacy_sha}  {os.path.basename(legacy_tar)}\n")
+            log("6b. legacy state.db archive remains verifiable")
+            r = run(args.script, "--verify", legacy_tar)
+            if r.returncode != 0:
+                fail(f"legacy --verify returned {r.returncode}: {r.stdout} {r.stderr}")
+            log("  legacy --verify RC=0: OK")
+        finally:
+            shutil.rmtree(legacy_root, ignore_errors=True)
+
+        # 6c. A corrupt current-layout database must never be published as a
+        #     successful restore point, even when healthcheck is skipped.
+        corrupt_state = tempfile.mkdtemp(prefix="pqc-e2e-corrupt-state-")
+        corrupt_backup = tempfile.mkdtemp(prefix="pqc-e2e-corrupt-backup-")
+        try:
+            os.makedirs(os.path.join(corrupt_state, "state"), exist_ok=True)
+            with open(os.path.join(corrupt_state, "state", "openclaw.sqlite"), "wb") as f:
+                f.write(b"not-a-sqlite-database")
+            log("6c. corrupt current SQLite is rejected before publication")
+            r = run(
+                args.script,
+                "--state-dir", corrupt_state,
+                "--backup-dir", corrupt_backup,
+                "--skip-s3", "--skip-healthcheck",
+                "--label", "must-not-publish",
+            )
+            if r.returncode == 0:
+                fail("backup accepted a corrupt current-layout database")
+            if glob.glob(os.path.join(corrupt_backup, "*.tar.gz")):
+                fail("corrupt backup was published before self-verification")
+            log("  rejected with no published tarball: OK")
+        finally:
+            shutil.rmtree(corrupt_state, ignore_errors=True)
+            shutil.rmtree(corrupt_backup, ignore_errors=True)
 
         # 7. concurrent lock: hold lock manually, expect [FAIL] lock
         #    that names the holder PID.
@@ -194,10 +257,9 @@ def main():
         finally:
             shutil.rmtree(lock_dir, ignore_errors=True)
 
-        # 8. retention: 15 fake old + 1 new = 16, expect 5-6 pruned
-        #    (keep 11 = 7 daily + 4 weekly; but the count math is
-        #    sensitive to the ordering of mtimes, so we accept 5-6).
-        log("8. retention test: 15 fake-old tarballs + 1 new = 16 → expect 5-6 pruned")
+        # 8. retention: add 15 old fixtures, then require the successful run to
+        #    leave exactly 11 archives (7 daily + 4 weekly slots).
+        log("8. retention test: successful backup leaves exactly 11 archives")
         for i in range(15):
             age = i + 1
             ts = (datetime.datetime(2026, 9, 2, 3, 0, 0) - datetime.timedelta(days=age)).strftime("%Y-%m-%dT%H%M%SZ")

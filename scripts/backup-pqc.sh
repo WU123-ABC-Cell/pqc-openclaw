@@ -11,8 +11,9 @@
 #      place with `mv`. A partial / corrupted tarball never appears in
 #      $BACKUP_DIR.
 #   2. **Verifiable**: every backup gets a .sha256 sidecar; a separate
-#      `verify` mode (and a post-backup self-test) confirms the tarball
-#      extracts and the sqlite db opens before declaring success.
+#      `verify` mode (and a pre-publication self-test) confirms the tarball
+#      extracts and the current or legacy SQLite database passes a full
+#      integrity check before declaring success.
 #   3. **Idempotent under cron**: a mkdir-based lock directory in
 #      $BACKUP_DIR/.backup.lock prevents two cron-triggered runs from
 #      stepping on each other (cron on most distros already runs in
@@ -94,7 +95,7 @@ OPTIONS
   --dry-run                 Print what would happen; do not write or upload.
   --json                    Emit machine-readable JSON summary.
   --verbose                 Show progress even on success.
-  --verify PATH             Verify an existing tarball (sha256 + extract + sqlite open) and exit.
+  --verify PATH             Verify an existing tarball (sha256 + extract + SQLite integrity) and exit.
   --help                    Show this message.
 
 EXIT CODES
@@ -116,8 +117,8 @@ VERIFY MODE
     1. sha256 matches the .sha256 sidecar (or prints the recomputed
        sha256 if no sidecar exists).
     2. tar -tzf succeeds (file is a valid tar.gz).
-    3. The contained state.db is a valid sqlite3 database (sqlite3
-       ".schema" exits 0).
+    3. The current state/openclaw.sqlite (or legacy state.db) passes
+       SQLite PRAGMA integrity_check.
   Exits 0 on full pass, 1 on any failure.
 
 EXAMPLES
@@ -193,12 +194,16 @@ fi
 # ----------------------------------------------------------------------
 
 SCRATCH_DIR=""
+VERIFY_DIR=""
 LOCK_DIR=""
 
 cleanup() {
   local exit_code=$?
   if [[ -n "$SCRATCH_DIR" ]] && [[ -d "$SCRATCH_DIR" ]]; then
     rm -rf "$SCRATCH_DIR"
+  fi
+  if [[ -n "$VERIFY_DIR" ]] && [[ -d "$VERIFY_DIR" ]]; then
+    rm -rf "$VERIFY_DIR"
   fi
   if [[ -n "$LOCK_DIR" ]] && [[ -d "$LOCK_DIR" ]]; then
     # Only remove if we still own it (a stale lock from a crashed
@@ -212,6 +217,38 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+# Resolve the database from an extracted archive. Current deployments keep
+# shared state at state/openclaw.sqlite; state.db is accepted only for backups
+# created by older releases. Exact paths avoid silently validating an unrelated
+# SQLite file that happens to exist elsewhere in the archive.
+resolve_extracted_state_db() {
+  local root="$1"
+  local candidate
+  for candidate in \
+    "$root/pqc-openclaw-state/state/openclaw.sqlite" \
+    "$root/pqc-openclaw-state/state.db" \
+    "$root/state/openclaw.sqlite" \
+    "$root/state.db"; do
+    if [[ -f "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+verify_sqlite_integrity() {
+  local db_file="$1"
+  local result
+  if ! command -v sqlite3 >/dev/null 2>&1; then
+    return 127
+  fi
+  if ! result=$(sqlite3 "$db_file" 'PRAGMA integrity_check;' 2>/dev/null); then
+    return 1
+  fi
+  [[ "$result" == "ok" ]]
+}
 
 # ----------------------------------------------------------------------
 # Verify mode (early return path)
@@ -241,23 +278,23 @@ if [[ -n "$VERIFY_TARGET" ]]; then
   fi
   ok "tar" "tar -tzf reads cleanly"
   SCRATCH_DIR=$(mktemp -d -t pqc-backup-verify-XXXXXX)
-  if ! tar -xzf "$VERIFY_TARGET" -C "$SCRATCH_DIR" --strip-components=0 state.db 2>/dev/null \
-     && ! tar -xzf "$VERIFY_TARGET" -C "$SCRATCH_DIR" 2>/dev/null; then
-    fail "extract" "could not extract state.db from tarball"
+  if ! tar -xzf "$VERIFY_TARGET" -C "$SCRATCH_DIR" 2>/dev/null; then
+    fail "extract" "could not extract tarball"
     exit 1
   fi
-  DB_FILE=$(find "$SCRATCH_DIR" -name 'state.db' -type f | head -1 || true)
+  DB_FILE=$(resolve_extracted_state_db "$SCRATCH_DIR" || true)
   if [[ -z "$DB_FILE" ]]; then
-    fail "extract" "no state.db in tarball"
+    fail "extract" "no state/openclaw.sqlite or legacy state.db in tarball"
     exit 1
   fi
   if ! command -v sqlite3 >/dev/null 2>&1; then
-    warn "sqlite" "sqlite3 not on PATH; cannot verify db integrity (file is present)"
-  elif ! sqlite3 "$DB_FILE" '.schema' >/dev/null 2>&1; then
-    fail "sqlite" "sqlite3 .schema failed; db is corrupt"
+    fail "sqlite" "sqlite3 not on PATH; refusing to approve an unverified database"
+    exit 1
+  elif ! verify_sqlite_integrity "$DB_FILE"; then
+    fail "sqlite" "PRAGMA integrity_check failed for ${DB_FILE#"$SCRATCH_DIR"/}"
     exit 1
   else
-    ok "sqlite" "state.db schema readable"
+    ok "sqlite" "${DB_FILE#"$SCRATCH_DIR"/} integrity ok"
   fi
   echo "verify OK: $VERIFY_TARGET"
   exit 0
@@ -403,40 +440,42 @@ echo "$TARBALL_SHA  $BASENAME" > "$SCRATCH_SIDE"
 ok "sha256" "$TARBALL_SHA"
 
 # ----------------------------------------------------------------------
-# Atomic move into $BACKUP_DIR
+# Self-verify before publication: extract to a fresh scratch dir and require
+# the canonical database to pass a full integrity check. A failed archive stays
+# private in $TMPDIR and is removed by cleanup; it never becomes a restore point.
+# ----------------------------------------------------------------------
+
+VERIFY_DIR=$(mktemp -d -t pqc-backup-verify-XXXXXX)
+if ! tar -xzf "$SCRATCH_TARBALL" -C "$VERIFY_DIR" 2>/dev/null; then
+  fail "self-verify" "tar -xzf failed on the just-written tarball"
+  exit 1
+fi
+DB_FILE=$(resolve_extracted_state_db "$VERIFY_DIR" || true)
+if [[ -z "$DB_FILE" ]]; then
+  fail "self-verify" "tarball has no state/openclaw.sqlite or legacy state.db"
+  exit 1
+fi
+if ! command -v sqlite3 >/dev/null 2>&1; then
+  fail "self-verify" "sqlite3 not on PATH; refusing to publish an unverified database"
+  exit 1
+fi
+if ! verify_sqlite_integrity "$DB_FILE"; then
+  fail "self-verify" "PRAGMA integrity_check failed for ${DB_FILE#"$VERIFY_DIR"/}"
+  exit 1
+fi
+ok "self-verify" "${DB_FILE#"$VERIFY_DIR"/} integrity ok"
+rm -rf "$VERIFY_DIR"
+VERIFY_DIR=""
+
+# ----------------------------------------------------------------------
+# Atomic publication after verification
 # ----------------------------------------------------------------------
 
 mv "$SCRATCH_TARBALL" "$FINAL_PATH"
 mv "$SCRATCH_SIDE"   "${FINAL_PATH}.sha256"
-SCRATCH_DIR=""  # mv succeeded; don't let cleanup() rm the moved file
+rmdir "$SCRATCH_DIR"
+SCRATCH_DIR=""  # publication succeeded; no scratch content remains to remove
 ok "publish" "$FINAL_PATH"
-
-# ----------------------------------------------------------------------
-# Self-verify: extract to a fresh scratch dir, confirm db opens
-# ----------------------------------------------------------------------
-
-VERIFY_DIR=$(mktemp -d -t pqc-backup-verify-XXXXXX)
-if tar -xzf "$FINAL_PATH" -C "$VERIFY_DIR" 2>/dev/null; then
-  DB_FILE=$(find "$VERIFY_DIR" -name 'state.db' -type f | head -1 || true)
-  if [[ -n "$DB_FILE" ]] && command -v sqlite3 >/dev/null 2>&1; then
-    if sqlite3 "$DB_FILE" '.schema' >/dev/null 2>&1; then
-      ok "self-verify" "tarball extracts, state.db schema OK"
-    else
-      fail "self-verify" "tarball extracts but state.db is not a valid sqlite db"
-      rm -rf "$VERIFY_DIR"
-      exit 1
-    fi
-  elif [[ -n "$DB_FILE" ]]; then
-    warn "self-verify" "tarball extracts, state.db present, sqlite3 not on PATH (skip schema check)"
-  else
-    warn "self-verify" "tarball extracts but no state.db inside (unexpected)"
-  fi
-else
-  fail "self-verify" "tar -xzf failed on the just-written tarball"
-  rm -rf "$VERIFY_DIR"
-  exit 1
-fi
-rm -rf "$VERIFY_DIR"
 
 # ----------------------------------------------------------------------
 # Retention: prune old backups (AFTER the new one is verified)

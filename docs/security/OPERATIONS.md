@@ -230,11 +230,11 @@ do not suppress the warning by inventing one.
 sudo bash /usr/local/bin/backup-pqc.sh --verify /var/backups/pqc-openclaw/pqc-openclaw-2026-09-02-030000.tar.gz
 ```
 
-A passing verify means the sha256 matches and the tar archive reads cleanly.
-The current database-schema probe recognizes only the legacy `state.db` layout;
-for the current `$STATE_DIR/state/openclaw.sqlite`, separately extract into a
-temporary recovery directory and run `PRAGMA integrity_check` before relying on
-the restore point. **Do not skip this step** before a restore.
+A passing verify means the sha256 matches, the tar archive reads cleanly, and
+the current `$STATE_DIR/state/openclaw.sqlite` (or a legacy `state.db`) passes
+`PRAGMA integrity_check`. The same check runs before a newly created archive is
+published, so failed validation does not leave a corrupt tarball among the
+available restore points.
 
 ### 3.2 Restore from a backup
 

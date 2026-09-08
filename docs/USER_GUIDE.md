@@ -329,11 +329,11 @@ Then trigger a one-shot:
 sudo bash /usr/local/bin/backup-pqc.sh --json | tee /tmp/backup.out
 ```
 
-A 0 exit code means the tarball was written, sha256-verified, and (if
-configured) uploaded. The current backup verifier's database-schema probe only
-recognizes the legacy `state.db` layout; independently run the healthcheck's
-SQLite integrity probe for `$STATE_DIR/state/openclaw.sqlite` before relying on
-a restore point.
+A 0 exit code means the tarball was written, sha256-verified, its current
+`state/openclaw.sqlite` database passed `PRAGMA integrity_check`, and (if
+configured) it was uploaded. Legacy archives containing `state.db` remain
+verifiable. The self-check runs before publication, so a corrupt database is
+not left behind as an apparently usable restore point.
 
 See [OPERATIONS](/security/OPERATIONS#3-backup-hygiene)
 for the full restore-from-backup procedure and retention
