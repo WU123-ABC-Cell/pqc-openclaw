@@ -1,18 +1,17 @@
 # PQC OpenClaw Fork
 
 > **Post-quantum hardened** OpenClaw with side-channel-resilient
-> cryptographic primitives, mlock-pinned wrap keys, and paper-grade
+> cryptographic primitives, best-effort mlock-pinned wrap keys, and paper-grade
 > verification of every claim.
 
-[![CI: side-channel](https://img.shields.io/badge/CI-side--channel-success-green)](.github/workflows/pqc-side-channel.yml)
-[![CI: deploy E2E](https://img.shields.io/badge/CI-deploy%20E2E-success-green)](.github/workflows/pqc-deploy-e2e.yml)
+[![CI: side-channel](https://github.com/WU123-ABC-Cell/pqc-openclaw/actions/workflows/pqc-side-channel.yml/badge.svg?branch=master)](.github/workflows/pqc-side-channel.yml)
+[![CI: deploy E2E](https://github.com/WU123-ABC-Cell/pqc-openclaw/actions/workflows/pqc-deploy-e2e.yml/badge.svg?branch=master)](.github/workflows/pqc-deploy-e2e.yml)
 [![Paper-grade](https://img.shields.io/badge/audit-paper--grade-blueviolet)](docs/security/pqc-whitepaper.md)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-A drop-in-hardening of [OpenClaw](https://github.com/openclaw/openclaw) that swaps the
-underlying Ed25519 / x25519 / AES-128-GCM primitives for post-quantum and
-constant-time equivalents while staying wire-compatible with the upstream
-client API. Forked from `openclaw/openclaw` and maintained independently
+A hardening fork of [OpenClaw](https://github.com/openclaw/openclaw) whose
+verified PQC paths use ML-DSA, ML-KEM, and AES-256-GCM while preserving the
+upstream client-facing API where documented. Forked from `openclaw/openclaw` and maintained independently
 by [@WU123-ABC-Cell](https://github.com/WU123-ABC-Cell).
 
 ---
@@ -24,18 +23,21 @@ by [@WU123-ABC-Cell](https://github.com/WU123-ABC-Cell).
   Ed25519 fallback for legacy clients.
 - **Post-quantum KEM**: `ml-kem-768` (NIST FIPS 203) and `ml-kem-512`,
   `ml-kem-1024` for hybrid KEX.
-- **Wrap key in physical RAM**: on Node 24.15+, the 32-byte wrap key
-  is `mlock(2)`-pinned in the process address space so it never
-  reaches swap. On Node 22 (the current default), the key lives in
-  the OS keyring (libsecret on Linux, Keychain on macOS) and the
-  fallback file is mode 0600 — see [docs/security/MLOCK.md](docs/security/MLOCK.md).
+- **Best-effort wrap-key RAM pinning**: on supported Linux builds, the native
+  addon calls `mlock(2)` for the 32-byte cached wrap key. This protects against
+  swap, not core dumps. The production installer provisions a mode-0600 file;
+  OS-keyring migration is an explicit operator step. See
+  [docs/security/MLOCK.md](docs/security/MLOCK.md).
 - **Constant-time crypto path**: every primitive is from
   [@noble/post-quantum](https://github.com/paulmillr/noble-post-quantum)
-  v0.7.0, audited upstream. Self-audit at
+  v0.7.0. This fork's self-audit is at
   [docs/security/constant-time-audit.md](docs/security/constant-time-audit.md).
-- **Empirically verified, not just audited**: 14 cache-timing reports
-  - 150 NIST KATs + 13 mlock vitest + 35+ E2E checks run in CI on
-    every PR. Zero leaks at 4.5 σ across 28 operations × 129,200 trials.
+- **Empirically checked**: 14 checked-in cache-timing reports pass the
+  integrity gate (`max |t| = 1.983`, threshold 4.5). The latest local gate also
+  passed 275 focused tests, five deploy harnesses, a native 32-byte
+  mlock/munlock roundtrip, and a complete sandbox install. The historical
+  campaign covered 28 user-space/cache-hierarchy measurements and 129,200
+  trials; these are separate evidence layers, not one combined test count.
 
 ## What you do NOT get (yet)
 
@@ -57,20 +59,18 @@ by [@WU123-ABC-Cell](https://github.com/WU123-ABC-Cell).
 git clone https://github.com/WU123-ABC-Cell/pqc-openclaw.git
 cd pqc-openclaw
 
-# 2. Install Node 22.23.1 (pinned by .nvmrc)
-nvm install 22.23.1 && nvm use
+# 2. Install the Node.js version pinned by .nvmrc
+nvm install && nvm use
 # Or: nvm use  (reads .nvmrc)
 
-# 3. Install OS keyring dependency (Linux only)
-sudo apt install -y libsecret-1-0 gnome-keyring    # macOS / WSL: skip
-
-# 4. 1-command installer
+# 3. 1-command installer
 sudo bash scripts/install-pqc.sh
-# → installs to /opt/pqc-openclaw, generates wrap key, sets up systemd
+# → installs to /opt/pqc-openclaw, creates a file-backed wrap key,
+#   and renders the systemd unit
 
-# 5. Verify
-bash scripts/healthcheck-pqc.sh --json
-# Expect: pass ≥ 7, fail = 0, warn ≤ 1 (mlock warn on Node 22 is normal)
+# 4. Verify the default file-backed deployment
+bash scripts/healthcheck-pqc.sh --json --skip-keyring
+# Expect: fail = 0. A warning means an optional capability is unavailable.
 ```
 
 For a deeper walk-through, see [docs/USER_GUIDE.md](docs/USER_GUIDE.md).
@@ -78,12 +78,13 @@ For a deeper walk-through, see [docs/USER_GUIDE.md](docs/USER_GUIDE.md).
 ## 5-line PQC example
 
 ```js
-import { ml_dsa65 } from "@noble/post-quantum";
+import { ml_dsa65 } from "@noble/post-quantum/ml-dsa.js";
 import { randomBytes } from "node:crypto";
 
 const { publicKey, secretKey } = ml_dsa65.keygen(randomBytes(32));
-const sig = ml_dsa65.sign(secretKey, Buffer.from("hello pqc"));
-const ok = ml_dsa65.verify(publicKey, Buffer.from("hello pqc"), sig);
+const message = Buffer.from("hello pqc");
+const sig = ml_dsa65.sign(message, secretKey);
+const ok = ml_dsa65.verify(sig, message, publicKey);
 console.log("verified:", ok); // → "verified: true"
 ```
 
@@ -94,7 +95,7 @@ Full examples live in [`examples/`](examples/).
 ```
 .
 ├── src/security/           PQC keyring, mlock, wrap key, audit log
-│   ├── mlock-helper.ts    process.mlock + fallback no-op (Node 22)
+│   ├── mlock-helper.ts    process hook + Linux native-addon fallback
 │   ├── os-keyring.ts      libsecret (Linux) / Keychain (macOS)
 │   ├── keyring-provider.ts CompositeKeyring (OS primary + file fallback)
 │   └── ...
@@ -105,7 +106,7 @@ Full examples live in [`examples/`](examples/).
 │   ├── pqc-textfile-collector.sh Prometheus textfile exporter
 │   └── ...
 ├── docs/security/          Paper-grade documentation
-│   ├── pqc-whitepaper.md       47K, 14 reports + 150 KAT + 13 mlock vitest
+│   ├── pqc-whitepaper.md       design, claims, limitations, and evidence
 │   ├── constant-time-audit.md  308-line self-audit
 │   ├── MLOCK.md                mlock design + validation + 4-step procedure
 │   ├── OPERATIONS.md           On-call runbook (5 failure modes + back-up)
@@ -115,10 +116,10 @@ Full examples live in [`examples/`](examples/).
 │   ├── verification-log-2026-08-29-30.md  audit-trail of 28 ops × 0 leak
 │   ├── ...
 ├── docker-compose.pqc.yml  Production-hardened container compose
-├── .github/workflows/      2 CI workflows (10 jobs total)
-│   ├── pqc-side-channel.yml    4 jobs: cache-timing + mlock vitest + KAT
-│   └── pqc-deploy-e2e.yml      6 jobs: install + 4 E2E + static-validate
-└── pqc-fork-scripts/       (external) E2E test harnesses for CI + local
+└── .github/workflows/      3 self-contained PQC workflows
+    ├── pqc-ci.yml              focused typecheck + unit/infra tests
+    ├── pqc-side-channel.yml    native-addon + evidence-integrity gates
+    └── pqc-deploy-e2e.yml      static, five harnesses, sandbox install
 ```
 
 ## Documentation map

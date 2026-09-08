@@ -4,29 +4,29 @@
 > **作者**: danteng (吴昊天) + Mavis
 > **日期**: 2026-08-23
 > **状态**: v1 self-audit
-> **范围**: 我们 fork 的 PQC 实施 (`/home/abc/openclaw-upstream-backup/src/` + `dist/`)
+> **范围**: fork 的 PQC 实施。2026-09-07 校准说明：这是 self-audit，不是第三方证明。14 份 retained reports 是 2026-08 的固定环境测量；`max |t| = 1.983 < 4.5` 只表示该实验未观察到超过阈值的统计差异。报告不证明 constant-time，也不是 current checkout 的 fresh benchmark。
 
 ## 1. TL;DR
 
-| 维度                                     | 状态                                               | 证据                                                                               |
-| ---------------------------------------- | -------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| **算法侧 (ML-DSA / ML-KEM / AES / SHA)** | ✅ constant-time                                   | @noble 0.7.0 官方审计 (noble-* 系列, MIT)                                          |
-| **wrap 路径 (AES-256-GCM)**              | ✅ constant-time                                   | `crypto.timingSafeEqual` 用于 sig compare (Node.js doc) + dudect-style 测过 (§5.1) |
-| **应用层 (compare timing)**              | ⚠️ 大部分 OK, 部分有 `===`                         | 见 §4                                                                              |
-| **side-channel (cache, EM, power)**      | ⚠️ dudect-style AES-GCM 测过, cache/EM/power 仍 P0 | §5.1 跑通, §5.2-5.3 仍 backlog                                                     |
-| **第三方 cryptographer 审**              | ❌ 没做                                            | P0 backlog (4-6 周)                                                                |
+| 维度                                     | 状态                                               | 证据                                                                  |
+| ---------------------------------------- | -------------------------------------------------- | --------------------------------------------------------------------- |
+| **算法侧 (ML-DSA / ML-KEM / AES / SHA)** | ⚠️ self-audited; no independent conclusion         | @noble 0.7.0 source + repository review                               |
+| **wrap 路径 (AES-256-GCM)**              | ⚠️ no threshold exceedance in recorded test        | `crypto.timingSafeEqual` + historical dudect-style measurement (§5.1) |
+| **应用层 (compare timing)**              | ⚠️ 大部分 OK, 部分有 `===`                         | 见 §4                                                                 |
+| **side-channel (cache, EM, power)**      | ⚠️ dudect-style AES-GCM 测过, cache/EM/power 仍 P0 | §5.1 跑通, §5.2-5.3 仍 backlog                                        |
+| **第三方 cryptographer 审**              | ❌ 没做                                            | P0 backlog (4-6 周)                                                   |
 
 ## 2. 实施层 (Implementation layer)
 
 ### 2.1 密码学原语
 
-| 库                  | 版本    | 审计状态                      | 引用                                            |
-| ------------------- | ------- | ----------------------------- | ----------------------------------------------- |
-| @noble/post-quantum | 0.7.0   | paulmillr/auditable (MIT)     | https://github.com/paulmillr/noble-post-quantum |
-| @noble/ciphers      | ~2.3.0  | 同上                          | https://github.com/paulmillr/noble-ciphers      |
-| @noble/curves       | ~2.3.0  | 同上                          | https://github.com/paulmillr/noble-curves       |
-| @noble/hashes       | ~2.3.0  | 同上                          | https://github.com/paulmillr/noble-hashes       |
-| Node crypto         | 22.23.1 | OpenSSL 3.x (FIPS 140-3 验证) | Node.js docs                                    |
+| 库                  | 版本    | 审计状态                      | 引用                                              |
+| ------------------- | ------- | ----------------------------- | ------------------------------------------------- |
+| @noble/post-quantum | 0.7.0   | paulmillr/auditable (MIT)     | <https://github.com/paulmillr/noble-post-quantum> |
+| @noble/ciphers      | ~2.3.0  | 同上                          | <https://github.com/paulmillr/noble-ciphers>      |
+| @noble/curves       | ~2.3.0  | 同上                          | <https://github.com/paulmillr/noble-curves>       |
+| @noble/hashes       | ~2.3.0  | 同上                          | <https://github.com/paulmillr/noble-hashes>       |
+| Node crypto         | 22.23.1 | OpenSSL 3.x (FIPS 140-3 验证) | Node.js docs                                      |
 
 _*noble-* 系列审计声明_* (Paul Miller 官网):
 
@@ -120,12 +120,12 @@ if (a.length === b.length && timingSafeEqual(a, b)) { ... }
 
 ### 5.1 内存访问 (Cache-timing)
 
-| 攻击                          | 我们能测吗? | 当前状态                                                                                                                                  |
-| ----------------------------- | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| Cache-timing on AES T-tables  | ⚠️          | dudect-style 跑过 wrap/unwrap (见下), Node 24 + OpenSSL 3.x 显式 0 leak (\|t\| < 4.5). 完整 cache-timing 仍待 valgrind / dudect-ct 跑 P0. |
-| Cache-timing on NTT in ML-DSA | ❌          | 依赖 @noble 实现. 假设是 (作者声称).                                                                                                      |
-| FLUSH+RELOAD                  | ❌          | 需要 flush+reload 工具, 没做                                                                                                              |
-| Prime+Probe                   | ❌          | 同上                                                                                                                                      |
+| 攻击                          | 我们能测吗? | 当前状态                                                                                |
+| ----------------------------- | ----------- | --------------------------------------------------------------------------------------- |
+| Cache-timing on AES T-tables  | ⚠️          | 历史 dudect-style 与 aggregate callgrind 均未超过阈值；per-operation 与主动攻击仍未测。 |
+| Cache-timing on NTT in ML-DSA | ❌          | 依赖 @noble 实现. 假设是 (作者声称).                                                    |
+| FLUSH+RELOAD                  | ❌          | 需要 flush+reload 工具, 没做                                                            |
+| Prime+Probe                   | ❌          | 同上                                                                                    |
 
 #### 5.1.1 dudect-style 跑 AES-256-GCM wrap/unwrap (2026-08-25)
 
@@ -202,7 +202,7 @@ if (a.length === b.length && timingSafeEqual(a, b)) { ... }
 
 - **Setup**: Node 22.23.1, @noble/post-quantum 0.7.0, OpenSSL 3.x FIPS 140-3, valgrind 3.18.1, i7-14650HX (32KB L1 I + 48KB L1 D + 30MB L3), K=20 process/class × N=20 ops/process (10 warmup + 20 measure) = 400 ops/class, 800 ops/algo, **total 11,200 ops** across 14 algos (12 ML + 2 AES-GCM)
 - **Methodology**: Per-process aggregate (each process = one valgrind callgrind run). Welch's t-test on per-process event count between class 0 (input bit = 0) and class 1 (input bit = 1). Threshold |t| < 4.5.
-- **Caveat**: Process-wide aggregate, 不是 per-operation. Aggregate includes Node startup + V8 JIT + GC overhead, 占比 per-op cache miss 较高. Signal-to-noise 弱于 per-op test, 但 constant-time property 仍应 hold: 如果 cache-timing leak 在 op-level 存在, 20 process aggregate 应仍显示 statistical significance.
+- **Caveat**: Process-wide aggregate, 不是 per-operation. Aggregate includes Node startup + V8 JIT + GC overhead, 占比 per-op cache miss 较高. Signal-to-noise 弱于 per-op test，因此未超过阈值不能排除 operation-level leak。
 
 | Algorithm          | K   | max \|t\| (event) | 结论      |
 | ------------------ | --- | ----------------- | --------- |
@@ -241,13 +241,13 @@ if (a.length === b.length && timingSafeEqual(a, b)) { ... }
 
 ### 5.3 故障注入 (Fault injection)
 
-❌ 没测. 但 Node 22 + OpenSSL 3.x 有 fault resistance 措施. 假设是.
+❌ 没测。本文不对 OpenSSL 或 Node 路径的 fault resistance 作未经验证的推断。
 
 ## 6. 我们**没**做的事情 (HONEST LIST)
 
 我们**没**做 (需要第三方 cryptographer):
 
-- ❌ dudect-ct / valgrind callgrind (完整 cache-timing test) — dudect-style 软件层跑过 (§5.1.1)
+- ❌ dudect-ct 与 per-operation callgrind — 仅有历史 user-space 和 process-aggregate 测量 (§5.1.1-5.1.4)
 - ❌ Cache-timing 测试 (FLUSH+RELOAD, PRIME+PROBE)
 - ❌ 电磁分析 (EM emanation)
 - ❌ 功率分析 (power side-channel)
@@ -293,20 +293,20 @@ Reviewers 可以用这个 checklist 验证我们没造假:
 
 - [ ] 打开 `/home/abc/openclaw-upstream-backup/src/security/secret-wrapping.ts` 看 wrap envelope 格式
 - [ ] 打开 `/home/abc/openclaw-upstream-backup/src/security/keyring-provider.ts` 看 FileKeyring 实施
-- [ ] 跑 `bash /home/abc/pqc-fork-scripts/test-kat.sh` (174 invariants)
-- [ ] 跑 `bash /home/abc/pqc-fork-scripts/diagnose.sh` 看 fork 状态
-- [ ] 读 `/home/abc/pqc-fork-scripts/threat-model.md` 风险
-- [ ] 读 `/home/abc/pqc-fork-scripts/release-process.md` 流程
+- [ ] 跑 `.github/workflows/pqc-ci.yml` 列出的 focused tests
+- [ ] 跑 `node scripts/check-pqc-cache-timing-evidence.mjs`
+- [ ] 跑 `pnpm build:native` + MLOCK.md 的 native roundtrip
+- [ ] 读 `PAPER-SUBMISSION-CHECKLIST.md` 的当前 claim boundary
 
 ## 9. 引用
 
-- [noble-post-quantum 0.7.0] https://github.com/paulmillr/noble-post-quantum
-- [noble audit claim] https://github.com/paulmillr/noble-post-quantum#security
-- [OpenSSL FIPS 140-3] https://www.openssl.org/docs/fips.html
-- [Node.js crypto doc] https://nodejs.org/api/crypto.html
-- [FIPS 140-3] https://csrc.nist.gov/pubs/fips/140-3/final
-- [dudect timing leak detector] https://github.com/oreparaz/dudect
-- [STRIDE threat modeling] https://learn.microsoft.com/en-us/azure/security/develop/threat-modeling-stride
+- [noble-post-quantum 0.7.0](https://github.com/paulmillr/noble-post-quantum)
+- [noble security notes](https://github.com/paulmillr/noble-post-quantum#security)
+- [OpenSSL FIPS 140-3](https://www.openssl.org/docs/fips.html)
+- [Node.js crypto documentation](https://nodejs.org/api/crypto.html)
+- [FIPS 140-3](https://csrc.nist.gov/pubs/fips/140-3/final)
+- [dudect timing leak detector](https://github.com/oreparaz/dudect)
+- [STRIDE threat modeling](https://learn.microsoft.com/en-us/azure/security/develop/threat-modeling-stride)
 
 ## 10. 致编辑 (Note to reviewers)
 
@@ -315,7 +315,7 @@ Reviewers 可以用这个 checklist 验证我们没造假:
 任何发现新 timing leak 的 reviewer 请:
 
 1. GitHub issue @ WU123-ABC-Cell/pqc-openclaw
-2. 或 email wuc8974@gmail.com
+2. 或 email <wuc8974@gmail.com>
 3. 或更新本文件 + commit
 
 下次更新: P0 第三方审计完成后, 替换本 self-audit 为正式审计报告.

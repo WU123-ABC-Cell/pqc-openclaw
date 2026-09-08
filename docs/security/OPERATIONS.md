@@ -18,24 +18,25 @@ file says (new flag, new path, new check), file a PR to update it.
 
 ## 0. Where things live on a production host
 
-After `bash scripts/install-pqc.sh` finishes successfully on Ubuntu
-22.04+ / WSL2 Ubuntu / macOS 13+:
+After a default production run of `bash scripts/install-pqc.sh` on Linux:
 
-| Path                                                   | What it is                                                                                                 | Why it is there                                                                       |
-| ------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| `/opt/pqc-openclaw/`                                   | fork checkout + `dist/` build                                                                              | `INSTALL_ROOT`, the systemd unit's `WorkingDirectory`                                 |
-| `/var/lib/pqc-openclaw/`                               | state dir: `state.db`, `pqc-audit.log`, `wrap-key.b64` fallback, `auth-profile-secrets/`, `mlock/` (tmpfs) | `STATE_DIR`, the systemd unit's `StateDirectory`                                      |
-| `/var/backups/pqc-openclaw/`                           | local backup tarballs + `.sha256` sidecars                                                                 | `BACKUP_DIR` for `backup-pqc.sh` cron                                                 |
-| `/etc/systemd/system/pqc-openclaw.service`             | systemd unit                                                                                               | installed by `install-pqc.sh --service-name pqc-openclaw` (default)                   |
-| `/usr/local/bin/healthcheck-pqc.sh`                    | 8-check health probe                                                                                       | installed by `install-pqc.sh`; used by systemd `ExecStartPost` and Docker healthcheck |
-| `/usr/local/bin/backup-pqc.sh`                         | daily backup runner                                                                                        | installed by `install-pqc.sh`; cron target                                            |
-| `~/.local/share/keyrings/` (GNOME) or Keychain (macOS) | OS keyring entry for the wrap key                                                                          | written by `install-pqc.sh` (M6.B / 8/29)                                             |
-| `OPENCLAW_GATEWAY_TOKEN` env var                       | gateway client auth                                                                                        | set in `/etc/pqc-openclaw/pqc-openclaw.env` (mode 0600)                               |
-| `OPENCLAW_WRAP_KEY_FILE` env var                       | path to the 32-byte wrap key                                                                               | set in `/etc/pqc-openclaw/pqc-openclaw.env` (mode 0600)                               |
+| Path                                       | What it is                                               | Why it is there                                          |
+| ------------------------------------------ | -------------------------------------------------------- | -------------------------------------------------------- |
+| `/opt/pqc-openclaw/`                       | committed source tree plus the generated build           | `INSTALL_ROOT`, the systemd unit's `WorkingDirectory`    |
+| `/var/lib/pqc-openclaw/`                   | state root, mode-0600 `wrap-key.b64`, and `openclaw.env` | `STATE_DIR`; runtime data is created beneath it          |
+| `/var/backups/pqc-openclaw/`               | local backup tarballs + `.sha256` sidecars               | default `BACKUP_DIR`; scheduling is operator-managed     |
+| `/etc/systemd/system/pqc-openclaw.service` | generated systemd unit                                   | written by the installer; fixed service name             |
+| `/usr/local/bin/healthcheck-pqc.sh`        | 8-check health probe                                     | installed wrapper; invoke from monitoring as desired     |
+| `/usr/local/bin/backup-pqc.sh`             | on-demand backup runner                                  | installed wrapper; no scheduler is created automatically |
+| `/usr/local/bin/pqc-textfile-collector.sh` | Prometheus textfile collector                            | installed wrapper; no scheduler is created automatically |
+| `OPENCLAW_GATEWAY_TOKEN` env var           | gateway client auth                                      | set in `$STATE_DIR/openclaw.env` (mode 0600)             |
+| `OPENCLAW_WRAP_KEY_FILE` env var           | path to the file-backed 32-byte wrap key                 | set directly in the generated unit                       |
 
-The systemd unit loads `/etc/pqc-openclaw/pqc-openclaw.env` before
+The systemd unit loads `$STATE_DIR/openclaw.env` before
 starting the gateway. **Do not** edit env vars in the unit file
 directly — `install-pqc.sh` will overwrite them on the next run.
+The installer does not migrate the wrap key into an OS keyring; that
+remains an explicit operator action because it may require an interactive unlock.
 
 ---
 
@@ -45,13 +46,13 @@ directly — `install-pqc.sh` will overwrite them on the next run.
 
 ```sh
 sudo systemctl status pqc-openclaw
-sudo bash /usr/local/bin/healthcheck-pqc.sh --json
+sudo bash /usr/local/bin/healthcheck-pqc.sh --json --skip-keyring
 ```
 
-A healthy fork reports `pass: 8`, `warn: 0`, `fail: 0` (or `pass: 7`,
-`warn: 1` if running on Node 22 — the `mlock` warn is non-critical
-because Node 22's defensive no-op path is still safe, just not
-pinned in physical RAM).
+A healthy default file-backed deployment reports `fail: 0`. The pass/warn
+split depends on optional host capabilities and whether the gateway has emitted
+PQC events. Do not infer mlock availability from the Node major version: the
+Linux native addon is the current fallback on supported builds.
 
 If `--json` returns `fail > 0`, jump to §2.
 
@@ -67,11 +68,11 @@ tagged `[PQC]` and emit on a separate stream so security monitoring
 can ingest them without parsing the full Gateway log. The three PQC
 events are:
 
-| Event              | When                         | What it tells you                                                                                   |
-| ------------------ | ---------------------------- | --------------------------------------------------------------------------------------------------- |
-| `Mlock`            | On first wrap of a new key   | wrap key is now pinned in physical RAM (or would be on Node 24.15+)                                 |
-| `Munlock`          | On graceful shutdown         | wrap key was scrubbed from RAM before exit                                                          |
-| `MlockUnavailable` | Once per process, on startup | the runtime does not have `process.mlock`; key is not RAM-pinned but is still wrapped in OS keyring |
+| Event               | When                         | What it tells you                                                                                     |
+| ------------------- | ---------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `mlock`             | When a cached key is locked  | the runtime or native addon reported a successful lock                                                |
+| `munlock`           | When the keyring releases it | the cached key was zeroed and an unlock was attempted                                                 |
+| `mlock-unavailable` | Once per process             | neither the runtime hook nor native addon could lock the key; the service may continue with a warning |
 
 See `docs/security/MLOCK.md` for the full event schema.
 
@@ -87,62 +88,36 @@ The graceful path takes ~3-6 seconds (the M12 v3 source-level
 `cachedDefaultKeyring` singleton warms once on first call, then is
 shared by 12+ startup callers). If restart loops, jump to §2.4.
 
-### 1.4 Roll back to the previous release
+### 1.4 Roll back to a known-good commit
 
 ```sh
 # 1. snapshot current state
 sudo bash /usr/local/bin/backup-pqc.sh --label pre-rollback-$(date +%Y-%m-%d)
 
-# 2. check out the previous tag
+# 2. From a separate source checkout, select a verified commit. The installed
+#    tree is created with git archive and intentionally has no .git directory.
 sudo systemctl stop pqc-openclaw
-sudo -u pqc-openclaw bash -c '
-  cd /opt/pqc-openclaw
-  git fetch --tags
-  git checkout v0.9.0   # the last-known-good tag
-  pnpm install --frozen-lockfile
-  pnpm run build
-'
+git -C /srv/pqc-openclaw-source fetch --tags
+git -C /srv/pqc-openclaw-source checkout <known-good-commit>
+sudo bash /srv/pqc-openclaw-source/scripts/install-pqc.sh
 
 # 3. restart
 sudo systemctl start pqc-openclaw
 sudo bash /usr/local/bin/healthcheck-pqc.sh
 ```
 
-If the previous tag is missing, check `git log --oneline --decorate`
-in `/opt/pqc-openclaw` for the most recent commit before today's
-degradation.
+Record and verify the rollback commit before the maintenance window. Do not
+assume a particular release tag exists.
 
-### 1.5 Rotate the wrap key (planned)
+### 1.5 Rotate the wrap key (destructive until migration tooling exists)
 
-Rotating the wrap key invalidates every encrypted blob in the state
-db. Plan a 5-minute maintenance window.
-
-```sh
-# 1. snapshot
-sudo bash /usr/local/bin/backup-pqc.sh --label pre-key-rotation-$(date +%Y-%m-%d)
-
-# 2. stop the gateway
-sudo systemctl stop pqc-openclaw
-
-# 3. delete the OS keyring entry (keytar + libsecret)
-#    and the file fallback
-sudo -u pqc-openclaw secret-tool clear service pqc-openclaw username wrap-key-current
-sudo shred -u /var/lib/pqc-openclaw/wrap-key.b64
-
-# 4. start the gateway; install-pqc.sh step 4 re-provisions a fresh 32-byte key
-sudo bash /opt/pqc-openclaw/scripts/install-pqc.sh --skip-build --skip-systemd
-sudo systemctl start pqc-openclaw
-
-# 5. validate
-sudo bash /usr/local/bin/healthcheck-pqc.sh
-```
-
-**Important**: rotating the wrap key means every previously-encrypted
-secret in `state.db` is now unreadable. If you have backups that were
-encrypted with the old key, you cannot decrypt them with the new
-key. This is intentional. Decide whether to destroy old backups
-(`sudo rm /var/backups/pqc-openclaw/pqc-openclaw-*-pre-key-rotation-*.tar.gz`)
-or keep them in cold storage for forensic purposes.
+There is no supported in-place ciphertext rewrapping command yet. Replacing or
+deleting the current key makes data encrypted with it unreadable, including in
+old backups. Do not improvise a rotation during an incident. Stop the service,
+take and verify a backup, preserve the old key under the incident retention
+policy, and use a reviewed migration procedure before switching keys. If loss of
+all existing encrypted secrets is explicitly acceptable, treat new-key
+provisioning as a destructive reinitialization and document that decision.
 
 ### 1.6 Run an on-demand backup before a risky change
 
@@ -163,16 +138,14 @@ The wrap key file is missing. Either it was never provisioned, or
 something deleted it.
 
 ```sh
-# Check if the OS keyring entry is still there (it should be enough to recover):
+# Check an OS keyring only if this deployment was explicitly migrated to one:
 sudo -u pqc-openclaw secret-tool lookup service pqc-openclaw username wrap-key-current
 
-# If the keyring entry is also missing, you need a fresh install:
-sudo bash /opt/pqc-openclaw/scripts/install-pqc.sh --skip-build --skip-systemd
+# Otherwise recover the exact key file from a verified backup.
 ```
 
-If both the file fallback AND the OS keyring entry are gone, you
-have lost the ability to decrypt the state db. Restore from the
-most recent backup.
+Generating a fresh key does not recover existing ciphertext. If every retained
+copy of the old key is gone, the affected encrypted data is unrecoverable.
 
 ### 2.2 `[FAIL] state-db: SQLite integrity_check failed`
 
@@ -219,7 +192,7 @@ sudo dmesg | grep -i 'killed process'
 # Try a manual start in the foreground to see the error
 sudo -u pqc-openclaw bash -c '
   cd /opt/pqc-openclaw
-  set -a; source /etc/pqc-openclaw/pqc-openclaw.env; set +a
+  set -a; source /var/lib/pqc-openclaw/openclaw.env; set +a
   node dist/index.js gateway --bind 127.0.0.1 --port 18789
 '
 ```
@@ -239,18 +212,13 @@ sudo journalctl -u pqc-openclaw -n 200 --no-pager | grep -i -E 'error|fatal|cann
 - **mlock-helper.ts missing** (`ls /opt/pqc-openclaw/src/security/mlock-helper.ts`; if absent, the build was incomplete; rerun `pnpm run build`).
 - **Disk full** (`df -h /var/lib/pqc-openclaw`).
 
-### 2.5 `[WARN] mlock: process.mlock unavailable`
+### 2.5 `[WARN] mlock: process and native addon unavailable`
 
-Non-critical. The wrap key is **not** pinned in physical RAM but is
-still wrapped in the OS keyring. The defensive no-op path is safe
-to run; you just do not get the RAM-pinning guarantee.
-
-To upgrade to the active mlock path: bump Node to 24.15+, rebuild
-the image, and redeploy. See `docs/security/MLOCK.md` §"Manual mlock
-validation" for the 4-step validation.
-
-If you do not plan to upgrade Node, you can suppress the warning
-by setting `PQC_REQUIRE_MLOCK=0` in the env file (it is the default).
+The wrap key is **not** pinned and may be swapped. This warning says nothing
+about whether the file or OS-keyring source is configured. On Linux, rebuild the
+checked-in native addon and run the standalone 32-byte roundtrip described in
+`docs/security/MLOCK.md`. There is no documented `PQC_REQUIRE_MLOCK` switch;
+do not suppress the warning by inventing one.
 
 ---
 
@@ -262,9 +230,11 @@ by setting `PQC_REQUIRE_MLOCK=0` in the env file (it is the default).
 sudo bash /usr/local/bin/backup-pqc.sh --verify /var/backups/pqc-openclaw/pqc-openclaw-2026-09-02-030000.tar.gz
 ```
 
-A passing verify means: sha256 matches, tar -tzf reads cleanly, and
-the embedded state.db passes `sqlite3 .schema`. **Do not skip this
-step** before a restore.
+A passing verify means the sha256 matches and the tar archive reads cleanly.
+The current database-schema probe recognizes only the legacy `state.db` layout;
+for the current `$STATE_DIR/state/openclaw.sqlite`, separately extract into a
+temporary recovery directory and run `PRAGMA integrity_check` before relying on
+the restore point. **Do not skip this step** before a restore.
 
 ### 3.2 Restore from a backup
 
@@ -281,7 +251,8 @@ The tarball preserves the `pqc-openclaw-state/` directory layout
 
 ### 3.3 Backup schedule
 
-Default cron (installed by `install-pqc.sh`):
+The installer does not create a scheduler. After validating the command, an
+operator may add a cron entry such as:
 
 ```cron
 0 3 * * * /usr/local/bin/backup-pqc.sh --json >> /var/log/pqc-backup.log 2>&1
@@ -310,46 +281,41 @@ optionally a JSON document. Suggested monitoring patterns:
 | ------------------------------------- | ----------------------------------------------------------------------------------- |
 | `healthcheck-pqc.sh` cron every 5 min | exit code != 0 for >2 consecutive runs                                              |
 | `healthcheck-pqc.sh --json` parsed    | any check with `status=fail`                                                        |
-| `pqc-audit.log` (tailable)            | `event` in {`mlock-unavailable`} lasting > 24h suggests Node never got upgraded     |
+| `pqc-audit.log` (tailable)            | repeated `mlock-unavailable` means neither locking backend is active                |
 | `backup-pqc.sh --json` daily          | `fail > 0` in the JSON summary; or no tarball created in 25h                        |
 | `journalctl -u pqc-openclaw`          | `[PQC]` event with `status:fail`; or no `[PQC]` events at all in 7d (fork not used) |
 
-For Prometheus, the `healthcheck-pqc.sh --json` output is parseable
-by a small textfile collector script. See the example in
-`scripts/pqc-textfile-collector.sh` (TODO: add in a follow-up).
+For Prometheus, use `scripts/pqc-textfile-collector.sh`. The installer copies the
+wrapper to `/usr/local/bin`, but scheduling and node_exporter configuration are
+operator-managed.
 
 ---
 
 ## 5. When to page the security team
 
-| Symptom                                                                   | Page?                                  | Why                                                                                                 |
-| ------------------------------------------------------------------------- | -------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| `[FAIL] wrap-key-file: unsafe permissions` (mode 0644 etc)                | **Yes**                                | The wrap key is world-readable. Possible leak. Rotate the key and investigate how the mode changed. |
-| `[FAIL] os-keyring: Secret Service entry not found` after a clean install | No                                     | Likely a fresh deployment that has not yet been used. Run `install-pqc.sh` again.                   |
-| `[WARN] os-keyring: Secret Service check returned: <error>`               | **Yes** if it persists across restarts | The dbus session or libsecret has a problem; the wrap key is unprotected.                           |
-| Sudden drop in `[PQC]` events to zero                                     | No                                     | Could just mean no traffic. Cross-check with normal Gateway traffic.                                |
-| `[PQC] MlockUnavailable` reappears after every restart                    | No, but file a follow-up               | Node 22 is expected to lack mlock. Plan a Node 24.15+ upgrade.                                      |
-| `journalctl` shows unexpected key access from outside the fork process    | **Yes**                                | Possible compromise. Stop the fork, rotate the key, restore from backup, forensic the host.         |
+| Symptom                                                                         | Page?                                  | Why                                                                                                 |
+| ------------------------------------------------------------------------------- | -------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `[FAIL] wrap-key-file: unsafe permissions` (mode 0644 etc)                      | **Yes**                                | The wrap key is world-readable. Possible leak. Rotate the key and investigate how the mode changed. |
+| `[FAIL] os-keyring: Secret Service entry not found` after a file-backed install | No                                     | Expected until explicit OS-keyring migration; monitor with `--skip-keyring` meanwhile.              |
+| `[WARN] os-keyring: Secret Service check returned: <error>`                     | **Yes** if it persists across restarts | The dbus session or libsecret has a problem; the wrap key is unprotected.                           |
+| Sudden drop in `[PQC]` events to zero                                           | No                                     | Could just mean no traffic. Cross-check with normal Gateway traffic.                                |
+| `[PQC] mlock-unavailable` reappears after every restart                         | No, but file a follow-up               | Rebuild or diagnose the native addon; changing Node alone does not enable `process.mlock`.          |
+| `journalctl` shows unexpected key access from outside the fork process          | **Yes**                                | Possible compromise. Stop the fork, rotate the key, restore from backup, forensic the host.         |
 
 ---
 
 ## 6. Reference: full env var inventory
 
-Read by `install-pqc.sh` and the systemd unit (set in
-`/etc/pqc-openclaw/pqc-openclaw.env`):
+Values written or referenced by the generated systemd unit:
 
-| Var                      | Default                    | Purpose                                               |
-| ------------------------ | -------------------------- | ----------------------------------------------------- |
-| `OPENCLAW_STATE_DIR`     | `/var/lib/pqc-openclaw`    | sqlite, audit log, key fallback, auth-profile secrets |
-| `OPENCLAW_CONFIG_PATH`   | `$STATE_DIR/openclaw.json` | runtime config                                        |
-| `OPENCLAW_WORKSPACE_DIR` | `$STATE_DIR/workspace`     | agent workspace scratch                               |
-| `OPENCLAW_GATEWAY_TOKEN` | (random 32 bytes)          | client auth                                           |
-| `OPENCLAW_WRAP_KEY_FILE` | `$STATE_DIR/wrap-key.b64`  | 32 raw bytes, base64url-encoded                       |
-| `OPENCLAW_GATEWAY_PORT`  | `18789`                    | main gateway port                                     |
-| `OPENCLAW_GATEWAY_BIND`  | `lan`                      | `lan` / `loopback` / `0.0.0.0`                        |
-| `PQC_REQUIRE_MLOCK`      | `0`                        | `1` to fail-closed if mlock unavailable               |
-| `PQC_AUDIT_LOG_PATH`     | `$STATE_DIR/pqc-audit.log` | JSONL audit log                                       |
-| `PQC_LOG_LEVEL`          | `info`                     | `debug` / `info` / `warn` / `error`                   |
+| Var                            | Default                   | Purpose                                               |
+| ------------------------------ | ------------------------- | ----------------------------------------------------- |
+| `OPENCLAW_STATE_DIR`           | `/var/lib/pqc-openclaw`   | sqlite, audit log, key fallback, auth-profile secrets |
+| `OPENCLAW_GATEWAY_TOKEN`       | (random 32 bytes)         | client auth                                           |
+| `OPENCLAW_WRAP_KEY_FILE`       | `$STATE_DIR/wrap-key.b64` | 32 raw bytes, base64url-encoded                       |
+| `OPENCLAW_WRAP_KEY_OS_SERVICE` | `pqc-openclaw`            | optional OS-keyring service identifier                |
+| `OPENCLAW_WRAP_KEY_OS_ACCOUNT` | `wrap-key-YYYY-MM`        | generated OS-keyring account identifier               |
+| `OPENCLAW_WRAP_KEY_OS_ID`      | `wrap-key-YYYY-MM`        | generated OS-keyring key id                           |
 
 Read by `healthcheck-pqc.sh` (defaults shown):
 
@@ -381,4 +347,4 @@ Read by `backup-pqc.sh` (defaults shown):
 - `SECURITY.md` — vulnerability disclosure policy
 - `PQC-FORK.md` — TL;DR + scope + limitations
 - `CHANGELOG.md` — release history
-- `pqc-fork-scripts/` — E2E test harnesses (`pqc-fork-e2e-{backup,healthcheck,install,compose}.py`)
+- `scripts/pqc-e2e/` — self-contained deploy harnesses used by CI and local verification

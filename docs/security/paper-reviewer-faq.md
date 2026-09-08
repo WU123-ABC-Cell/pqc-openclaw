@@ -2,9 +2,9 @@
 
 > **目的**: 提前回答 paper reviewer 12 个最可能质疑, 跟白皮书 `pqc-whitepaper.md` §10 honest list 配套. 不是新证据, 是已做 work 的解释 + scope 限制.
 >
-> **关联**: 白皮书 `docs/security/pqc-whitepaper.md` (主论文) + 验证日志 `docs/security/verification-log-2026-08-29-30.md` (复现步骤) + 14 个 `pqc-fork-scripts/ct-reports/*/report.json` (数据).
+> **关联**: 白皮书 `docs/security/pqc-whitepaper.md` + 历史验证日志 `docs/security/verification-log-2026-08-29-30.md` + 14 个 `docs/security/ct-reports/*/report.json`。
 >
-> **范围**: 截至 2026-08-30, 累计 paper claim 7 hot paths × 28 ops × 129.2K ops × max \|t\| < 2.0, 4 层证据 (user-space timing + cache hierarchy), 17 commits in WSL local main.
+> **范围**: 本 FAQ 保留 2026-08-30 测量背景；2026-09-07 当前 master 为 `d3b940a21e`。14 份 retained reports 位于 `docs/security/ct-reports/`，记录 `max |t| = 1.983 < 4.5`。这表示固定实验没有观察到超过阈值的统计差异，不是 constant-time 证明。
 
 ---
 
@@ -17,6 +17,7 @@
 ## Q2: cache-timing 14 ops (8.75 min) + user-space 14 ops (~30 min) 算 rigorous 吗?
 
 **A**: 算 paper-grade 但不是 audit-grade.
+
 - **paper-grade**: 14 algo × 2 test types × 9 cache event types = 252 measurements 全部 \|t\| < 2.0, 阈值 4.5. 累计 129.2K ops. 给 reviewer 看的 evidence.
 - **不是 audit-grade**: 没第三方 cryptographer 签字 (P0 backlog, 4-6 周 + 钱, 见 Q6). 没 per-op cache-timing (P0 backlog, 98h CPU, 见 Q3).
 
@@ -25,26 +26,25 @@
 ## Q3: 为什么不做 per-op cache-timing (SIGUSR1/SIGUSR2 dump+zero)?
 
 **A**: 算力约束. Per-op test:
+
 - valgrind callgrind SIGUSR1/SIGUSR2 dump+zero 慢 **50x** (vs per-process aggregate)
 - 14 algo × 5000 ops × 2 class = **98h CPU** (我们 i7-14650HX 单机, 实际跑要 4+ 天)
 - K=20 process/class 改 K=1 (single process), 14 algo × 5000 ops × 2 class × 50x slowdown ≈ 14 × 5K × 2 × 50 / 3600 ≈ **2 days**
 
-**短期 (8/30) 没跑原因**: CPU time 太长, 跟 reviewer 解释 per-process aggregate 已经 paper-grade (signal-to-noise 弱但 constant-time property 仍应 hold). 
+**短期 (8/30) 没跑原因**: CPU time 太长, 跟 reviewer 解释 per-process aggregate 已经 paper-grade (signal-to-noise 弱但 constant-time property 仍应 hold).
 
 **长期 (P0 backlog)**: 等分布式 valgrind cluster 或专用 test infra. 不在本文 scope.
 
-## Q4: mlock Node 24.6+ 升级 (2-3 天) 为什么没做?
+## Q4: wrap key 的内存保护现在是什么状态?
 
-**A**: Scope + 风险权衡.
-- **Scope**: mlock 是"防止 fork 进程内存转储泄露 wrap key" (短寿命但 critical). paper claim 8/30 是 "算法层 + cache hierarchy" 0 leak, 没承诺 mlock (因为没做). §10 honest list 显式 mark.
-- **风险**: Node 22 → 24.6+ 升级, 全 KAT 174/174 + 28 ops side-channel 需重新跑回归 (2-3 天). 高 fail risk 引入新 regression.
-- **短期 (8/30) 没做原因**: P0 backlog, 等 paper accept 之后再做 (降低 review 期间 fail risk).
+**A**: Linux swap protection 已通过 native addon 实现，并在 Node 24.15.0 上完成真实 32-byte `mlock`/`munlock` roundtrip。Node 24.15.0 本身没有 `process.mlock`。`FileKeyring` 和 `OsKeyring` release 会先断开 cache、清零 Buffer，再尝试 `munlock`。
 
-**Commit `f89f296687` (8/19) FileKeyring auto-inject** 已经让 wrap key 用后清零 (`cachedKey: Buffer | null` 复用 + `secure_memzero` 在 5 个 .c 文件), 把转储窗口缩到 minimum. 短期 mitigation 足够.
+`mlock` 不会排除 core dump。addon-owned、page-aligned secure allocation 与 core-dump exclusion，以及 Linux arm64/macOS/Windows backend/build 验证仍是 backlog。
 
 ## Q5: AES-GCM 走 OpenSSL 3.x FIPS 140-3 validated path, 还能信 cache-timing 0 leak?
 
 **A**: 能信, 但有限定.
+
 - **限定**: 我们测的是 **OpenSSL 3.x 在 i7-14650HX 平台 + Node 22 调用栈** 的 cache miss 数. **不**测 (a) 其他平台 (ARM, AMD), (b) 其他 OpenSSL 版本, (c) 旁路 cache-timing 攻击 (FLUSH+RELOAD / PRIME+PROBE, P0 backlog).
 - **支撑**:
   1. OpenSSL 3.x FIPS 140-3 module 是 NIST-validated, 算法本身有 audit
@@ -54,13 +54,14 @@
 
 ## Q6: 第三方 cryptographer 审 4-6 周 + 钱 — 在 scope 吗?
 
-**A**: **不在本文 scope** (§10 honest list 显式 mark). 我们 self-audit 28 ops × 0 leak, 跟 paper claim 一致, 足以提交.
+**A**: **不在本文 scope** (§10 honest list 显式 mark)。现有 self-audit 和 thresholded measurements 不能替代独立审计；是否足以投稿由 venue 和 reviewer 决定。
 
 **P0 backlog**: paper accept 后, 找 vendor (e.g. Cryptography Services, NCC Group, Trail of Bits). 4-6 周 scope = 全 source-level review + 28 ops 重测 + report. 估 50-150K USD (depends on vendor + scope).
 
 ## Q7: 14 algo 怎么选? 6 ML param set + AES-GCM, 还需要 SLH-DSA / Falcon?
 
 **A**: 选 14 algo 跟 OpenClaw 实际 hot path 严格对应, 不是为了凑数.
+
 - **AES-GCM** (1 hot path, wrap/unwrap) — secret-wrapping 唯一对称算法
 - **ML-DSA-65** (1 hot path, sign/verify) — device identity signing (实际生产选 ML-DSA-65, 不是 44/87)
 - **ML-KEM-768** (1 hot path, encap/decap) — Nostr NIP-44 v2 hybrid envelope (实际生产选 ML-KEM-768)
@@ -71,6 +72,7 @@
 ## Q8: K=20 process/class 够吗? 业界标准多少?
 
 **A**: 够 paper-grade, 跟 dudect 推荐一致.
+
 - **dudect 论文**推荐 K=100 process/class 达到 ~sqrt(K) = 10x t-test power
 - **我们 K=20** 是 paper-grade 不是 audit-grade
 - **统计 power**: t-test 在 20 samples/class 时, 检测 effect size d=1.0 (large effect) 的 power ≈ 0.85. 实际 cache-timing leak 如果存在, 一般 effect size > 1.0 (因为 L1 miss 数差异 >> noise), 20 samples 足够.
@@ -81,6 +83,7 @@
 ## Q9: @noble/post-quantum 0.7.0 怎么 verify constant-time?
 
 **A**: 3 步.
+
 1. **paulmillr 公开声明**: @noble repo README + CHANGELOG 0.7.0 写 "auditable, constant-time, side-channel resistant"
 2. **FIPS 203/204 spec compliance**: @noble 0.7.0 通过 KAT 174/174 (我们测, 跟 NIST 2048-185 KAT bundle 字节级一致)
 3. **我们 self-audit**: 14 algo × 2 test types × 9 events = 252 measurements, 0 leak (见 Q2)
@@ -90,6 +93,7 @@
 ## Q10: fork 改了哪些 PQC code, 跟 upstream 怎么 diff?
 
 **A**: 16 commits (8/25 ~ 8/30) 改了 6 个 area (跟 upstream 隔离):
+
 1. `src/security/os-keyring.ts` (commit `21bc128b6b`) — M6.B 真实现
 2. `src/security/keyring-provider.ts` (commit `b9eb3599e0`) — M6 keyring providers
 3. `src/security/wrap-key-rotation.ts` (commit `d1cfcf4aad`) — M7 rotation
@@ -110,18 +114,19 @@
 ## Q12: per-op cache-timing 优先级 vs 其他 P0 backlog?
 
 **A**: 4 个真 P0 backlog, 优先级:
+
 1. **P0 第三方 cryptographer audit** (4-6 周 + 钱) — paper accept 必要, 跟 reviewer 强相关
-2. **P0 mlock Node 24.6+** (2-3 天 + 回归 risk) — production deployment 强相关
+2. **P0 addon-owned secure mapping + core-dump exclusion + cross-platform validation** — production deployment 强相关
 3. **P0 per-op cache-timing** (98h CPU) — paper rigor 强相关
 4. **P0 旁路攻击 (EM/power/fault)** (需专业硬件) — paper rigor 强相关
 
-**本文 scope**: 1 + 2 + 3 都 deferred 到 paper accept 后. 4 长期 (NIST 流程级别).
+**本文 scope**: 这些项目都没有被当前历史 timing reports 覆盖。
 
 **Estimated total cost to audit-grade**: 4-6 周 cryptographer + 2-3 天 mlock + 98h per-op CPU + 4-6 周 旁路攻击 = **3-4 月 + 50-150K USD**.
 
 ---
 
-**8/30 当前 paper-grade 状态**: 28 ops / 129.2K / 0 leak, 17 commits, 等 push. P0 backlog 4 件 + 6 weeks cryptographer audit 是 paper → audit-grade 距离.
+**2026-09-07 当前状态**: master `d3b940a21e`；275 个 focused tests、14 份 report integrity、5 个 deploy harness、native roundtrip 与 sandbox install 均已本地通过。Hosted Actions 因私有仓库未分配 runner 而未形成 CI-green 证据。
 
 ## 关联文档
 

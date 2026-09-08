@@ -14,11 +14,11 @@
 # Exit codes:
 #   0  all checks passed
 #   1  one or more critical checks failed (fork unhealthy, key missing)
-#   2  non-critical warnings (e.g. mlock unavailable on Node 22)
+#   2  non-critical warnings (for example, no mlock backend)
 #
 # Output is grep-friendly: each line starts with [OK], [WARN], or [FAIL].
 # Designed for use in:
-#   - systemd health checks (Type=notify or ExecStartPost)
+#   - operator-configured systemd or cron monitoring
 #   - cron + monitoring (Prometheus node_exporter textfile collector)
 #   - CI pre-deploy verification
 #
@@ -84,7 +84,7 @@ OPTIONS
 EXIT CODES
   0  all checks passed
   1  critical check failed (fork unhealthy, key missing)
-  2  non-critical warnings (e.g. mlock unavailable on Node 22)
+  2  non-critical warnings (for example, no mlock backend)
 
 OUTPUT
   Each line is prefixed with [OK], [WARN], or [FAIL] for easy grep.
@@ -155,7 +155,7 @@ else
 fi
 
 # ----------------------------------------------------------------------
-# Check 2: mlock availability (Node 24.15+) — non-critical warning
+# Check 2: feature-detected mlock availability — non-critical warning
 # ----------------------------------------------------------------------
 
 if [[ -d "$INSTALL_ROOT" ]] && [[ -f "$INSTALL_ROOT/src/security/mlock-helper.ts" ]]; then

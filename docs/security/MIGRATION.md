@@ -13,9 +13,10 @@ to reconfigure.
 **Risk profile**: **medium**. The data on the wire is unchanged
 (Ed25519 signatures from the upstream are not re-validated by the
 PQC fork for the duration of the migration; the PQC fork only
-re-signs new traffic). The data at rest changes (state.db is
-preserved; auth-profile-secrets are re-wrapped with a new 32-byte
-key; the OS keyring entry is added). A bad migration leaves the
+re-signs new traffic). The data at rest changes through an additive SQLite
+migration that adds four nullable PQC columns to `device_identities`; legacy
+rows are preserved. Existing encrypted secrets must retain their original wrap
+key until a tested rewrap procedure succeeds. A bad migration leaves the
 upstream install untouched and reversible in 5 minutes — see §6.
 
 **What this document is not**: it does not cover
@@ -37,19 +38,16 @@ client-facing API surface. The differences are entirely
    `ed25519` / `x25519` (see `docs/security/pqc-whitepaper.md`).
    During migration, you keep `ed25519` enabled; you can flip to
    `ml-dsa-65` after the migration is validated.
-2. **Storage layer**: state.db is unchanged (same sqlite schema).
-   Auth-profile secrets are re-wrapped with a fresh 32-byte key
-   (the upstream's wrapping, if any, is replaced).
-3. **Side-channel**: the PQC fork's crypto path is constant-time
-   per `docs/security/constant-time-audit.md` and verified
-   empirically by `cache-timing-ct.mjs` (14/14 reports, 0 leak
-   at 4.5 σ). The upstream's path is not audited to this level.
-4. **Wrap key**: the PQC fork pins the wrap key in physical RAM
-   via `process.mlock(2)` on Node 24.15+. On Node 22 (default
-   for now), the key is wrapped in the OS keyring (libsecret on
-   Linux, Keychain on macOS) but not RAM-pinned. Either way, the
-   key never appears in plaintext in `state.db` or in
-   `/proc/<pid>/maps`.
+2. **Storage layer**: an additive migration adds four nullable PQC columns to
+   `device_identities` while preserving legacy rows. Existing encrypted data is
+   not automatically rewrapped with a new key.
+3. **Side-channel evidence**: 14 retained timing summaries reported no
+   statistically significant difference under the recorded setup (`|t| < 4.5`).
+   They are historical measurements, not proof of constant-time behavior.
+4. **Wrap key**: the installer writes `$STATE_DIR/wrap-key.b64` with mode 0600;
+   OS-keyring migration is explicit. On supported Linux builds the native addon
+   can call `mlock(2)`. This reduces swap exposure but does not exclude the key
+   from core dumps or process memory inspection.
 
 If you do not need any of those, you do not need to migrate.
 
@@ -83,10 +81,10 @@ node --version    # needs 22.22.3+, 24.15+, or 25.9+
 # deliberately conservative).
 
 # 5. pnpm is available
-pnpm --version    # 9.x or 10.x
+pnpm --version    # must match the packageManager pin (currently 11.15.1)
 
-# 6. The OS keyring is accessible (Linux: libsecret + a running
-#    dbus session; macOS: Keychain always works)
+# 6. Optional: the OS keyring is accessible if you plan to migrate
+#    away from the default file-backed key.
 #    On Linux:
 sudo -u openclaw secret-tool --version  # ≥ 0.20
 #    On macOS:
@@ -157,12 +155,12 @@ fork will run on the **same port** (18789) so clients do not need
 to know.
 
 ```sh
-# 1. Clone the fork
-sudo git clone https://github.com/WU123-ABC-Cell/pqc-openclaw.git /opt/pqc-openclaw
-sudo chown -R openclaw:openclaw /opt/pqc-openclaw   # use the same user as upstream
+# 1. Clone the fork into a source checkout separate from the install root
+sudo git clone https://github.com/WU123-ABC-Cell/pqc-openclaw.git /srv/pqc-openclaw-source
+cd /srv/pqc-openclaw-source
 
 # 2. Run the one-command installer
-sudo -u openclaw bash /opt/pqc-openclaw/scripts/install-pqc.sh \
+sudo bash scripts/install-pqc.sh \
     --install-root /opt/pqc-openclaw \
     --state-dir /var/lib/pqc-openclaw \
     --service-user openclaw \
@@ -171,30 +169,21 @@ sudo -u openclaw bash /opt/pqc-openclaw/scripts/install-pqc.sh \
 
 What this does, in order:
 
-1. Verifies Node 22.22.3+ / 24.15+ / 25.9+ is on PATH.
-2. Installs pnpm if missing (idempotent; re-running is a no-op).
-3. `pnpm install --frozen-lockfile` (builds `dist/`).
-4. Provisions a **fresh** 32-byte wrap key in the OS keyring
-   (libsecret on Linux, Keychain on macOS) and writes a
-   `wrap-key.b64` fallback to `$STATE_DIR/wrap-key.b64` (mode
-   0600).
-5. Installs `/usr/local/bin/healthcheck-pqc.sh` and
-   `/usr/local/bin/backup-pqc.sh` (idempotent).
-6. Installs `/etc/systemd/system/pqc-openclaw.service` and
-   `systemctl daemon-reload`. **The unit is NOT started yet** —
-   the migration needs to copy state first.
-
-The script prints a summary at the end including the systemd
-unit, the env file path, and the wrap key fingerprint (sha256 of
-the public bytes; the private bytes never appear on stdout).
+1. Enforces the requested Node version and repository-pinned pnpm version.
+2. Copies the exact committed workspace into the install root.
+3. Runs `pnpm install --frozen-lockfile`, then builds `dist/`.
+4. Writes a fresh file-backed key to `$STATE_DIR/wrap-key.b64` (mode 0600).
+5. Installs the healthcheck, backup, and Prometheus collector wrappers.
+6. Renders `/etc/systemd/system/pqc-openclaw.service` and creates
+   `$STATE_DIR/openclaw.env`; it does not start the unit or populate an OS keyring.
 
 ---
 
 ## 4. Migrate the state
 
-The PQC fork uses the **same** sqlite schema as upstream. The
-state.db, auth-profile-secrets, and config files can be copied
-verbatim.
+The PQC fork applies additive SQLite changes while preserving legacy rows. Copy
+state only while both services are stopped. Existing encrypted data also needs
+the exact key that originally wrapped it.
 
 ```sh
 # 1. Stop the upstream (we are now committing to the migration)
@@ -214,22 +203,14 @@ sudo rsync -a --delete \
 sudo rsync -a /etc/openclaw/ /etc/pqc-openclaw/ 2>/dev/null || true
 sudo chown -R openclaw:openclaw /var/lib/pqc-openclaw /etc/pqc-openclaw
 
-# 5. Hand the wrap key to the PQC fork
-#    Option A: if the upstream used a file-based key at
-#    /var/lib/openclaw/wrap-key.b64, copy it across (then the PQC
-#    fork will re-encrypt auth-profile-secrets on first read).
+# 5. Preserve the existing wrap key. Do not assume first read rewraps data.
 sudo cp /var/lib/openclaw/wrap-key.b64 /var/lib/pqc-openclaw/wrap-key.b64
 sudo chown openclaw:openclaw /var/lib/pqc-openclaw/wrap-key.b64
-sudo chmod 0400 /var/lib/pqc-openclaw/wrap-key.b64
+sudo chmod 0600 /var/lib/pqc-openclaw/wrap-key.b64
 
-#    Option B (recommended): let the PQC fork use its own freshly
-#    generated key. This invalidates any auth-profile-secrets the
-#    upstream wrapped with the old key, but auth profiles are
-#    re-derivable from the user's password (or OAuth refresh) on
-#    next login, so this is usually fine. The PQC fork's
-#    CompositeKeyring will use the OS keyring entry first and fall
-#    back to the file only if the keyring entry is missing.
-sudo rm -f /var/lib/pqc-openclaw/wrap-key.b64   # do NOT copy
+# Do not replace or delete the old key until every encrypted row has been
+# transactionally rewrapped and verified. If no operator-facing rotation
+# command is available in this build, stop here and retain the old key.
 
 # 6. Sanity check the state before starting
 sudo sqlite3 /var/lib/pqc-openclaw/state/openclaw.sqlite "PRAGMA integrity_check;"
@@ -246,9 +227,8 @@ sudo systemctl enable --now pqc-openclaw
 sudo journalctl -u pqc-openclaw -f   # tail in another shell
 
 # 2. Wait for the healthcheck to come up
-sudo bash /usr/local/bin/healthcheck-pqc.sh --json
-# Expect: pass: 7-8, warn: 0-1, fail: 0
-# (warn: 1 if on Node 22, because mlock is in defensive no-op mode)
+sudo bash /usr/local/bin/healthcheck-pqc.sh --json --skip-keyring
+# Expect: fail: 0; warnings describe optional host capabilities.
 
 # 3. Verify a real client can connect
 curl -fsS http://127.0.0.1:18789/healthz
@@ -268,15 +248,11 @@ sudo bash /usr/local/bin/backup-pqc.sh --verify \
     /var/backups/pqc-openclaw/pqc-openclaw-*-post-migration.tar.gz
 # Expect: "verify OK: ..."
 
-# 7. (Optional) enable ml-dsa-65 client auth
-#    This is a separate step; see PQC-FORK.md §"Switching client
-#    auth from Ed25519 to ML-DSA-65". For now, keep Ed25519 enabled
-#    so existing clients do not break.
+# 7. Keep the existing compatibility profile until every client path has been
+#    tested against the PQC profile. Algorithm policy changes are separate from
+#    state migration.
 
-# 8. (Optional) enable the side-channel CI
-#    See .github/workflows/pqc-side-channel.yml — this only matters
-#    if you forked the repo; the upstream CI does not run PQC
-#    checks.
+# 8. Review all three self-contained PQC workflows under .github/workflows/.
 ```
 
 If any of steps 1-6 fail, jump to §6 (rollback).
@@ -285,34 +261,28 @@ If any of steps 1-6 fail, jump to §6 (rollback).
 
 ## 6. Rollback plan
 
-If the migration fails validation, restore the upstream in 5
-minutes:
+If migration validation fails, stop the PQC service and follow the verified
+restore procedure from `docs/security/OPERATIONS.md`. Restore into a staging
+directory first, inspect the exact paths, and only then replace the named
+upstream state/config directories according to your deployment's recovery plan.
 
 ```sh
 # 1. Stop the PQC fork
 sudo systemctl stop pqc-openclaw
 sudo systemctl disable pqc-openclaw
 
-# 2. Restore the upstream state
-sudo rm -rf /var/lib/openclaw /etc/openclaw
-sudo tar -xzf /root/openclaw-upstream-pre-migration-*.tar.gz -C /
-
-# 3. Restart the upstream
+# 2. Restore the verified pre-migration snapshot using the reviewed runbook.
+# 3. Restart and verify the upstream.
 sudo systemctl enable --now openclaw-gateway
 sudo systemctl status openclaw-gateway
 curl -fsS http://127.0.0.1:18789/healthz
 # → 200 OK
 ```
 
-The upstream install and state are byte-identical to the
-pre-migration snapshot, so this is a guaranteed rollback. The
-only thing not restored is the OS keyring entry (the PQC fork's
-wrap key), but the upstream did not use it, so it does not
-matter.
-
-If the rollback also fails (very unlikely), the next step is to
-redeploy the upstream from your IaC and restore the state from the
-tarball.
+A rollback is only as reliable as the snapshot and restore rehearsal. Do not
+claim byte identity until hashes and application-level decryptability have been
+verified. If rollback fails, redeploy the upstream from IaC and restore the
+verified snapshot while retaining all original key material.
 
 ---
 
@@ -323,7 +293,9 @@ fork on a **different port** and a **different state dir** while
 the upstream stays on 18789.
 
 ```sh
-sudo -u openclaw bash /opt/pqc-openclaw/scripts/install-pqc.sh \
+sudo useradd --system --home /var/lib/pqc-openclaw-test --shell /usr/sbin/nologin openclaw-test
+cd /srv/pqc-openclaw-source
+sudo bash scripts/install-pqc.sh \
     --install-root /opt/pqc-openclaw \
     --state-dir /var/lib/pqc-openclaw-test \
     --service-user openclaw-test \
@@ -334,7 +306,8 @@ sudo -u openclaw-test bash -c '
   export OPENCLAW_STATE_DIR=/var/lib/pqc-openclaw-test
   export OPENCLAW_GATEWAY_PORT=28789
   export OPENCLAW_GATEWAY_BIND=loopback
-  /opt/pqc-openclaw/dist/index.js gateway --bind loopback --port 28789
+  set -a; source /var/lib/pqc-openclaw-test/openclaw.env; set +a
+  node /opt/pqc-openclaw/dist/index.js gateway --bind loopback --port 28789
 '
 
 # Smoke test:

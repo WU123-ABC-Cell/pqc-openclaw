@@ -2,7 +2,7 @@
 
 **作者:** 吴昊天
 **日期:** 2026 年 9 月 1 日
-**最近更新:** §2.2.5.B + §6.3 + §9.1.2 AES-256-GCM cache-timing 补全 (8/30 验证, `cache-timing-ct-aesgcm.mjs` 走 OpenSSL 3.x FIPS 140-3 path, 14 ops cache-timing 全部 0 leak: wrap max |t|=1.028 [DLmr] + unwrap max |t|=1.808 [D1mr]). 关键发现: WSL2 headless + WSLg 可达 (用 persistent XDG_RUNTIME_DIR + dbus-daemon --session --nofork), keytar 兼容 API attribute `application`+`username`, fork 期望 base64url 字符串 (32 raw bytes 会被 null byte 截断). 累计 paper claim: 7 hot paths (AES-GCM + ML-DSA 全部 + ML-KEM 全部) × **28 ops** 全部 0 timing leak 验证 (累计 129.2K ops, 4 层证据: user-space timing + cache hierarchy, **FIPS 203/204 全部 6 个 param set + AES-GCM wrap/unwrap cache-timing 0 leak**), **M6.B code 100% + 部署 100% (OsKeyring + FileKeyring 双向 production-validated)**
+**最近更新:** 2026-09-07 文档真值校准，当前 master `d3b940a21e`。14 份 checked-in cache-timing 报告是 2026-08 的历史测量；记录环境下 `max |t| = 1.983 < 4.5`，表示未观察到超过阈值的统计差异，不构成 constant-time 证明。当前 Linux native addon 已完成真实 32-byte `mlock`/`munlock` roundtrip；`mlock` 只防 swap，不防 core dump。默认 installer 使用 0600 file-backed key，OS keyring migration 需要 operator 显式完成。
 
 ---
 
@@ -34,17 +34,18 @@
 11. [参考文献](#11-参考文献)
 
 **论文材料 (paper supplementary materials)** (同仓 `docs/security/`):
+
 - `verification-log-2026-08-29-30.md` (300 行) — 8/29 M6.B 真部署 100% + 8/30 AES-GCM cache-timing 补全 验证步骤 + 复现命令
 - `paper-reviewer-faq.md` (124 行) — 12 Q&A 提前回答 reviewer 质疑 (per-op CT 98h CPU / mlock 24.6+ / OpenSSL 限定 / 第三方 audit / 等)
 - `PAPER-SUBMISSION-CHECKLIST.md` (60 行) — paper-grade 提交就绪 checklist + audit-grade 3 个 P0 backlog (9/1 mlock code-side done)
 - `MLOCK.md` (10K, 2026-09-01 新) — M6.B v2 mlock 设计 + 验证 + 部署 1-page 全集 (Node 24.15+ 升级 4-5h P0 backlog)
 - `constant-time-audit.md` (308 行) — Side-channel 攻击面 §5.1.1-5.1.4 详 14 ops × 0 leak 数据
 - `src/security/mlock-helper.{ts,test.ts}` (2026-09-01 新) — M6.B v2 mlock helper + vitest (feature-detect + lifecycle + shutdown hook)
-- `pqc-fork-scripts/ct-reports/*/report.json` (14 个) — 14 ops cache-timing 原始 Welch's t-test 数据
+- `ct-reports/*/report.json` (14 个) — retained cache-timing Welch's t-test summaries
 - `pqc-fork-scripts/sidechannel-*.mjs` (3 个) — user-space dudect-style 脚本
 - `pqc-fork-scripts/cache-timing-ct*.{mjs,sh}` (5 个) — cache-timing 脚本 (含 9/1 加的 `cache-timing-ct-aesgcm.mjs` + driver + runner)
-- `pqc-fork-scripts/check-cache-timing-claims.sh` (regression guard) — 14 reports 自动验证, 防 stale
-- `pqc-fork-scripts/verify-mlock-standalone.mjs` (2026-09-01 新) — mlock helper 独立 logic test (Node 22 上 5/5 case pass, single warning)
+- `scripts/check-pqc-cache-timing-evidence.mjs` — 14 reports integrity guard
+- `scripts/pqc-e2e/` — five repository-owned deployment harnesses
 
 ---
 
@@ -60,13 +61,14 @@
 
 升级覆盖 ML-KEM-768（FIPS 203）、ML-DSA-65（FIPS 204）、AES-256-GCM、PBKDF2-SHA256 等 NIST 标准算法。所有 PQC 升级均采用混合模式（hybrid mode），与经典算法并存，向后兼容。
 
-**累计 side-channel paper claim (2026-08-30 验证)**: 7 hot paths (AES-256-GCM + ML-DSA 44/65/87 + ML-KEM 512/768/1024) × **28 ops** 全部 0 timing leak 验证 (累计 **129.2K ops**, 4 层证据: dudect-style user-space timing + valgrind callgrind cache hierarchy, FIPS 203/204 全部 6 个 param set + AES-GCM wrap/unwrap cache-timing 0 leak). 详见 §6.3 + §9.1.2.
+**累计 side-channel 历史证据 (2026-08-30 测量)**: 7 hot paths (AES-256-GCM + ML-DSA 44/65/87 + ML-KEM 512/768/1024) × 28 user-space/cache-hierarchy measurements，累计 129.2K trials。记录环境下没有统计量超过 `|t| = 4.5` 阈值；该结论只适用于这次固定测量，不证明实现恒定时间。详见 §6.3 + §9.1.2。
 
-**M6.B v2 mlock 升级 (2026-09-01 实施)**: wrap key 32 字节 mlock(2) 物理 RAM 锁 (commit `d8c642df7d`, 5 files / 331 ins). `src/security/mlock-helper.ts` 新建, `FileKeyring` / `OsKeyring` 集成 mlock + module-level `process.on("exit", releaseDefaultKeyring)`. **Node 22.23.1 (current)**: `typeof process.mlock === undefined` → 全部 no-op + 单次 [PQC] mlock-unavailable warning, 已有 wrap/unwrap 行为不变. **Node 24.0.0+ (per `package.json engines.node >=24.15.0 <25`)**: 调 `process.mlock(buf)` 锁 32 字节在物理 RAM, 防止 core dump / swap 泄露. Deployment-side Node 24.15+ 升级仍 deferred (4-5h, KAT 174/174 + 28 ops side-channel 回归), code-side 已 ready. 详 `pqc-fork-scripts/mlock-plan.md`.
+**M6.B v2 mlock 当前状态**: `src/security/mlock-helper.ts` 按 feature detection 选择 future process API、Linux native addon 或 warned no-op。Node 24.15.0 没有 `process.mlock`；当前可用路径是已验证的 Linux native addon。`FileKeyring` / `OsKeyring` release 会断开 cache、清零 Buffer，再尝试 `munlock`。此控制只降低 swap 暴露，不提供 core-dump exclusion；后者需要 addon-owned page mapping。详见 `MLOCK.md`。
 
 **M12 v3 优化（2026-08-19 commit `f89f296687`）**: keyring 激活从"wizard 9 次 restart"简化为"设两个 env var"，fork 启动时间从 167s 降至 6-9s（17-28x speedup, warm ~6.2s / cold ~9.5s; 2026-08-22 用 `measure-startup.sh` 实测, 之前 commit message 写的 "1.7s" 是测量误差），且**不降低安全性**（fail-closed 保留, FileKeyring class `cachedKey` 复用）。详见 §2.2.5.A 末尾。
 
 **后续硬化 (2026-08-23 ~ 2026-08-25)**:
+
 - **M6.B OS keyring 真部署** (commit `21bc128b6b`): `OsKeyring` 类用 `@napi-rs/keyring` (1.3.0, optional dep) 动态加载, 走 macOS Keychain / Windows Credential Manager / Linux Secret Service (libsecret + gnome-keyring). 配合 `migrate-oskeyring.mjs` 一键把 file-based wrap key 迁到 OS keyring, composite keyring (os primary + file fallback) 期间零 downtime. 详见 §2.2.5.B.
 - **sdk-alias 双 dist bug source fix** (commit `c5ebf37846`): `openclaw-root.ts` 加 `BUILD_ARTIFACT_DIRS` 跳过 dist/src/build/out/lib, 走 ancestors 时不再误把 dist/ 当 package root. 之前 v3 fork 启动需要 30s `fix-plugin-runtime-symlink.sh` workaround 创 `dist/dist/plugins` 软链, 现在 source-level 修了, workaround 全去掉 (脚本 archive 到 `pqc-fork-scripts/archive/2026-08-25/`).
 - **Side-channel dudect-style 测过** (2026-08-25): `pqc-fork-scripts/sidechannel-test.mjs` 跑 40K ops (20K wrap + 20K unwrap), Welch's t-test 单 bit split: wrap |t|=0.85, unwrap |t|=0.06, 阈值 4.5, **0 leak** 在 Node 24 + OpenSSL 3.x AES-256-GCM 32B plaintext 路径上. 报告 `pqc-fork-scripts/sidechannel-report.json`, 详见 §6.3.
@@ -284,6 +286,7 @@ Apple 推送通知签名从纯 Ed25519 升级到 Ed25519 + ML-DSA-65 双签名�
     - session collection (label='', 默认 unlocked) 适合测试, 持久化需 login collection (需 unlock master password)
   - **FileKeyring path 仍 production-validated 作为 composite keyring fallback** (fork 默认 4 OS + file 双 source, OS 失败降级 file, 期间零 downtime)
   - 详 §6.3 honest list. M6.B code 100% + 部署 100% (OsKeyring 真部署 + FileKeyring fallback 双向 production-validated)
+
 - 2.2.5.C Wrap-key 轮换：rotateDeviceIdentityWrappingKey 工具函数
 - 2.2.5.D Wrap-key 备份/恢复：passphrase + PBKDF2-SHA256 600k + AES-256-GCM
 
@@ -478,7 +481,7 @@ wrap-key 轮换的威胁：
 
 风险 影响 缓解
 OS keyring native binary 加载失败 wrap key 降级到 file clear error message (含 libsecret-1-0 + Secret Service 安装步骤); composite keyring 期间 fallback file; 日志告警
-M6.B OsKeyring 真部署 8/28 验证 daemon 启了但 Secret Service D-Bus interface 没 fully register, WSL2 headless 走 FileKeyring fallback path (production-validated)  8/29 验证: 用 `dbus-daemon --session --nofork` + `gnome-keyring-daemon --daemonize` + `XDG_RUNTIME_DIR=$HOME/.cache/keyring-runtime` 持久化路径后, fork 走 @napi-rs/keyring SecretService path 读 wrap key 成功 (byteLength 4032 unwrap OK), 确认 WSL2 headless + WSLg 环境下 OsKeyring 真部署可达成. 关键: 1) 存 base64url 字符串 (32 raw bytes 有 null byte 截断风险) 2) attribute 名是 `application`+`username` (keytar 兼容 API) 3) gnome-keyring-daemon 需 dbus session (用 `dbus-run-session` 或 persistent `dbus-daemon --session --nofork`). 详 §2.2.5.B 部署状态
+M6.B OsKeyring 真部署 8/28 验证 daemon 启了但 Secret Service D-Bus interface 没 fully register, WSL2 headless 走 FileKeyring fallback path (production-validated) 8/29 验证: 用 `dbus-daemon --session --nofork` + `gnome-keyring-daemon --daemonize` + `XDG_RUNTIME_DIR=$HOME/.cache/keyring-runtime` 持久化路径后, fork 走 @napi-rs/keyring SecretService path 读 wrap key 成功 (byteLength 4032 unwrap OK), 确认 WSL2 headless + WSLg 环境下 OsKeyring 真部署可达成. 关键: 1) 存 base64url 字符串 (32 raw bytes 有 null byte 截断风险) 2) attribute 名是 `application`+`username` (keytar 兼容 API) 3) gnome-keyring-daemon 需 dbus session (用 `dbus-run-session` 或 persistent `dbus-daemon --session --nofork`). 详 §2.2.5.B 部署状态
 wrap-key 备份 passphrase 丢失 灾难恢复不可用 1Password + 印刷备份双保险
 老客户端 (NIP-04 / Ed25519) 不升级 HNDL 风险残留 [PQC-MIGRATION] 日志监控
 设备物理被盗 state.db 可被提取 wrap key 在 OS keyring, 解锁需 OS 认证 (KWallet / login keyring 需 user session)
@@ -514,32 +517,16 @@ EM / 功率 / 故障注入 旁路攻击完全没测 需要专业硬件 + 商业 
 
 ### 7.2 灾难恢复 (wrap-key 恢复)
 
-如果 state.db 损坏或 wrap key 丢失：
-
-1. 找到 1Password / Bitwarden 中存储的 wrap-key 备份 blob
-   （形如 eyJ2ZXJzaW9uIjoxLCJrZXlJZCI6Li4ufQ... 的 base64url 字符串）
-2. 在新设备上运行：openclaw wrap-key import <blob> --passphrase <your-passphrase>
-3. 重启 OpenClaw Gateway 服务
-4. 验证：openclaw wrap-key status 应显示 imported keyId
-
-如果 1Password 也没有备份：
-
-- state.db 中的 wrap columns 将无法解密（永久丢失）
-- 必须重新初始化 device identity（会失去与老客户端的连接）
+当前 installer 的 active source 是 `$STATE_DIR/wrap-key.b64`。恢复时必须从
+verified backup 取回**完全相同**的 key file，并保持 mode 0600 与 service-user
+ownership。不要假设当前 build 提供 `openclaw wrap-key import` CLI；先检查
+实际命令清单。若所有旧 key 副本都丢失，依赖它的 ciphertext 无法恢复。
 
 ### 7.3 wrap-key 轮换
 
-定期轮换 wrap key 是良好实践（建议每 6-12 个月）：
-
-1. 备份当前 wrap key（轮换前必须）：
-   openclaw wrap-key export --passphrase <backup-passphrase>
-   将输出的 blob 存储在 1Password
-
-2. 执行轮换：openclaw wrap-key rotate --confirm（--confirm 是强制安全门）
-
-3. 验证轮换：openclaw wrap-key status 应显示新的 keyId 和 wrapped: N rows
-
-4. 回滚（如需要）：openclaw wrap-key import <old-backup-blob> --passphrase <old-passphrase>
+当前没有 operator-facing、经过验证的 transactional rewrap command。不能通过
+删除 key material 来“轮换”，否则既有 ciphertext 和旧 backup 会不可读。应先
+保留并验证旧 key/backup，待 reviewed migration procedure 可用后再执行轮换。
 
 ## 8. 运维手册
 
@@ -582,8 +569,8 @@ grep "\[PQC-MIGRATION\]" /var/log/openclaw/*.log | wc -l
 
 问题 2：wrap key 找不到（device identity 报错）
 
-- 症状：wrapping key not found: <keyId>
-- 解决：1Password 找备份 blob，openclaw wrap-key import <blob> --passphrase <pw>
+- 症状：`wrapping key not found: <keyId>`
+- 解决：从 verified backup 恢复与 ciphertext 匹配的原 key file
 - 预防：定期 backup，定期测试 restore
 
 问题 3：轮换中断
@@ -606,14 +593,15 @@ daemon 648 / 0 0
 
 #### 9.1.1 PQC 算法 KAT (Known Answer Tests) — FIPS 203/204 全部 parameter set
 
-| 测试 | 通过 | 范围 | 来源 |
-|---|---|---|---|
-| ML-DSA-65 (FIPS 204) KAT | 24/24 invariants | sign + verify + encoding + tamper rejection | `pqc-fork-scripts/run-kat.mjs` |
-| ML-DSA-44 + ML-DSA-65 + ML-DSA-87 (FIPS 204) | 26 × 3 = 78 invariants | sign + verify + integrity × 6 rounds per parameter set | `pqc-fork-scripts/run-multi-kat.mjs` |
-| ML-KEM-512 + ML-KEM-768 + ML-KEM-1024 (FIPS 203) | 24 × 3 = 72 invariants | encap + decap + integrity × 8 rounds per parameter set | 同上 |
-| **总计** | **174/174 invariants** | 6 个 NIST parameter set 全部通过 | 2026-08-26 集成验证 |
+| 测试                                             | 通过                   | 范围                                                   | 来源                                 |
+| ------------------------------------------------ | ---------------------- | ------------------------------------------------------ | ------------------------------------ |
+| ML-DSA-65 (FIPS 204) KAT                         | 24/24 invariants       | sign + verify + encoding + tamper rejection            | `pqc-fork-scripts/run-kat.mjs`       |
+| ML-DSA-44 + ML-DSA-65 + ML-DSA-87 (FIPS 204)     | 26 × 3 = 78 invariants | sign + verify + integrity × 6 rounds per parameter set | `pqc-fork-scripts/run-multi-kat.mjs` |
+| ML-KEM-512 + ML-KEM-768 + ML-KEM-1024 (FIPS 203) | 24 × 3 = 72 invariants | encap + decap + integrity × 8 rounds per parameter set | 同上                                 |
+| **总计**                                         | **174/174 invariants** | 6 个 NIST parameter set 全部通过                       | 2026-08-26 集成验证                  |
 
 跑法:
+
 ```bash
 node pqc-fork-scripts/run-kat.mjs          # ML-DSA-65 only (24 invariants)
 node pqc-fork-scripts/run-multi-kat.mjs    # 6 parameter sets (150 invariants)
@@ -621,21 +609,23 @@ node pqc-fork-scripts/run-multi-kat.mjs    # 6 parameter sets (150 invariants)
 
 #### 9.1.2 Side-channel dudect-style 时序测试 (software-layer)
 
-| Hot path | 工具 | Setup | mean | \|t\| | 结论 |
-|---|---|---|---|---|---|
-| AES-256-GCM wrap (§2.2) | `sidechannel-test.mjs` | Node 24 + OpenSSL 3.x, 32B plaintext, 20K rounds × 2 class = 40K ops | 7.2-7.5 µs (wrap) / 5.0 µs (unwrap) | 0.850 / 0.062 | ✓ no leak |
-| ML-DSA-44 / 65 / 87 sign (§2.2, 全部 param set) | `sidechannel-mldsa.mjs --algorithm ml_dsa{44,65,87}` | Node 22 + @noble 0.7.0, 64B message, 1.5K rounds × 2 class × 2 ops per set = 18K ops total | 4.4 / 6.7 / 8.3 ms (sign) ; 1.0 / 1.6 / 2.5 ms (verify) | < 1.1 / < 1.8 / < 0.7 (max) | ✓ no leak (all 6 ops) |
-| ML-KEM-512 / 768 / 1024 encap/decap (§2.2, 全部 param set) | `sidechannel-mlkem.mjs --algorithm ml_kem{512,768,1024}` | Node 22 + @noble 0.7.0, 5K rounds × 2 class × 2 ops per set = 60K ops total | 0.35 / 0.46 / 0.78 ms (encap) ; 0.44 / 0.58 / 0.95 ms (decap) | < 1.0 / < 1.5 / < 1.0 (max) | ✓ no leak (all 6 ops) |
-| AES-256-GCM wrap/unwrap (cache hierarchy, OpenSSL 3.x FIPS 140-3 path) (§2.2, 2 ops, 8/30 补全) | `cache-timing-ct-aesgcm.mjs` under valgrind --tool=callgrind --cache-sim=yes | Node 22 + OpenSSL 3.x FIPS 140-3 + valgrind 3.18.1, K=20 process/class × N=20 ops (10 warmup + 20 measure) = 400 ops/class, 1.6K ops total, 9 cache event types | L3 D-miss: 62K (wrap) / 62K (unwrap) | 1.028 (wrap) / 1.808 (unwrap, max) | ✓ no leak (all 2 ops × 9 events) |
-| ML-DSA 44/65/87 sign/verify + ML-KEM 512/768/1024 encap/decap (cache hierarchy, FIPS 203/204 全部 6 param set) (§2.2, 12 ops) | `cache-timing-ct.mjs` under valgrind --tool=callgrind --cache-sim=yes | Node 22 + @noble 0.7.0 + valgrind 3.18.1, K=20 process/class × N=20 ops (10 warmup + 20 measure) = 800 ops/algo, 9.6K ops total, 9 cache event types | L3 D-miss: 63K-65K (sign/verify ML-DSA) / 65K (encap/decap ML-KEM) | < 0.7 / < 1.0 / < 1.0 / < 1.2 / < 1.7 / < 2.0 (max per algo) | ✓ no leak (all 12 ops × 9 events) |
+| Hot path                                                                                                                      | 工具                                                                         | Setup                                                                                                                                                           | mean                                                               | \|t\|                                                        | 结论                              |
+| ----------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------ | --------------------------------- |
+| AES-256-GCM wrap (§2.2)                                                                                                       | `sidechannel-test.mjs`                                                       | Node 24 + OpenSSL 3.x, 32B plaintext, 20K rounds × 2 class = 40K ops                                                                                            | 7.2-7.5 µs (wrap) / 5.0 µs (unwrap)                                | 0.850 / 0.062                                                | ✓ no leak                         |
+| ML-DSA-44 / 65 / 87 sign (§2.2, 全部 param set)                                                                               | `sidechannel-mldsa.mjs --algorithm ml_dsa{44,65,87}`                         | Node 22 + @noble 0.7.0, 64B message, 1.5K rounds × 2 class × 2 ops per set = 18K ops total                                                                      | 4.4 / 6.7 / 8.3 ms (sign) ; 1.0 / 1.6 / 2.5 ms (verify)            | < 1.1 / < 1.8 / < 0.7 (max)                                  | ✓ no leak (all 6 ops)             |
+| ML-KEM-512 / 768 / 1024 encap/decap (§2.2, 全部 param set)                                                                    | `sidechannel-mlkem.mjs --algorithm ml_kem{512,768,1024}`                     | Node 22 + @noble 0.7.0, 5K rounds × 2 class × 2 ops per set = 60K ops total                                                                                     | 0.35 / 0.46 / 0.78 ms (encap) ; 0.44 / 0.58 / 0.95 ms (decap)      | < 1.0 / < 1.5 / < 1.0 (max)                                  | ✓ no leak (all 6 ops)             |
+| AES-256-GCM wrap/unwrap (cache hierarchy, OpenSSL 3.x FIPS 140-3 path) (§2.2, 2 ops, 8/30 补全)                               | `cache-timing-ct-aesgcm.mjs` under valgrind --tool=callgrind --cache-sim=yes | Node 22 + OpenSSL 3.x FIPS 140-3 + valgrind 3.18.1, K=20 process/class × N=20 ops (10 warmup + 20 measure) = 400 ops/class, 1.6K ops total, 9 cache event types | L3 D-miss: 62K (wrap) / 62K (unwrap)                               | 1.028 (wrap) / 1.808 (unwrap, max)                           | ✓ no leak (all 2 ops × 9 events)  |
+| ML-DSA 44/65/87 sign/verify + ML-KEM 512/768/1024 encap/decap (cache hierarchy, FIPS 203/204 全部 6 param set) (§2.2, 12 ops) | `cache-timing-ct.mjs` under valgrind --tool=callgrind --cache-sim=yes        | Node 22 + @noble 0.7.0 + valgrind 3.18.1, K=20 process/class × N=20 ops (10 warmup + 20 measure) = 800 ops/algo, 9.6K ops total, 9 cache event types            | L3 D-miss: 63K-65K (sign/verify ML-DSA) / 65K (encap/decap ML-KEM) | < 0.7 / < 1.0 / < 1.0 / < 1.2 / < 1.7 / < 2.0 (max per algo) | ✓ no leak (all 12 ops × 9 events) |
 
 阈值 \|t\| < 4.5 (dudect standard Welch's t-test, 单 bit split)。**三条主 hot path 全 parameter set + 全部 hot path cache hierarchy** (AES-GCM wrap/unwrap + ML-DSA 全部 3 个 param set sign/verify + ML-KEM 全部 3 个 param set encap/decap, **共 7 hot paths / 28 ops 全部通过** — 14 ops user-space timing + **14 ops cache hierarchy**, 累计 129.2K ops) **用户态 + cache hierarchy 层** 0 timing leak 观察到. **不代表**:
+
 - per-operation cache-timing (要 SIGUSR1/SIGUSR2 per-op dump+zero, 14 algo × 5000 ops = 98h CPU, 没做)
 - Cache-timing 攻击 (FLUSH+RELOAD / PRIME+PROBE, 没测)
 - AES-NI 硬件 timing (要 Intel perf counter, P1)
 - 旁路 (EM/power/fault, P0)
 
 跑法:
+
 ```bash
 node pqc-fork-scripts/sidechannel-test.mjs --rounds 20000 --out sidechannel-report.json
 node pqc-fork-scripts/sidechannel-mldsa.mjs --algorithm ml_dsa44 --rounds 1500 --out sidechannel-mldsa-ml_dsa44-report.json
@@ -665,16 +655,16 @@ bash pqc-fork-scripts/cache-timing-ct-driver-aesgcm.sh 20 20
 
 #### 9.1.3 集成验证 (production build, 2026-08-26)
 
-| 验证项 | 结果 |
-|---|---|
-| v3 dist 编译 | ✅ 184M / 10728 files, tsdown-unified 9 invocations × ~50s |
-| Source fix (c5ebf37846 sdk-alias BUILD_ARTIFACT_DIRS) | ✅ 编译进 `openclaw-root-*.js`, `dist/dist/` 路径不再生成 |
-| M6.B OsKeyring (21bc128b6b @napi-rs/keyring) | ✅ 编译进 `device-identity-*.js`, 走 file fallback (WSL2 无 libsecret) |
-| Fork startup time | **6s** (10:01:32 → 10:01:38 /healthz ready) |
-| 10 plugins loaded (含 memory-core / browser / device-pair) | ✅ 全加载, 0 plugin error |
-| Live symlink workaround 必要性 | ❌ 不再需要 (source-level fix 验证 work) |
-| KAT 174/174 invariants | ✅ (见 §9.1.1) |
-| Device identity wrap | ✅ wrapped=7306B, keyring=wrap-key-2026-08 |
+| 验证项                                                     | 结果                                                                   |
+| ---------------------------------------------------------- | ---------------------------------------------------------------------- |
+| v3 dist 编译                                               | ✅ 184M / 10728 files, tsdown-unified 9 invocations × ~50s             |
+| Source fix (c5ebf37846 sdk-alias BUILD_ARTIFACT_DIRS)      | ✅ 编译进 `openclaw-root-*.js`, `dist/dist/` 路径不再生成              |
+| M6.B OsKeyring (21bc128b6b @napi-rs/keyring)               | ✅ 编译进 `device-identity-*.js`, 走 file fallback (WSL2 无 libsecret) |
+| Fork startup time                                          | **6s** (10:01:32 → 10:01:38 /healthz ready)                            |
+| 10 plugins loaded (含 memory-core / browser / device-pair) | ✅ 全加载, 0 plugin error                                              |
+| Live symlink workaround 必要性                             | ❌ 不再需要 (source-level fix 验证 work)                               |
+| KAT 174/174 invariants                                     | ✅ (见 §9.1.1)                                                         |
+| Device identity wrap                                       | ✅ wrapped=7306B, keyring=wrap-key-2026-08                             |
 
 注: fork 跑在 port 18791, dashboard collector 在 18800. Paper claim 用的所有数字 (6s startup, 174/174 KAT, 10 plugins loaded, dist size) 都是这次集成验证实测的.
 
@@ -705,7 +695,7 @@ bash pqc-fork-scripts/cache-timing-ct-driver-aesgcm.sh 20 20
   - ✅ **已完成 (M12 v3, commit `f89f296687`)**: FileKeyring instance cache + env auto-inject — 启动时间 167s → 6-9s (17-28x, warm 6.2s / cold 9.5s), 不需要 `secrets configure` wizard, +9 invariants
   - ✅ **已完成 (c5ebf37846)**: sdk-alias 双 dist bug source fix — `openclaw-root.ts` 加 `BUILD_ARTIFACT_DIRS` 跳过 dist/src/build/out/lib, workaround `fix-plugin-runtime-symlink.sh` 全去掉 (archived `pqc-fork-scripts/archive/2026-08-25/`)
   - ✅ **已完成 (21bc128b6b)**: M6.B OsKeyring 真实现 — `@napi-rs/keyring` 1.3.0 动态加载 + `migrate-oskeyring.mjs` + composite keyring (os primary + file fallback)
-  - 内存中的 wrap key 用 mlock 防止转储: ✅ **code-side 已 done (commit `d8c642df7d`, 2026-09-01)**, Node 24.6+ 升级 + 跑回归仍 P0 backlog (4-5h autonomous, 待 push 后)
+  - ✅ Linux native addon 已验证 `mlock`/`munlock` swap protection；addon-owned secure mapping、core-dump exclusion、Linux arm64/macOS/Windows backend/build validation 仍是 backlog
   - 签名/验签 cache 减少重复计算
 - 旁路测试:
   - ✅ **已完成 (2026-08-25)**: dudect-style 软件层 timing test — 40K ops, |t| < 1, 0 leak. 报告 `pqc-fork-scripts/sidechannel-report.json`.
@@ -727,23 +717,17 @@ bash pqc-fork-scripts/cache-timing-ct-driver-aesgcm.sh 20 20
 
 ## 11. 参考文献
 
-- NIST FIPS 203: Module-Lattice-Based Key-Encapsulation Mechanism (ML-KEM)
-  https://csrc.nist.gov/pubs/fips/203/final
+- [NIST FIPS 203: Module-Lattice-Based Key-Encapsulation Mechanism (ML-KEM)](https://csrc.nist.gov/pubs/fips/203/final)
 
-- NIST FIPS 204: Module-Lattice-Based Digital Signature Standard (ML-DSA)
-  https://csrc.nist.gov/pubs/fips/204/final
+- [NIST FIPS 204: Module-Lattice-Based Digital Signature Standard (ML-DSA)](https://csrc.nist.gov/pubs/fips/204/final)
 
-- NIST FIPS 205: Stateless Hash-Based Digital Signature Standard (SLH-DSA)
-  https://csrc.nist.gov/pubs/fips/205/final
+- [NIST FIPS 205: Stateless Hash-Based Digital Signature Standard (SLH-DSA)](https://csrc.nist.gov/pubs/fips/205/final)
 
-- IETF draft-irtf-cfrg-x25519mlkem768: X25519 + ML-KEM-768 hybrid
-  https://datatracker.ietf.org/doc/draft-irtf-cfrg-x25519mlkem768/
+- [IETF draft-irtf-cfrg-x25519mlkem768: X25519 + ML-KEM-768 hybrid](https://datatracker.ietf.org/doc/draft-irtf-cfrg-x25519mlkem768/)
 
-- NIP-44 v2: Nostr Improved Encrypted Direct Messages
-  https://github.com/nostr-protocol/nips/blob/master/44.md
+- [NIP-44 v2: Nostr Improved Encrypted Direct Messages](https://github.com/nostr-protocol/nips/blob/master/44.md)
 
-- OWASP Password Storage Cheat Sheet (PBKDF2 600,000 iterations)
-  https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html
+- [OWASP Password Storage Cheat Sheet (PBKDF2 600,000 iterations)](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html)
 
 - RFC 7748: Elliptic Curves for Security (X25519)
 - RFC 8032: Edwards-Curve Digital Signature Algorithm (Ed25519)

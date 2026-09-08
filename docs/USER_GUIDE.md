@@ -3,7 +3,7 @@
 **Audience**: an end user who has just cloned this repo and wants to
 get a working post-quantum-hardened OpenClaw instance running on
 their own machine or in a container. This is the step-by-step
-"how to actually use the product" doc that goes with [README.md](../README.md).
+"how to actually use the product" doc that goes with the repository README.
 
 **Prerequisite**: a working terminal, basic shell literacy, ~30
 minutes of focused time. The guide assumes Linux (Ubuntu 22.04+),
@@ -11,10 +11,10 @@ with macOS 13+ and WSL2 Ubuntu noted where the steps differ.
 
 **Not for**:
 
-- On-call SREs (you want [OPERATIONS.md](OPERATIONS.md))
-- Auditors / academics (you want [pqc-whitepaper.md](pqc-whitepaper.md))
-- People migrating from upstream OpenClaw ([MIGRATION.md](MIGRATION.md))
-- The impatient (the 5-minute quick start is in [README.md](../README.md))
+- On-call SREs (you want [OPERATIONS](/security/OPERATIONS))
+- Auditors / academics (you want [the whitepaper](/security/pqc-whitepaper))
+- People migrating from upstream OpenClaw ([MIGRATION](/security/MIGRATION))
+- The impatient (the 5-minute quick start is in the repository README)
 
 ---
 
@@ -23,13 +23,9 @@ with macOS 13+ and WSL2 Ubuntu noted where the steps differ.
 By the end of §6, you will have:
 
 - A running `pqc-openclaw` daemon, listening on port 18789
-- A wrap key, generated fresh and stored in your OS keyring
-  (libsecret on Linux, Keychain on macOS) and as a 0600 fallback
-  file in `$STATE_DIR/wrap-key.b64`
-- A systemd unit (Linux) or launchd plist (macOS) that starts
-  the daemon on boot
-- A daily backup cron, writing to `/var/backups/pqc-openclaw/`
-  with a sha256 sidecar
+- A fresh mode-0600 file-backed wrap key at `$STATE_DIR/wrap-key.b64`
+- A rendered systemd unit on Linux; the operator enables it explicitly
+- Backup and Prometheus collector wrappers ready for operator-managed scheduling
 - A healthcheck you can run from cron or CI
 
 If you only need to _try it_ for an hour and throw it away, skip
@@ -48,60 +44,47 @@ test on your laptop.
 git clone https://github.com/WU123-ABC-Cell/pqc-openclaw.git
 cd pqc-openclaw
 
-# 2. Install Node.js 22.23.1 (pinned by .nvmrc)
+# 2. Install the Node.js version pinned by .nvmrc
 curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
 source "$HOME/.nvm/nvm.sh"
-nvm install 22.23.1
+nvm install
 nvm use    # reads .nvmrc
 
-# 3. Install OS-keyring dependency
-sudo apt-get update
-sudo apt-get install -y libsecret-1-0 libsecret-1-dev gnome-keyring dbus-x11
-
-# 4. 1-command installer (6 steps, takes 3-5 min)
+# 3. 1-command installer
 sudo bash scripts/install-pqc.sh
 ```
 
 The installer does, in order:
 
-1. Verifies Node 22.22.3+ / 24.15+ / 25.9+ is on `PATH` (refuses otherwise)
-2. Installs pnpm if missing (idempotent: skips if present)
-3. `pnpm install --frozen-lockfile` + `pnpm run build` (compile to `dist/`)
-4. Provisions a **fresh** 32-byte wrap key in the OS keyring
-   (libsecret on Linux, Keychain on macOS) and a 0600-mode file
-   fallback at `$STATE_DIR/wrap-key.b64`
-5. Installs `/usr/local/bin/healthcheck-pqc.sh` and
-   `/usr/local/bin/backup-pqc.sh` (idempotent)
-6. Installs `/etc/systemd/system/pqc-openclaw.service` and
-   `systemctl daemon-reload`. **The unit is NOT started** —
-   you do that in §3.
+1. Enforces the requested Node version and repository-pinned pnpm version.
+2. Copies the exact committed workspace to the install root.
+3. Runs `pnpm install --frozen-lockfile`, then `pnpm run build`.
+4. Writes a fresh 32-byte file-backed key at `$STATE_DIR/wrap-key.b64` (0600).
+5. Installs the healthcheck, backup, and Prometheus collector wrappers.
+6. Renders the Linux systemd unit and creates `$STATE_DIR/openclaw.env`.
 
-If step 4 (keyring provisioning) fails on your distro, the
-installer prints a one-time warning and falls back to the file
-path. See [MLOCK.md §"Wrap-key provisioning fallback"](MLOCK.md)
-for the manual override.
+The installer does not populate an OS keyring. That is an explicit later
+operation because platform keyrings may require an interactive unlock.
 
-### 1.2 macOS 13+
+### 1.2 macOS 13+ (manual service management)
 
 ```sh
 # 1. Clone
 git clone https://github.com/WU123-ABC-Cell/pqc-openclaw.git
 cd pqc-openclaw
 
-# 2. Install Node 22.23.1 via nvm (Homebrew is fine too, nvm just
-#    matches what CI uses)
+# 2. Install the version pinned by .nvmrc
 brew install nvm    # or use the nvm install script from 1.1
-nvm install 22.23.1
+nvm install
 nvm use
 
-# 3. No libsecret needed — Keychain is built-in
-# 4. Installer (no sudo needed; uses launchd not systemd)
-bash scripts/install-pqc.sh
+# 3. The production installer currently requires root even on macOS
+sudo bash scripts/install-pqc.sh --skip-systemd
 ```
 
-`scripts/install-pqc.sh` auto-detects macOS via `uname -s` and
-falls through to the `launchd` path. The Keychain entry lives at
-service `pqc-openclaw`, account `wrap-key-current`.
+The installer does not render a launchd plist or write Keychain entries. A
+macOS operator must configure both explicitly after reviewing the generated
+paths. The Linux systemd flow below does not apply.
 
 ### 1.3 WSL2 Ubuntu (20.04+)
 
@@ -143,11 +126,14 @@ sudo bash scripts/install-pqc.sh \
     --install-root /opt/pqc-openclaw \
     --state-dir /var/lib/pqc-openclaw \
     --service-user pqc-openclaw \
-    --node-version 22.23.1 \
-    --skip-keyring        # use file fallback only (no OS keyring)
-    --skip-systemd        # no systemd unit (containers)
-    --skip-build          # use existing dist/ (faster iteration)
+    --node-version 24.15.0 \
+    --skip-keyring \
+    --skip-systemd \
+    --skip-build
 ```
+
+For a fully isolated Linux validation, `--sandbox-root PATH` requires an
+existing empty, non-symlink directory owned by the caller with mode 0700.
 
 `--help` lists every flag with a one-liner. The defaults are
 sane for a single-host production install.
@@ -166,14 +152,10 @@ verifies each piece is healthy.
 # Linux (with systemd)
 sudo systemctl enable --now pqc-openclaw
 
-# macOS (launchd)
-sudo launchctl load -w /Library/LaunchDaemons/com.pqc-openclaw.plist
-sudo launchctl start com.pqc-openclaw
-
-# WSL2 / container (foreground)
+# WSL2 / manual foreground start
 sudo -u pqc-openclaw bash -c '
   cd /opt/pqc-openclaw
-  source /etc/pqc-openclaw/pqc-openclaw.env
+  set -a; source /var/lib/pqc-openclaw/openclaw.env; set +a
   node dist/index.js gateway --bind 127.0.0.1 --port 18789
 '
 ```
@@ -194,59 +176,43 @@ or `log show --predicate 'process == "pqc-openclaw"' --last 1m`
 ### 2.3 Run the 8-check healthcheck
 
 ```sh
-sudo bash /usr/local/bin/healthcheck-pqc.sh --json | jq
+sudo bash /usr/local/bin/healthcheck-pqc.sh --json --skip-keyring | sed -n '1p' | jq
 ```
 
-Expected output (abridged):
+Require `summary.fail` to be zero. The exact pass/warn split varies with
+optional host capabilities and whether the gateway has emitted PQC events.
+Example (abridged):
 
 ```json
 {
-  "summary": {"pass": 8, "warn": 0, "fail": 0},
+  "summary": {"pass": 6, "warn": 2, "fail": 0},
   "checks": [
-    {"check": "node-version", "status": "ok", "detail": "v22.23.1 (supported)"},
-    {"check": "mlock", "status": "warn", "detail": "process.mlock unavailable; wrap key NOT pinned in physical RAM. Upgrade to Node 24.15+ for mlock active path."},
+    {"check": "node-version", "status": "ok", "detail": "supported"},
+    {"check": "mlock", "status": "warn", "detail": "no locking backend available"},
     ...
   ]
 }
 ```
 
-`mlock` being `warn` on Node 22 is **expected and non-critical**.
-The wrap key is still in the OS keyring (encrypted at rest) and
-the file fallback is mode 0600. The `warn` exists so you know
-your machine is not getting the RAM-pinning defense — only
-relevant if you are worried about cold-boot attacks. See
-[OPERATIONS.md §"When to page the security team"](OPERATIONS.md#5-when-to-page-the-security-team)
+An `mlock` warning means neither the process hook nor native addon could lock
+the cached key. The default at-rest source remains the mode-0600 file. See
+[OPERATIONS](/security/OPERATIONS#5-when-to-page-the-security-team)
 for the threat-model reasoning.
 
 A `fail` on any other check is a problem — jump to
-[OPERATIONS.md §"Failure modes"](OPERATIONS.md#2-the-five-things-that-will-page-you-and-what-to-do)
+[OPERATIONS](/security/OPERATIONS#2-the-five-things-that-will-page-you-and-what-to-do)
 and follow the recovery steps for the matching check name.
 
-### 2.4 Verify the wrap key is in the OS keyring
+### 2.4 Verify the default wrap-key file
 
 ```sh
-# Linux (libsecret via Python secretstorage)
-python3 -c "
-import secretstorage
-conn = secretstorage.dbus_init()
-for c in conn.get_all_collections():
-    for i in c.get_all_items():
-        a = i.get_attributes()
-        if a.get('application') == 'pqc-openclaw' and a.get('username') == 'wrap-key-current':
-            print('OK keyring entry found')
-            exit(0)
-print('MISSING'); exit(1)
-" && echo "OK keyring"
-
-# macOS (Keychain)
-security find-generic-password -s pqc-openclaw -a wrap-key-current
-# (should print <data> and exit 0)
+sudo test -f /var/lib/pqc-openclaw/wrap-key.b64
+sudo stat -c '%a %U:%G %n' /var/lib/pqc-openclaw/wrap-key.b64
 ```
 
-If the keyring entry is missing but the file fallback exists
-at `$STATE_DIR/wrap-key.b64` with mode 0600, the daemon still
-works — the keyring is the live source of truth, the file is
-the recovery backup. See [MLOCK.md](MLOCK.md).
+Expect mode 600 and the configured service user/group. After an explicit OS
+keyring migration, pass matching service/account values to the healthcheck.
+See [MLOCK](/security/MLOCK).
 
 ---
 
@@ -260,7 +226,7 @@ sudo systemctl start pqc-openclaw
 sudo systemctl stop pqc-openclaw
 sudo systemctl restart pqc-openclaw
 
-# macOS
+# macOS (only after you have installed your own launchd plist)
 sudo launchctl start com.pqc-openclaw
 sudo launchctl stop com.pqc-openclaw
 sudo launchctl kickstart -k system/com.pqc-openclaw  # restart
@@ -294,13 +260,13 @@ sudo tail -f /var/lib/pqc-openclaw/pqc-audit.log
 The audit log is JSONL, one event per line. PQC-specific events
 are tagged `[PQC]`:
 
-| Event              | When                         | What it tells you                                                |
-| ------------------ | ---------------------------- | ---------------------------------------------------------------- |
-| `Mlock`            | On first wrap of a new key   | wrap key is RAM-pinned (or would be on Node 24.15+)              |
-| `Munlock`          | On graceful shutdown         | wrap key scrubbed from RAM before exit                           |
-| `MlockUnavailable` | Once per process, on startup | runtime lacks `process.mlock`; key in OS keyring, not RAM-pinned |
+| Event               | When                         | What it tells you                              |
+| ------------------- | ---------------------------- | ---------------------------------------------- |
+| `mlock`             | When a cached key is locked  | a runtime or native backend reported success   |
+| `munlock`           | When the keyring releases it | the cached key was zeroed and unlock attempted |
+| `mlock-unavailable` | Once per process             | neither locking backend is available           |
 
-See [MLOCK.md](MLOCK.md) for the full event schema and
+See [MLOCK](/security/MLOCK) for the full event schema and
 what `status:ok` / `status:fail` mean.
 
 ### 3.4 Update
@@ -314,28 +280,28 @@ sudo systemctl stop pqc-openclaw
 # 2. Take a pre-upgrade backup
 sudo bash /usr/local/bin/backup-pqc.sh --label pre-upgrade-$(date +%Y-%m-%d)
 
-# 3. Pull the new code
-cd /opt/pqc-openclaw
-sudo -u pqc-openclaw git pull
-sudo -u pqc-openclaw pnpm install --frozen-lockfile
-sudo -u pqc-openclaw pnpm run build
+# 3. Update the retained source checkout, then reinstall its committed tree.
+#    /opt/pqc-openclaw has no .git directory by design.
+git -C /srv/pqc-openclaw-source pull --ff-only
+sudo bash /srv/pqc-openclaw-source/scripts/install-pqc.sh
 
 # 4. Restart
 sudo systemctl start pqc-openclaw
-sudo bash /usr/local/bin/healthcheck-pqc.sh --json
+sudo bash /usr/local/bin/healthcheck-pqc.sh --json --skip-keyring
 ```
 
 If `pnpm install --frozen-lockfile` fails, your `pnpm-lock.yaml`
 has drifted from upstream. Run `pnpm install` once (without
 `--frozen-lockfile`) and commit the updated `pnpm-lock.yaml`.
-See [CHANGELOG.md](../CHANGELOG.md) for what changed in the
+See the repository `CHANGELOG.md` for what changed in the
 version you are upgrading to.
 
 ---
 
 ## 4. Backups
 
-The installer wires up a daily cron at 3 AM. To check it ran:
+The installer does not create cron or systemd timer entries. Configure a
+scheduler explicitly after an on-demand backup succeeds. To inspect results:
 
 ```sh
 ls -la /var/backups/pqc-openclaw/
@@ -348,7 +314,8 @@ sudo bash /usr/local/bin/backup-pqc.sh --verify "$LATEST"
 # → "verify OK: ..."
 ```
 
-For off-host storage, edit `/etc/pqc-openclaw/pqc-openclaw.env`:
+For off-host storage, set these variables in the scheduler environment (the
+gateway's `$STATE_DIR/openclaw.env` is not loaded by cron automatically):
 
 ```sh
 S3_BUCKET=my-pqc-backups
@@ -362,13 +329,13 @@ Then trigger a one-shot:
 sudo bash /usr/local/bin/backup-pqc.sh --json | tee /tmp/backup.out
 ```
 
-A 0 exit code means the tarball was written, sha256-verified,
-and (if configured) uploaded. A 1 means one of the sources
-failed but a partial file was still produced (check the JSON).
-A 2 means non-critical (e.g. healthcheck warned but the backup
-proceeded).
+A 0 exit code means the tarball was written, sha256-verified, and (if
+configured) uploaded. The current backup verifier's database-schema probe only
+recognizes the legacy `state.db` layout; independently run the healthcheck's
+SQLite integrity probe for `$STATE_DIR/state/openclaw.sqlite` before relying on
+a restore point.
 
-See [OPERATIONS.md §"Backup hygiene"](OPERATIONS.md#3-backup-hygiene)
+See [OPERATIONS](/security/OPERATIONS#3-backup-hygiene)
 for the full restore-from-backup procedure and retention
 tuning.
 
@@ -376,14 +343,13 @@ tuning.
 
 ## 5. ML-DSA-65 / ML-KEM-768 quick start
 
-Once the daemon is running, the cryptographic operations are
-exposed via the standard OpenClaw client API. Below are the
-two primitives you are most likely to use.
+These direct library examples demonstrate the primitives used by the fork. They
+are not a claim that the running gateway exposes a raw cryptography API.
 
 ### 5.1 ML-DSA-65 sign + verify
 
 ```js
-import { ml_dsa65 } from "@noble/post-quantum";
+import { ml_dsa65 } from "@noble/post-quantum/ml-dsa.js";
 import { randomBytes } from "node:crypto";
 
 // Generate a key pair
@@ -391,48 +357,45 @@ const { publicKey, secretKey } = ml_dsa65.keygen(randomBytes(32));
 
 // Sign
 const message = Buffer.from("the quick brown fox jumps over the lazy dog");
-const signature = ml_dsa65.sign(secretKey, message);
+const signature = ml_dsa65.sign(message, secretKey);
 // signature is 3309 bytes for ML-DSA-65
 
 // Verify
-const ok = ml_dsa65.verify(publicKey, message, signature);
+const ok = ml_dsa65.verify(signature, message, publicKey);
 console.log("verified:", ok); // → "verified: true"
 
 // Tamper detection
 const tampered = Buffer.from("the quick brown FOX jumps over the lazy dog");
-const ok2 = ml_dsa65.verify(publicKey, tampered, signature);
+const ok2 = ml_dsa65.verify(signature, tampered, publicKey);
 console.log("verified (tampered):", ok2); // → "verified (tampered): false"
 ```
 
-The full `examples/ml-dsa-65-sign-verify.mjs` script also shows
-how to import the fork's PQC-aware audit logger to emit
-`[PQC] Mlock` events on first wrap.
+See the repository tests for integration and tamper-rejection coverage.
 
 ### 5.2 ML-KEM-768 encap + decap
 
 ```js
-import { ml_kem768 } from "@noble/post-quantum";
+import { ml_kem768 } from "@noble/post-quantum/ml-kem.js";
 import { randomBytes } from "node:crypto";
 
 // Receiver generates a key pair
-const { publicKey, secretKey } = ml_kem768.keygen(randomBytes(32));
+const { publicKey, secretKey } = ml_kem768.keygen(randomBytes(64));
 
 // Sender encapsulates a shared secret + ciphertext
-const { sharedSecret, ciphertext } = ml_kem768.encapsulate(publicKey);
+const { sharedSecret, cipherText } = ml_kem768.encapsulate(publicKey);
 // sharedSecret: 32 bytes
-// ciphertext:   1088 bytes for ML-KEM-768
+// cipherText:   1088 bytes for ML-KEM-768
 
 // Receiver decapsulates the same shared secret from the ciphertext
-const recovered = ml_kem768.decapsulate(secretKey, ciphertext);
+const recovered = ml_kem768.decapsulate(cipherText, secretKey);
 
 console.log("shared secret match:", Buffer.compare(sharedSecret, recovered) === 0);
 // → "shared secret match: true"
 ```
 
-The full `examples/ml-kem-768-encap-decap.mjs` script shows the
-hybrid pattern: derive an AES-256-GCM key from `sharedSecret`
-and use it to encrypt a multi-megabyte payload (the public-key
-op is constant-time; the symmetric op is authenticated).
+The shared secret can then be fed into a reviewed KDF/envelope construction; do
+not use it as an application protocol without domain separation and key
+confirmation appropriate to that protocol.
 
 ### 5.3 When to use Ed25519 (legacy) instead of ML-DSA-65
 
@@ -441,7 +404,7 @@ embedded system), the fork can fall back to Ed25519 signatures
 on the same wire protocol. The client sends a flag in the
 TLS-like handshake; the daemon negotiates the strongest
 algorithm both sides support. See [OPERATIONS.md §"PQC vs
-Ed25519 client compatibility"](OPERATIONS.md#2-the-five-things-that-will-page-you-and-what-to-do)
+Ed25519 client compatibility"](/security/OPERATIONS#2-the-five-things-that-will-page-you-and-what-to-do)
 for the negotiation table.
 
 For new deployments, **always use ML-DSA-65**. Ed25519 is
@@ -451,56 +414,42 @@ there for compatibility, not for security.
 
 ## 6. Frequently asked questions
 
-### 6.1 "How do I upgrade to Node 24.15+ to get mlock active?"
+### 6.1 "How do I activate the Linux mlock backend?"
 
 ```sh
 # 1. Stop the daemon
 sudo systemctl stop pqc-openclaw
 
-# 2. Install Node 24.15+ via nvm
-source "$HOME/.nvm/nvm.sh"
-nvm install 24.15.0
-nvm use 24.15.0
+# 2. Build the checked-in native addon in the installed tree
+cd /opt/pqc-openclaw
+sudo -u pqc-openclaw pnpm build:native
 
-# 3. Verify
-node --version    # v24.15.0
-node -e 'process.exit(typeof process.mlock === "function" ? 0 : 1)'
-# → exit 0 means mlock is available
+# 3. Verify the addon reports available
+node -e 'const a=require("./src/security/native/mlock-addon.cjs"); process.exit(a.isAvailable()?0:1)'
 
-# 4. Restart the daemon (it auto-detects the new Node)
+# 4. Restart and verify
 sudo systemctl start pqc-openclaw
-sudo bash /usr/local/bin/healthcheck-pqc.sh --json
-# → mlock check should now be "ok" instead of "warn"
+sudo bash /usr/local/bin/healthcheck-pqc.sh --json --skip-keyring
 ```
 
-The 4-step procedure is also documented inline in
-[MLOCK.md §"Manual mlock validation"](MLOCK.md).
+Node 24.15.0 does not expose `process.mlock`; changing Node alone is not enough.
+The native backend protects against swap, not core dumps. See
+[MLOCK](/security/MLOCK).
 
 ### 6.2 "How do I rotate the wrap key?"
 
-Rotating invalidates every encrypted blob in `state.db`. Plan
-a 5-minute maintenance window.
-
-```sh
-sudo systemctl stop pqc-openclaw
-sudo -u pqc-openclaw secret-tool clear service pqc-openclaw username wrap-key-current
-sudo shred -u /var/lib/pqc-openclaw/wrap-key.b64
-sudo bash /opt/pqc-openclaw/scripts/install-pqc.sh --skip-build --skip-systemd
-sudo systemctl start pqc-openclaw
-sudo bash /usr/local/bin/healthcheck-pqc.sh --json
-```
-
-If the keyring entry AND the file fallback are both gone, you
-have lost the ability to decrypt the state db. Restore from
-the most recent backup at §4.
+There is no supported operator-facing transactional rewrap command yet. Do not
+rotate by deleting key material: doing so makes existing ciphertext and old
+backups unreadable. Preserve and verify the old key and backup, then use a
+reviewed migration procedure when one is available. Treat generation of a new
+key as destructive reinitialization, not routine rotation.
 
 ### 6.3 "The healthcheck says `mlock unavailable`. Is this bad?"
 
-No, see [§2.3](#23-run-the-8-check-healthcheck). It just means
-your runtime is Node 22 and you are not getting the RAM-pinning
-defense. The wrap key is still protected by the OS keyring
-(encrypted at rest, access-gated to your login session) and
-the file fallback (mode 0600). To upgrade, follow §6.1.
+It means neither the runtime hook nor native addon could lock the cached key, so
+you are not getting swap protection. The default file remains protected by mode
+0600, but that is separate from RAM pinning. Diagnose or rebuild the native
+addon as in §6.1.
 
 ### 6.4 "How do I uninstall?"
 
@@ -511,12 +460,13 @@ sudo systemctl disable pqc-openclaw
 
 # 2. Remove the systemd unit + binary scripts
 sudo rm /etc/systemd/system/pqc-openclaw.service
-sudo rm /usr/local/bin/healthcheck-pqc.sh /usr/local/bin/backup-pqc.sh
+sudo rm /usr/local/bin/healthcheck-pqc.sh /usr/local/bin/backup-pqc.sh \
+  /usr/local/bin/pqc-textfile-collector.sh
 
 # 3. (Optional) Wipe state
 sudo rm -rf /var/lib/pqc-openclaw /var/backups/pqc-openclaw /opt/pqc-openclaw
 
-# 4. (Optional) Wipe the OS keyring entry
+# 4. (Optional) remove an OS keyring entry only if you explicitly created one
 sudo -u pqc-openclaw secret-tool clear service pqc-openclaw username wrap-key-current
 ```
 
@@ -530,23 +480,24 @@ Yes, with caveats. Use different `--install-root`, `--state-dir`,
 and `--service-user` per instance, and bind to different
 ports (`--port 28789` etc). The state dirs must not overlap
 or you will corrupt one of them. Each instance has its own
-wrap key. See [docker-compose.pqc.yml](../docker-compose.pqc.yml)
+wrap key. See the repository `docker-compose.pqc.yml`
 for the multi-container pattern (one service per instance,
 one mlock tmpfs per instance).
 
 ### 6.6 "How do I migrate from upstream OpenClaw?"
 
-See [MIGRATION.md](MIGRATION.md). The TL;DR: snapshot the
+See [MIGRATION](/security/MIGRATION). The TL;DR: snapshot the
 upstream state, install the PQC fork into a separate root,
-copy the state, validate, then switch traffic. The migration
-is in-place (no parallel deploy) and reversible in 5 minutes.
+copy the state, validate, then switch traffic. Reversibility depends on a
+verified snapshot, retained key material, and a rehearsed restore.
 
 ### 6.7 "What is the audit-grade story?"
 
 The fork has a paper-grade self-audit at
-[constant-time-audit.md](constant-time-audit.md) and 28
-operations × 129,200 trials of empirical cache-timing
-verification at 0 leak. The third-party cryptographer audit
+[constant-time audit](/security/constant-time-audit) and a historical campaign
+of 28 user-space/cache-hierarchy measurements across 129,200 trials. No
+statistically significant difference exceeded the recorded threshold; this is
+not proof of constant-time behavior. The third-party cryptographer audit
 is in P0 backlog; the RFP is being prepared. Until that
 audit, the fork is **not** suitable for government / financial
 deployments where a signed auditor letter is required. It is
@@ -555,7 +506,7 @@ and the verification log themselves.
 
 ### 6.8 "Where do I report a vulnerability?"
 
-See [SECURITY.md](../SECURITY.md). We aim to acknowledge
+See the repository `SECURITY.md`. We aim to acknowledge
 within 72 hours and ship a critical fix within 30 days.
 
 ---
@@ -566,15 +517,14 @@ The 5 most common first-time issues, in order of frequency:
 
 ### 7.1 "`[FAIL] node-version: vX.Y.Z (need 22.22.3+, 24.15+, or 25.9+)`"
 
-Your Node is too old. Upgrade with `nvm install 22.23.1 && nvm use`.
-The `.nvmrc` file in the repo root pins 22.23.1; `nvm use`
-alone will read it.
+Your Node is too old. From the source checkout, run `nvm install && nvm use`;
+both commands read the current `.nvmrc`.
 
 ### 7.2 "`[FAIL] wrap-key-file: not found`"
 
-The install step 4 (keyring provisioning) failed silently.
-Re-run `bash scripts/install-pqc.sh` — it is idempotent and
-will re-provision the key.
+Do not generate a replacement if encrypted state already exists. Recover the
+exact file from a verified backup. On a truly fresh deployment, rerun the
+installer from its source checkout to provision the initial file key.
 
 ### 7.3 "`[FAIL] healthz: GET /healthz returned 000000`"
 
@@ -586,7 +536,7 @@ for the actual error. Common causes:
   `WorkingDirectory=/opt/pqc-openclaw`. Check
   `systemctl show pqc-openclaw | grep WorkingDirectory`
 - Missing env vars: the systemd unit should
-  `EnvironmentFile=/etc/pqc-openclaw/pqc-openclaw.env`.
+  `EnvironmentFile=-/var/lib/pqc-openclaw/openclaw.env`.
   Check `systemctl show pqc-openclaw | grep EnvironmentFile`
 
 ### 7.4 "Restart loop (systemd says `activating` then `failed` repeatedly)"
@@ -626,7 +576,7 @@ sudo bash /usr/local/bin/backup-pqc.sh --verbose
 ```
 
 For more failure modes, see
-[OPERATIONS.md §"Failure modes"](OPERATIONS.md#2-the-five-things-that-will-page-you-and-what-to-do).
+[OPERATIONS](/security/OPERATIONS#2-the-five-things-that-will-page-you-and-what-to-do).
 
 ---
 
@@ -635,17 +585,17 @@ For more failure modes, see
 You are now running a post-quantum-hardened OpenClaw instance.
 What you can do with it:
 
-- **Build something**: import the example apps in [`examples/`](../examples/),
+- **Build something**: import the example apps under repository `examples/`,
   wire them into your own code via the standard OpenClaw client SDK.
-- **Deploy it for real**: follow [MIGRATION.md](MIGRATION.md)
+- **Deploy it for real**: follow [MIGRATION](/security/MIGRATION)
   to bring production traffic over.
-- **Audit it**: read [pqc-whitepaper.md](pqc-whitepaper.md) +
-  [constant-time-audit.md](constant-time-audit.md). Spot a
-  weakness? File an issue or see [SECURITY.md](../SECURITY.md).
-- **Operate it**: bookmark [OPERATIONS.md](OPERATIONS.md) for
+- **Audit it**: read [the whitepaper](/security/pqc-whitepaper) +
+  [constant-time audit](/security/constant-time-audit). Spot a
+  weakness? File an issue or see the repository `SECURITY.md`.
+- **Operate it**: bookmark [OPERATIONS](/security/OPERATIONS) for
   the on-call runbook.
 - **Get help**: file an issue at
-  https://github.com/WU123-ABC-Cell/pqc-openclaw/issues.
+  <https://github.com/WU123-ABC-Cell/pqc-openclaw/issues>.
 
-The cryptography is real, the verification is empirical, the
-deployment story is production-grade. Welcome aboard.
+The cryptography and retained evidence are inspectable; the operational limits
+above are part of the deployment contract.

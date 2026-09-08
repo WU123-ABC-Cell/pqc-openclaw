@@ -3,21 +3,22 @@
 #
 # This script provisions a supported Node.js runtime when needed,
 # installs pnpm + the fork's dependencies, builds the dist tree,
-# provisions the OS keyring with a fresh 32-byte wrap key, and
-# prints the env vars the operator needs to set in the systemd
-# unit (or launchd plist). It is idempotent: re-running after a
+# provisions a file-backed fresh 32-byte wrap key, renders a Linux systemd
+# unit, and creates the gateway-token environment file. It is idempotent:
+# re-running after a
 # partial failure picks up where it left off.
 #
 # Run from a fresh machine (Ubuntu 22.04+, macOS 13+, or WSL2
-# Ubuntu). The fork is installed to $INSTALL_ROOT (default
-# /opt/pqc-openclaw). State (sqlite, OS keyring entry) lives in
+# Ubuntu). The managed service path is implemented for Linux; macOS requires
+# manual service configuration. The fork is installed to $INSTALL_ROOT (default
+# /opt/pqc-openclaw). State and the default file-backed key live in
 # $OPENCLAW_STATE_DIR (default /var/lib/pqc-openclaw).
 #
 # NOTE: This is the PQC-fork installer. The upstream OpenClaw
 # installer is scripts/install.sh (downloaded via
 #   curl -fsSL https://openclaw.ai/install.sh | bash
 # ). Use that for the plain upstream install; use this one for
-# the PQC fork with side-channel validation + mlock + OS keyring.
+# the PQC fork. OS-keyring migration remains an explicit operator step.
 #
 # Usage:
 #   bash scripts/install-pqc.sh                       # default install
@@ -72,12 +73,12 @@ EXAMPLES
 
 REQUIREMENTS
   - Linux (Ubuntu 22.04+), macOS 13+, or WSL2 Ubuntu
-  - sudo (for system user, systemd, OS keyring)
+  - root for a production install (system user, /opt, /usr/local, systemd)
   - Internet access (for Node + pnpm download)
 
 POST-INSTALL
-  The script prints a 'systemd unit' block and the env vars you need
-  to set. Save the unit, then:
+  On Linux the script writes the systemd unit and gateway-token env file.
+  Review them, then:
     sudo systemctl daemon-reload
     sudo systemctl enable --now pqc-openclaw
     sudo journalctl -u pqc-openclaw -f
@@ -281,7 +282,7 @@ else
 fi
 
 # ----------------------------------------------------------------------
-# 6. Provision OS keyring with a fresh wrap key
+# 6. Provision a fresh file-backed wrap key
 # ----------------------------------------------------------------------
 
 mkdir -p "$STATE_DIR"
@@ -426,13 +427,13 @@ NEXT STEPS
        sudo systemctl enable --now pqc-openclaw
   4. Verify:
        sudo journalctl -u pqc-openclaw -f
-       bash scripts/healthcheck-pqc.sh
+       /usr/local/bin/healthcheck-pqc.sh --skip-keyring
 
 POST-INSTALL HEALTH CHECK
-  PQC side-channel regression:
-    cd $INSTALL_ROOT && pnpm test -- src/security/mlock-helper.test.ts
-  Cache-timing regression guard (14 reports must show no leak):
-    bash scripts/check-cache-timing-claims.sh
+  Focused mlock regression:
+    cd $INSTALL_ROOT && node scripts/run-vitest.mjs run src/security/mlock-helper.test.ts
+  Cache-timing evidence-integrity guard (14 checked-in reports):
+    cd $INSTALL_ROOT && node scripts/check-pqc-cache-timing-evidence.mjs
 
 For details, see PQC-FORK.md §Production Deployment.
 ==========================================================================

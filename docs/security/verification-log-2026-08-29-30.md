@@ -1,5 +1,12 @@
 # PQC Fork Verification Log (2026-08-29 ~ 2026-08-30)
 
+> **Current positioning (2026-09-07):** this is a historical run log. The
+> external `pqc-fork-scripts/` paths below are not part of the current checkout.
+> The 14 retained summaries now live under `docs/security/ct-reports/`, and the
+> current integrity gate is `node scripts/check-pqc-cache-timing-evidence.mjs`.
+> Historical "0 leak" wording means only that the recorded statistic stayed
+> below the chosen threshold in that experiment; it is not a security proof.
+>
 > **目的**: paper reviewer 复现依据, 记录 8/29 M6.B OsKeyring 真部署 + 8/30 AES-256-GCM cache-timing 补全 两件 paper-grade work 的验证步骤, 引用 commit hash + 工具 + 关键发现.
 >
 > **范围**: 仅 8/29 + 8/30 这 2 天累计 paper claim 从 26 ops / 127.6K 升到 28 ops / 129.2K 的验证细节. 8/25-8/28 之前的 work 见对应 commit message.
@@ -136,6 +143,7 @@ grep -E '\[PQC\] (unwrap-secret|device-identity)' /tmp/fork-oskeyring-final.log
 ```
 
 **期望输出** (8/29 验证):
+
 ```
 [PQC] unwrap-secret status:ok keyId:wrap-key-2026-08 byteLength:4032
 [PQC] device-identity status:ok identityKey:primary detail:unwrapped stored identity
@@ -147,6 +155,7 @@ grep -E '\[PQC\] (unwrap-secret|device-identity)' /tmp/fork-oskeyring-final.log
 ### 1.5 Composite keyring 描述
 
 Fork 默认 `CompositeKeyring([OsKeyring, FileKeyring])`:
+
 - OS 优先 (active source)
 - File fallback (recovery 备份)
 - OS 失败降级 file, 期间零 downtime
@@ -169,14 +178,15 @@ Fork 默认 `CompositeKeyring([OsKeyring, FileKeyring])`:
 
 ### 2.1 工具 (跟 12 ML algos 同一 protocol)
 
-| 文件 | 作用 |
-|------|------|
-| `pqc-fork-scripts/cache-timing-ct-aesgcm.mjs` | per-process cache miss counter (under valgrind callgrind) |
+| 文件                                                | 作用                                                       |
+| --------------------------------------------------- | ---------------------------------------------------------- |
+| `pqc-fork-scripts/cache-timing-ct-aesgcm.mjs`       | per-process cache miss counter (under valgrind callgrind)  |
 | `pqc-fork-scripts/cache-timing-ct-runner-aesgcm.sh` | K=20 process/class × N=20 ops bash wrapper, 复用 callgrind |
-| `pqc-fork-scripts/cache-timing-ct-driver-aesgcm.sh` | wrap + unwrap 顺序 driver (~26 min total) |
-| `pqc-fork-scripts/start-aesgcm-ct.sh` | nohup background launcher (避免 bash tool 30s timeout) |
+| `pqc-fork-scripts/cache-timing-ct-driver-aesgcm.sh` | wrap + unwrap 顺序 driver (~26 min total)                  |
+| `pqc-fork-scripts/start-aesgcm-ct.sh`               | nohup background launcher (避免 bash tool 30s timeout)     |
 
 **AES-GCM class-bit choices** (跟 ML 系列一致):
+
 - `wrap`: bit 0 of plaintext[0] (per-op fresh IV)
 - `unwrap`: bit 0 of ciphertext[0] (fixed IV, class bit forced after wrap; auth tag fails as expected, bulk AES-CTR work in `update()` before auth check)
 
@@ -210,12 +220,13 @@ tail -3 /tmp/aesgcm-ct-run.log
 
 **JSON 报告** (在 `pqc-fork-scripts/ct-reports/aes_gcm_{wrap,unwrap}/report.json`):
 
-| algo_op | K | max \|t\| | event | leak |
-|---------|---|----------|-------|------|
-| aes_gcm_wrap | 20 | -1.028 | DLmr | ✓ ok |
-| aes_gcm_unwrap | 20 | 1.808 | D1mr | ✓ ok |
+| algo_op        | K   | max \|t\| | event | leak |
+| -------------- | --- | --------- | ----- | ---- |
+| aes_gcm_wrap   | 20  | -1.028    | DLmr  | ✓ ok |
+| aes_gcm_unwrap | 20  | 1.808     | D1mr  | ✓ ok |
 
 **Per-process cache event counts** (mean of K=20/class, 8/30 实测):
+
 - L1 I-miss: 820K (wrap) / 887K (unwrap)
 - L1 D-miss: 400K (wrap) / 445K (unwrap)
 - L1 D-write-miss: 207K (wrap) / 221K (unwrap)
@@ -225,14 +236,14 @@ tail -3 /tmp/aesgcm-ct-run.log
 
 ### 2.4 累计 paper claim (8/30 升级)
 
-| 维度 | 8/29 之前 | 8/30 之后 |
-|------|-----------|-----------|
-| Hot paths × 2 test types 均匀覆盖 | 6 (FIPS 203/204) + AES-GCM 假设 | 7 全部 0 leak |
-| Cache-timing ops | 12 (12 ML) | 14 (12 ML + 2 AES-GCM) |
-| Cache-timing op count | 9.6K | 11.2K (新增 1.6K) |
-| Total ops (user-space + cache-timing) | 127.6K | 129.2K |
-| max \|t\| cache-timing | 1.983 (ML-DSA-44 verify Ir) | 1.983 (旧) / 1.808 (AES-GCM unwrap D1mr, 新) |
-| Threshold | 4.5 | 4.5 |
+| 维度                                  | 8/29 之前                       | 8/30 之后                                    |
+| ------------------------------------- | ------------------------------- | -------------------------------------------- |
+| Hot paths × 2 test types 均匀覆盖     | 6 (FIPS 203/204) + AES-GCM 假设 | 7 全部 0 leak                                |
+| Cache-timing ops                      | 12 (12 ML)                      | 14 (12 ML + 2 AES-GCM)                       |
+| Cache-timing op count                 | 9.6K                            | 11.2K (新增 1.6K)                            |
+| Total ops (user-space + cache-timing) | 127.6K                          | 129.2K                                       |
+| max \|t\| cache-timing                | 1.983 (ML-DSA-44 verify Ir)     | 1.983 (旧) / 1.808 (AES-GCM unwrap D1mr, 新) |
+| Threshold                             | 4.5                             | 4.5                                          |
 
 ### 2.5 Regression guard (防未来 stale)
 
@@ -241,6 +252,7 @@ bash /home/abc/pqc-fork-scripts/check-cache-timing-claims.sh
 ```
 
 **期望输出** (8/30 验证):
+
 ```
 algorithm_op            K     max|t|    event   leak
 ------------------------------------------------------------
@@ -261,15 +273,15 @@ Cumulative paper claim: 14 ops cache-timing 0 leak (threshold |t| < 4.5)
 
 ## 3. 累计 paper claim (8/30 升级最终)
 
-| | 8/29 之前 | 8/30 升级 | 增量 |
-|---|-----------|-----------|------|
-| Hot paths × test types | 6 ML × 2 + AES-GCM × 1 = 13 cells | 7 hot paths × 2 = 14 cells | +1 cell (AES-GCM cache-timing) |
-| Cache-timing ops | 12 (3 ML-DSA × 2 + 3 ML-KEM × 2) | 14 (上面 + 2 AES-GCM) | +2 ops |
-| Cache-timing op count | 9.6K (12 × 800) | 11.2K (14 × 800) | +1.6K ops |
-| **User-space + cache-timing total ops** | 127.6K (40 + 18 + 60 + 9.6) | **129.2K** (40 + 18 + 60 + 11.2) | +1.6K ops |
-| max \|t\| cache-timing | 1.983 (ML-DSA-44 verify Ir) | 1.983 (旧) / 1.808 (AES-GCM unwrap, 新) | 旧 max 不变 |
-| Threshold | 4.5 | 4.5 | — |
-| M6.B deployment | FileKeyring fallback (80%) | **OsKeyring + FileKeyring composite 100%** | +20% |
+|                                         | 8/29 之前                         | 8/30 升级                                  | 增量                           |
+| --------------------------------------- | --------------------------------- | ------------------------------------------ | ------------------------------ |
+| Hot paths × test types                  | 6 ML × 2 + AES-GCM × 1 = 13 cells | 7 hot paths × 2 = 14 cells                 | +1 cell (AES-GCM cache-timing) |
+| Cache-timing ops                        | 12 (3 ML-DSA × 2 + 3 ML-KEM × 2)  | 14 (上面 + 2 AES-GCM)                      | +2 ops                         |
+| Cache-timing op count                   | 9.6K (12 × 800)                   | 11.2K (14 × 800)                           | +1.6K ops                      |
+| **User-space + cache-timing total ops** | 127.6K (40 + 18 + 60 + 9.6)       | **129.2K** (40 + 18 + 60 + 11.2)           | +1.6K ops                      |
+| max \|t\| cache-timing                  | 1.983 (ML-DSA-44 verify Ir)       | 1.983 (旧) / 1.808 (AES-GCM unwrap, 新)    | 旧 max 不变                    |
+| Threshold                               | 4.5                               | 4.5                                        | —                              |
+| M6.B deployment                         | FileKeyring fallback (80%)        | **OsKeyring + FileKeyring composite 100%** | +20%                           |
 
 ---
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # backup-pqc.sh — production backup for the PQC OpenClaw fork.
 #
-# Snapshots the PQC fork state directory (sqlite db, OS keyring cache,
+# Snapshots the PQC fork state directory (sqlite db, file-backed key material,
 # pqc-audit.log, wrap-key.b64 fallback copy) into a timestamped tarball,
 # writes a sha256 sidecar for integrity verification, rotates old
 # backups, and optionally uploads to S3 for off-host storage.
@@ -28,7 +28,7 @@
 #      S3-compatible storage (MinIO, Wasabi, Backblaze B2) via env.
 #
 # Intended to be invoked:
-#   - from a daily cron entry installed by install-pqc.sh:
+#   - from an operator-managed daily cron entry:
 #       0 3 * * * /usr/local/bin/backup-pqc.sh --json >> /var/log/pqc-backup.log 2>&1
 #   - from a systemd timer (see docs/security/OPERATIONS.md §"Backup
 #     schedule" once that doc lands)

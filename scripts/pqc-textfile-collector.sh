@@ -36,7 +36,7 @@
 #   bash scripts/pqc-textfile-collector.sh --textfile-name custom-name.prom
 #   bash scripts/pqc-textfile-collector.sh --help
 #
-# Cron suggestion (install-pqc.sh installs this):
+# Optional cron suggestion (install-pqc.sh installs the wrapper, not this schedule):
 #   */5 * * * * /usr/local/bin/pqc-textfile-collector.sh
 
 set -uo pipefail
