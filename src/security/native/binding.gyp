@@ -9,10 +9,12 @@
       "defines": [ "NAPI_DISABLE_CPP_EXCEPTIONS", "NAPI_VERSION=8" ],
       "cflags!": [ "-fno-exceptions" ],
       "cflags_cc!": [ "-fno-exceptions" ],
+      "cflags_cc": [ "-std=c++17" ],
+      "msvs_settings": {
+        "VCCLCompilerTool": { "AdditionalOptions": [ "/std:c++17" ] }
+      },
       "conditions": [
-        ["OS=='linux'", {
-          "cflags_cc": [ "-std=c++17" ]
-        }]
+        ["OS=='win'", { "defines": [ "NOMINMAX" ] }]
       ]
     }
   ]

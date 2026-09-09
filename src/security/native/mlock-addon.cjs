@@ -84,4 +84,24 @@ module.exports = {
     if (!addon) throw notBuiltError();
     return addon.munlock(buf);
   },
+
+  /** Copy a Buffer into addon-owned locked memory. On Linux the mapping is
+   * also excluded from core dumps with MADV_DONTDUMP. The mapping is zeroed,
+   * unlocked, and released by its native finalizer.
+   * @param {Buffer} buf
+   * @returns {Buffer}
+   */
+  secureCopySync(buf) {
+    if (!addon) throw notBuiltError();
+    return addon.secureCopy(buf);
+  },
+
+  /** Overwrite a Buffer through a native volatile zeroing loop.
+   * @param {Buffer} buf
+   * @returns {number}
+   */
+  secureZeroSync(buf) {
+    if (!addon) throw notBuiltError();
+    return addon.secureMemzero(buf);
+  },
 };

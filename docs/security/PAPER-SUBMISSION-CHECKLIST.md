@@ -10,9 +10,9 @@
 The latest local gate completed:
 
 - `pnpm tsgo:core`;
-- 275 focused Vitest tests across the PQC unit and infrastructure suites;
-- all 18 focused mlock-helper tests;
-- a real Linux native-addon 32-byte `mlock`/`munlock` roundtrip;
+- 277 focused Vitest tests across the PQC unit and infrastructure suites;
+- all 20 focused mlock-helper tests;
+- a real Linux native-addon locked + `MADV_DONTDUMP` mapping roundtrip;
 - five deploy harnesses under `scripts/pqc-e2e/`;
 - a complete isolated `--sandbox-root` install, build, and artifact check; and
 - integrity validation of all 14 checked-in cache-timing reports.
@@ -70,7 +70,9 @@ claiming CI success.
 - "CI is green" while hosted jobs have no runner assignment.
 - "No timing leak" or "verified constant-time" based only on thresholded,
   environment-specific historical measurements.
-- `mlock` prevents core dumps. It protects against swap only.
+- "A plain in-place `mlock` event prevents core dumps." Only the Linux
+  `native-secure-mapping` path applies `MADV_DONTDUMP`; other locking paths
+  protect against swap only.
 - Node 24.15.0 provides `process.mlock`; it does not.
 - The installer automatically writes an OS keyring or a cron entry. Linux uses
   a systemd backup timer; other schedulers remain operator-managed.

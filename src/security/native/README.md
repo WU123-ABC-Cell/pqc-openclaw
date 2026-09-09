@@ -1,18 +1,18 @@
-# M6.B v2 N-API mlock(2) native addon
+# M6.B v2 N-API secure-memory addon
 
-Linux-first N-API addon that calls `mlock(2)` / `munlock(2)` directly
-from native code. This prevents the key buffer's pages from being swapped,
-but does not exclude them from core dumps. Correct `MADV_DONTDUMP` support
-requires an addon-owned page mapping; applying it to ordinary small Node
-Buffers is unsafe because multiple buffers can share one slab page. Used as a
-fallback when `process.mlock` is missing on Node.js 24.x (verified absent on
-Node 24.15.0, 2026-09-04).
+N-API addon for locked wrap-key memory. `secureCopy` allocates a dedicated
+native mapping, locks it before copying the key, applies `MADV_DONTDUMP` where
+the platform exposes it (verified on Linux), and gives Node an external Buffer.
+The native finalizer scrubs, unlocks, and releases the mapping. The older
+`mlock` / `munlock` exports remain for callers that need in-place swap
+protection, but applying dump flags to ordinary small Node Buffers remains
+unsafe because several objects may share one slab page.
 
 ## Build
 
 Pre-requisites on the build host:
 
-- `g++` 11+ (or any C++17 compiler)
+- a C++17 compiler (GCC/Clang or MSVC)
 - `python3` 3.6+ (for `node-gyp`)
 - `make`
 - Node.js headers (downloaded automatically by `node-gyp`)
@@ -28,18 +28,17 @@ npx node-gyp build     --directory=src/security/native
 ```
 
 The compiled binary lands at
-`src/security/native/build/Release/mlock_addon.node` (Linux x64,
-~86 KB, dynamically linked). The `build/` directory is gitignored
-because the binary is host-specific; rebuild after pulling.
+`src/security/native/build/Release/mlock_addon.node`. The `build/` directory is
+gitignored because the binary is host-specific; rebuild after pulling.
 
 ## Runtime path selection
 
 `src/security/mlock-helper.ts` selects the backend in priority order:
 
-1. `process.mlock` / `process.munlock` (Node 24.0.0+ stable API;
-   **NOT present on 24.15.0** — verified 2026-09-04).
-2. This N-API addon (when `build/Release/mlock_addon.node` exists
-   and loads successfully).
+1. For `protectKey`, this addon is preferred because only its separately owned
+   mapping can safely receive dump-exclusion advice.
+2. For legacy in-place `mlockKey`, `process.mlock` / `process.munlock` wins when
+   present, then this addon is tried.
 3. Defensive no-op + single `[PQC] mlock-unavailable` warn per
    process.
 
@@ -51,15 +50,15 @@ status log.
 
 | File                             | Role                                                                                                                       |
 | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `mlock-addon.cc`                 | C++ source: `Mlock` + `Munlock` N-API exports calling `mlock(2)` / `munlock(2)`                                            |
+| `mlock-addon.cc`                 | Cross-platform lock/unlock, dedicated secure allocation, native zeroing, and finalizer cleanup                             |
 | `binding.gyp`                    | `node-gyp` build config; pulls `node-addon-api` headers                                                                    |
 | `mlock-addon.cjs`                | CommonJS wrapper: lazy `require()` of the binary, `isAvailable()` / `loadError()` diagnostics, throws on use without build |
 | `build/Release/mlock_addon.node` | Compiled binary (gitignored)                                                                                               |
 
 ## Platform support
 
-- **Linux x64**: built and tested (Node 24.15.0, 2026-09-05).
-- **macOS / Windows / Linux arm64**: not yet built. The C++ source
-  is portable but the build matrix needs `binding.gyp` updates.
-  Tracked in `docs/security/PAPER-SUBMISSION-CHECKLIST.md`
-  P0 backlog (audit-grade cross-platform).
+- **Linux x64**: secure mapping build and focused lifecycle tests passed on
+  Node 22.23.1 (2026-09-09).
+- **macOS / Windows / Linux arm64**: POSIX and `VirtualAlloc` / `VirtualLock`
+  implementations are present, but native build and runtime validation on
+  those hosts remain audit-grade backlog.

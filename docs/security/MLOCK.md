@@ -1,12 +1,13 @@
 # Wrap-key memory locking
 
-> **Current status (2026-09-07, `d3b940a21e`)**: the Linux native addon
-> builds and completed a real 32-byte `mlock`/`munlock` roundtrip on Node
-> 24.15.0. Node 24.15.0 does not expose `process.mlock`. Backend selection is
-> feature-based, not Node-version-based.
+> **Current status (2026-09-09)**: the Linux x64 native addon builds on Node
+> 22.23.1, and its dedicated 32-byte secure-mapping path passed focused keyring
+> lifecycle tests. Node 24.15.0 does not expose `process.mlock`. Backend
+> selection is feature-based, not Node-version-based.
 
-This document describes swap protection for cached wrap keys and its explicit
-limitations. `mlock(2)` does **not** provide core-dump exclusion.
+This document describes swap and core-dump protection for cached wrap keys and
+its explicit limitations. `mlock(2)` alone does **not** provide core-dump
+exclusion; Linux needs `MADV_DONTDUMP` on a dedicated mapping.
 
 ## 1. Threat model
 
@@ -18,25 +19,26 @@ exposure paths include:
 - privileged process-memory inspection; and
 - physical-memory attacks.
 
-The current Linux native backend calls `mlock(2)` to reduce swap exposure and
-`munlock(2)` when a cached key is released. It does not set `VM_DONTDUMP`, so it
-does not claim to protect against core dumps. Safe `MADV_DONTDUMP` support needs
-an addon-owned, page-aligned mapping; applying it to an ordinary Node Buffer
-could affect unrelated objects sharing the same slab page.
+The native backend now allocates a dedicated mapping, locks it before copying
+the decoded key, and applies `MADV_DONTDUMP` on Linux. The original Node Buffer
+is scrubbed immediately after the copy. A native finalizer scrubs, unlocks, and
+unmaps the allocation. This avoids applying page-wide advice to ordinary Node
+slabs, where unrelated objects could share the same page.
 
 ## 2. Backend selection
 
 `src/security/mlock-helper.ts` detects a backend once per process:
 
-1. a future runtime-provided `process.mlock` / `process.munlock` pair;
-2. the checked-in Linux native addon at
-   `src/security/native/mlock-addon.cjs`; or
+1. `protectKey()` prefers the checked-in native addon and its dedicated secure
+   mapping;
+2. legacy in-place locking uses a runtime `process.mlock` pair when present,
+   otherwise the addon; or
 3. a warned no-op when neither backend is available.
 
 | Runtime state             | Behavior                                       |
 | ------------------------- | ---------------------------------------------- |
-| Runtime API available     | use the runtime API                            |
-| Built Linux addon         | use native `mlock(2)` / `munlock(2)`           |
+| Built native addon        | use addon-owned locked mapping for wrap keys   |
+| Runtime API only          | use in-place runtime locking without dump flag |
 | Neither backend available | continue, emit one `mlock-unavailable` warning |
 
 The helper is deliberately best-effort: locking failures do not break normal
@@ -45,11 +47,12 @@ reviewed deployment policy; there is no `PQC_REQUIRE_MLOCK` runtime switch.
 
 ## 3. Key lifecycle
 
-`FileKeyring` and `OsKeyring` lock a decoded key after caching it. Their release
-paths first detach the cached reference, zero the Buffer with `fill(0)`, then
-attempt `munlock`. `CompositeKeyring.release()` releases each inner provider on
-a best-effort basis, and the default keyring is also released by the process
-exit hook.
+`FileKeyring`, `EnvKeyring`, and `OsKeyring` move decoded keys into protected
+native mappings when the addon is available. The source Buffer is scrubbed
+immediately. Cached providers detach their reference and zero the external
+Buffer on release; the native finalizer repeats the scrub before unmapping.
+`CompositeKeyring.release()` releases each inner provider on a best-effort
+basis, and the default keyring is also released by the process exit hook.
 
 Lifecycle ownership performs one release for each cached Buffer. Do not rely on
 per-caller kernel reference counting for repeated or overlapping locks,
@@ -63,8 +66,9 @@ especially with slab-backed Node Buffers.
 | `munlock`           | the release path attempted an unlock (debug)                    |
 | `mlock-unavailable` | neither backend could provide locking (warned once per process) |
 
-An `mlock` success means swap locking succeeded for the supplied range. It is
-not evidence of core-dump exclusion.
+`backend=native-secure-mapping` means a dedicated mapping was locked and, on
+Linux, accepted `MADV_DONTDUMP`. A plain `backend=native` or `backend=process`
+event proves only in-place swap locking.
 
 ## 5. Verification
 
@@ -74,19 +78,21 @@ From the repository root on Linux:
 pnpm build:native
 node - <<'NODE'
 const addon = require("./src/security/native/mlock-addon.cjs");
-const key = Buffer.alloc(32, 0x41);
+const source = Buffer.alloc(32, 0x41);
 if (!addon.isAvailable()) throw new Error("native mlock addon unavailable");
-addon.mlock(key);
-key.fill(0);
-addon.munlock(key);
-console.log("native 32-byte mlock/munlock roundtrip: OK");
+const key = addon.secureCopySync(source);
+addon.secureZeroSync(source);
+if (!key.equals(Buffer.alloc(32, 0x41))) throw new Error("copy mismatch");
+addon.secureZeroSync(key);
+if (!key.equals(Buffer.alloc(32))) throw new Error("scrub mismatch");
+console.log("native 32-byte secure mapping roundtrip: OK");
 NODE
 
 node scripts/run-vitest.mjs run src/security/mlock-helper.test.ts
 ```
 
-The 2026-09-07 local gate passed all 18 focused mlock-helper tests and the
-native 32-byte roundtrip. The wider focused PQC gate passed 275 tests. These
+The 2026-09-09 local gate passed all 20 focused mlock-helper tests, 86 focused
+key lifecycle tests, and the native build on Linux x64 / Node 22.23.1. These
 local results do not imply that hosted GitHub Actions ran successfully.
 
 The healthcheck probes the runtime API first and the native addon second:
@@ -101,12 +107,19 @@ service and account values instead.
 
 ## 6. Deployment requirements and limitations
 
-- Linux builds need the native addon built with `pnpm build:native`.
-- `RLIMIT_MEMLOCK` and host policy can still make `mlock(2)` fail.
+- Deployments need the native addon built with `pnpm build:native`.
+- Lock limits and host policy can still make `mlock(2)` / `VirtualLock` fail.
 - Node 24.15.0 has no `process.mlock`; upgrading Node alone does not activate
   locking.
-- macOS, Windows, and Linux arm64 backend/build validation remain backlog.
-- addon-owned secure allocation plus core-dump exclusion remains backlog.
+- macOS, Windows, and Linux arm64 build/runtime validation remain backlog.
+- Linux core-dump exclusion is enabled only for addon-owned mappings; fallback
+  buffers and platforms without an equivalent dump-exclusion flag retain the
+  documented limitation.
+- File, environment, and OS-keyring adapters must first materialize base64url
+  key text as immutable JavaScript strings. Those encoded copies, plus any
+  internal copy held by the crypto runtime, cannot be reliably scrubbed by this
+  addon; the guarantee covers the decoded working Buffer owned by the built-in
+  providers.
 - root or same-user process-memory access, cold-boot attacks, EM/power analysis,
   and fault injection are outside this control's guarantee.
 

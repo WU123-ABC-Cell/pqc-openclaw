@@ -1,7 +1,7 @@
 # PQC OpenClaw Fork
 
 > **Post-quantum hardened** OpenClaw with side-channel-resilient
-> cryptographic primitives, best-effort mlock-pinned wrap keys, and paper-grade
+> cryptographic primitives, best-effort secure-memory wrap keys, and paper-grade
 > verification of every claim.
 
 [![CI: side-channel](https://github.com/WU123-ABC-Cell/pqc-openclaw/actions/workflows/pqc-side-channel.yml/badge.svg?branch=master)](.github/workflows/pqc-side-channel.yml)
@@ -23,10 +23,12 @@ by [@WU123-ABC-Cell](https://github.com/WU123-ABC-Cell).
   Ed25519 fallback for legacy clients.
 - **Post-quantum KEM**: `ml-kem-768` (NIST FIPS 203) and `ml-kem-512`,
   `ml-kem-1024` for hybrid KEX.
-- **Best-effort wrap-key RAM pinning**: on supported Linux builds, the native
-  addon calls `mlock(2)` for the 32-byte cached wrap key. This protects against
-  swap, not core dumps. The production installer provisions a mode-0600 file;
-  OS-keyring migration is an explicit operator step. See
+- **Best-effort secure wrap-key memory**: on supported builds, the native addon
+  moves decoded keys into dedicated locked mappings, scrubs the source, and
+  scrubs again before release. Linux mappings also use `MADV_DONTDUMP`. The
+  production installer provisions a mode-0600 file; OS-keyring migration is an
+  explicit operator step. Immutable encoded JS strings and crypto-runtime
+  internal copies remain outside this guarantee. See
   [docs/security/MLOCK.md](docs/security/MLOCK.md).
 - **Constant-time crypto path**: every primitive is from
   [@noble/post-quantum](https://github.com/paulmillr/noble-post-quantum)
@@ -34,10 +36,10 @@ by [@WU123-ABC-Cell](https://github.com/WU123-ABC-Cell).
   [docs/security/constant-time-audit.md](docs/security/constant-time-audit.md).
 - **Empirically checked**: 14 checked-in cache-timing reports pass the
   integrity gate (`max |t| = 1.983`, threshold 4.5). The latest local gate also
-  passed 275 focused tests, five deploy harnesses, a native 32-byte
-  mlock/munlock roundtrip, and a complete sandbox install. The historical
-  campaign covered 28 user-space/cache-hierarchy measurements and 129,200
-  trials; these are separate evidence layers, not one combined test count.
+  passed 277 focused tests, five deploy harnesses, a native locked +
+  `MADV_DONTDUMP` mapping roundtrip, and a complete sandbox install. The
+  historical campaign covered 28 user-space/cache-hierarchy measurements and
+  129,200 trials; these are separate evidence layers, not one combined test count.
 
 ## What you do NOT get (yet)
 
@@ -95,7 +97,7 @@ Full examples live in [`examples/`](examples/).
 ```
 .
 ├── src/security/           PQC keyring, mlock, wrap key, audit log
-│   ├── mlock-helper.ts    process hook + Linux native-addon fallback
+│   ├── mlock-helper.ts    secure mapping + runtime/native lock fallback
 │   ├── os-keyring.ts      libsecret (Linux) / Keychain (macOS)
 │   ├── keyring-provider.ts CompositeKeyring (OS primary + file fallback)
 │   └── ...

@@ -2,7 +2,7 @@
 
 **作者:** 吴昊天
 **日期:** 2026 年 9 月 1 日
-**最近更新:** 2026-09-07 文档真值校准，当前 master `d3b940a21e`。14 份 checked-in cache-timing 报告是 2026-08 的历史测量；记录环境下 `max |t| = 1.983 < 4.5`，表示未观察到超过阈值的统计差异，不构成 constant-time 证明。当前 Linux native addon 已完成真实 32-byte `mlock`/`munlock` roundtrip；`mlock` 只防 swap，不防 core dump。默认 installer 使用 0600 file-backed key，OS keyring migration 需要 operator 显式完成。
+**最近更新:** 2026-09-09 secure-memory 真值校准。14 份 checked-in cache-timing 报告是 2026-08 的历史测量；记录环境下 `max |t| = 1.983 < 4.5`，表示未观察到超过阈值的统计差异，不构成 constant-time 证明。Linux x64 native addon 已在 Node 22.23.1 通过 addon-owned locked mapping 测试，并对该 mapping 应用 `MADV_DONTDUMP`；普通 Buffer 的 in-place `mlock` 仍只防 swap。默认 installer 使用 0600 file-backed key，OS keyring migration 需要 operator 显式完成。
 
 ---
 
@@ -63,7 +63,7 @@
 
 **累计 side-channel 历史证据 (2026-08-30 测量)**: 7 hot paths (AES-256-GCM + ML-DSA 44/65/87 + ML-KEM 512/768/1024) × 28 user-space/cache-hierarchy measurements，累计 129.2K trials。记录环境下没有统计量超过 `|t| = 4.5` 阈值；该结论只适用于这次固定测量，不证明实现恒定时间。详见 §6.3 + §9.1.2。
 
-**M6.B v2 mlock 当前状态**: `src/security/mlock-helper.ts` 按 feature detection 选择 future process API、Linux native addon 或 warned no-op。Node 24.15.0 没有 `process.mlock`；当前可用路径是已验证的 Linux native addon。`FileKeyring` / `OsKeyring` release 会断开 cache、清零 Buffer，再尝试 `munlock`。此控制只降低 swap 暴露，不提供 core-dump exclusion；后者需要 addon-owned page mapping。详见 `MLOCK.md`。
+**M6.B v2 secure-memory 当前状态**: `src/security/mlock-helper.ts` 优先将 `FileKeyring` / `EnvKeyring` / `OsKeyring` 的解码结果复制到 addon-owned locked mapping，随后立即清零源 Buffer；Linux mapping 还设置 `MADV_DONTDUMP`，native finalizer 负责再次清零、解锁和释放。Node 24.15.0 没有 `process.mlock`；addon 不可用时保持 warned best-effort fallback。详见 `MLOCK.md`。
 
 **M12 v3 优化（2026-08-19 commit `f89f296687`）**: keyring 激活从"wizard 9 次 restart"简化为"设两个 env var"，fork 启动时间从 167s 降至 6-9s（17-28x speedup, warm ~6.2s / cold ~9.5s; 2026-08-22 用 `measure-startup.sh` 实测, 之前 commit message 写的 "1.7s" 是测量误差），且**不降低安全性**（fail-closed 保留, FileKeyring class `cachedKey` 复用）。详见 §2.2.5.A 末尾。
 
@@ -695,7 +695,7 @@ bash pqc-fork-scripts/cache-timing-ct-driver-aesgcm.sh 20 20
   - ✅ **已完成 (M12 v3, commit `f89f296687`)**: FileKeyring instance cache + env auto-inject — 启动时间 167s → 6-9s (17-28x, warm 6.2s / cold 9.5s), 不需要 `secrets configure` wizard, +9 invariants
   - ✅ **已完成 (c5ebf37846)**: sdk-alias 双 dist bug source fix — `openclaw-root.ts` 加 `BUILD_ARTIFACT_DIRS` 跳过 dist/src/build/out/lib, workaround `fix-plugin-runtime-symlink.sh` 全去掉 (archived `pqc-fork-scripts/archive/2026-08-25/`)
   - ✅ **已完成 (21bc128b6b)**: M6.B OsKeyring 真实现 — `@napi-rs/keyring` 1.3.0 动态加载 + `migrate-oskeyring.mjs` + composite keyring (os primary + file fallback)
-  - ✅ Linux native addon 已验证 `mlock`/`munlock` swap protection；addon-owned secure mapping、core-dump exclusion、Linux arm64/macOS/Windows backend/build validation 仍是 backlog
+  - ✅ Linux x64 addon-owned secure mapping 已验证 lock + `MADV_DONTDUMP` + native scrub/finalizer 路径；Linux arm64/macOS/Windows build/runtime validation 仍是 backlog
   - 签名/验签 cache 减少重复计算
 - 旁路测试:
   - ✅ **已完成 (2026-08-25)**: dudect-style 软件层 timing test — 40K ops, |t| < 1, 0 leak. 报告 `pqc-fork-scripts/sidechannel-report.json`.

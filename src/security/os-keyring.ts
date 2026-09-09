@@ -14,7 +14,7 @@
 // this module, and the type would pull this file in at parse time.
 
 import { createRequire } from "node:module";
-import { mlockKey, munlockKey } from "./mlock-helper.js";
+import { munlockKey, protectKey } from "./mlock-helper.js";
 
 export type ActiveWrappingKey = {
   key: Buffer;
@@ -147,8 +147,7 @@ export class OsKeyring implements KeyringProvider {
       );
     }
     const key = decodeKeyMaterial(password, `os:${this.service}/${this.account}`);
-    this.cachedKey = key;
-    mlockKey(this.cachedKey, `os:${this.service}/${this.account}`);
+    this.cachedKey = protectKey(key, `os:${this.service}/${this.account}`);
     return { key: this.cachedKey, keyId: this.keyId };
   }
 
@@ -174,8 +173,7 @@ export class OsKeyring implements KeyringProvider {
     try {
       const password = this.entry.getPassword();
       const key = decodeKeyMaterial(password, `os:${this.service}/${this.account}`);
-      this.cachedKey = key;
-      mlockKey(this.cachedKey, `os:${this.service}/${this.account}`);
+      this.cachedKey = protectKey(key, `os:${this.service}/${this.account}`);
       return this.cachedKey;
     } catch {
       return null;
@@ -188,8 +186,12 @@ export class OsKeyring implements KeyringProvider {
    *  interface — only callers that already know they are talking
    *  to an OsKeyring should call this. */
   setKeyBase64Url(base64urlKey: string): void {
-    decodeKeyMaterial(base64urlKey, "setKeyBase64Url input");
-    this.entry.setPassword(base64urlKey);
+    const validationCopy = decodeKeyMaterial(base64urlKey, "setKeyBase64Url input");
+    try {
+      this.entry.setPassword(base64urlKey);
+    } finally {
+      validationCopy.fill(0);
+    }
   }
 
   /** Migration / rotation helper: delete the entry. */

@@ -12,9 +12,9 @@
 // still exposed.
 //
 // mlock(2) tells the kernel to keep a buffer in physical RAM (never
-// swap to disk). It does not exclude the pages from core dumps. Safe core-dump
-// exclusion needs an addon-owned page mapping rather than a shared Node slab;
-// that work is deliberately separate from this swap-protection helper.
+// swap to disk). It does not exclude ordinary Node heap pages from core dumps.
+// protectKey() therefore prefers a separately owned native mapping that can be
+// locked, excluded from Linux core dumps, and scrubbed before it is released.
 //
 // Three runtime paths, in priority order:
 //   1. `process.mlock` / `process.munlock` stable (Node >= 24.0.0
@@ -22,11 +22,9 @@
 //      in that build (the API was reverted/removed before 24.x
 //      shipped). On future Node 24.x / 25.x+ builds where the API
 //      returns, this path wins without code changes.
-//   2. N-API native addon (./native/mlock-addon) that calls
-//      `mlock(2)` directly. Linux-only first cut. Built via
-//      `pnpm run build:native`. Used when `process.mlock` is missing
-//      but the operator has compiled the addon. This is the
-//      M6.B v2 path documented in the PQC whitepaper §6.3 v2.
+//   2. N-API native addon (./native/mlock-addon) backed by mlock(2) on
+//      POSIX and VirtualLock on Windows. Built via `pnpm run build:native`.
+//      protectKey() also uses this addon for separately owned mappings.
 //   3. Defensive no-op with a single [PQC] mlock-unavailable warn
 //      per process. Behavior preserved across Node versions and
 //      builds, so production never throws from the wrap/unwrap path.
@@ -183,6 +181,54 @@ export function mlockKey(buf: Buffer | null | undefined, label: string): void {
         `(e.g. 'ulimit -l unlimited' as root, or grant CAP_IPC_LOCK).`,
     } satisfies PqcLogPayload);
   }
+}
+
+/**
+ * Move key material into an addon-owned secure mapping when available.
+ *
+ * The native mapping is locked before the copy, excluded from Linux core dumps,
+ * and zeroed/unlocked/unmapped by its native finalizer. The short-lived source
+ * Buffer is zeroed immediately after a successful copy. Hosts without a built
+ * addon retain the existing in-place mlock/no-op behavior.
+ */
+export function protectKey(buf: Buffer, label: string): Buffer {
+  if (!Buffer.isBuffer(buf) || buf.length === 0 || buf.length > MAX_MLOCK_BYTES) {
+    mlockKey(buf, label);
+    return buf;
+  }
+  if (nativeAddon.isAvailable()) {
+    let secure: Buffer;
+    try {
+      secure = nativeAddon.secureCopySync(buf);
+    } catch (error) {
+      pqcLog.warn(PQC_EVENT.Mlock, {
+        status: "fail",
+        provider: label,
+        byteLength: buf.length,
+        detail: `secure mapping allocation failed; falling back to in-place mlock: ${(error as Error).message}`,
+      } satisfies PqcLogPayload);
+      mlockKey(buf, label);
+      return buf;
+    }
+
+    // Once the protected copy exists, never fall back to the source. Even if
+    // the native scrub unexpectedly fails, Buffer.fill still clears the JS
+    // allocation before it can remain as a second live copy.
+    try {
+      nativeAddon.secureZeroSync(buf);
+    } catch {
+      buf.fill(0);
+    }
+    pqcLog.debug(PQC_EVENT.Mlock, {
+      status: "ok",
+      provider: `${label} (backend=native-secure-mapping)`,
+      byteLength: secure.length,
+      detail: `${process.platform}/${process.arch} node=${process.version}`,
+    } satisfies PqcLogPayload);
+    return secure;
+  }
+  mlockKey(buf, label);
+  return buf;
 }
 
 /**

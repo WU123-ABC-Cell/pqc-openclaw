@@ -254,18 +254,23 @@ describe("EnvKeyring (whitepaper 2.2.5 — env backend)", () => {
     expect(() => ring.getActiveKey()).toThrow(/not set/);
   });
 
-  it("re-reads the env var on every call (no cache)", () => {
+  it("reuses one protected mapping until the env value rotates", () => {
     const key = newKey();
     const envStore: NodeJS.ProcessEnv = {};
     envStore.OPENCLAW_TEST_KEY = encodeBase64UrlKey(key);
     const ring = new EnvKeyring("OPENCLAW_TEST_KEY", envStore, "wrap-key");
     const first = ring.getActiveKey();
     expect(first.key).toEqual(key);
+    expect(ring.getActiveKey().key).toBe(first.key);
     // Rotate the env var.
     const rotated = newKey();
     envStore.OPENCLAW_TEST_KEY = encodeBase64UrlKey(rotated);
     const second = ring.getActiveKey();
     expect(second.key).toEqual(rotated);
+    expect(second.key).not.toBe(first.key);
+    expect(first.key).toEqual(Buffer.alloc(32));
+    ring.release();
+    expect(second.key).toEqual(Buffer.alloc(32));
   });
 
   it("rejects an empty env name at construction", () => {

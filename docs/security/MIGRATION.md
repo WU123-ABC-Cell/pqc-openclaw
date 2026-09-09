@@ -45,9 +45,10 @@ client-facing API surface. The differences are entirely
    statistically significant difference under the recorded setup (`|t| < 4.5`).
    They are historical measurements, not proof of constant-time behavior.
 4. **Wrap key**: the installer writes `$STATE_DIR/wrap-key.b64` with mode 0600;
-   OS-keyring migration is explicit. On supported Linux builds the native addon
-   can call `mlock(2)`. This reduces swap exposure but does not exclude the key
-   from core dumps or process memory inspection.
+   OS-keyring migration is explicit. On supported builds the native addon moves
+   the decoded key into a dedicated locked mapping and scrubs the source. Linux
+   also applies `MADV_DONTDUMP`; privileged process-memory inspection remains
+   outside this control.
 
 If you do not need any of those, you do not need to migrate.
 

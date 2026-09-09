@@ -1,8 +1,8 @@
 name: PQC side-channel
 
 # This workflow has two explicit guarantees:
-# 1. the Linux N-API mlock backend builds, loads, and completes a real
-#    mlock(2)/munlock(2) round trip; and
+# 1. the Linux N-API secure-memory backend builds, loads, and completes a real
+#    addon-owned mapping copy/scrub round trip; and
 # 2. every checked-in cache-timing evidence report still satisfies the
 #    published threshold. The evidence check is an integrity gate, not a fresh
 #    timing measurement of the current runner.
@@ -23,7 +23,7 @@ concurrency:
 
 jobs:
   native-mlock:
-    name: Linux native mlock backend
+    name: Linux native secure-memory backend
     runs-on: ubuntu-24.04
     timeout-minutes: 15
 
@@ -42,20 +42,51 @@ jobs:
       - name: Build native addon
         run: pnpm build:native
 
-      - name: Require a real mlock round trip
+      - name: Require a real secure-mapping round trip
         run: |
-          node <<'NODE'
+          node --expose-gc <<'NODE'
+          (async () => {
           const addon = require("./src/security/native/mlock-addon.cjs");
           if (!addon.isAvailable()) {
             throw new Error(`native addon unavailable: ${addon.loadError()}`);
           }
-          const key = Buffer.alloc(32, 0x5a);
-          const locked = addon.mlockSync(key);
-          const unlocked = addon.munlockSync(key);
-          if (locked !== key.length || unlocked !== key.length) {
-            throw new Error(`unexpected native result: locked=${locked}, unlocked=${unlocked}`);
+          const fs = require("node:fs");
+          const lockedKiB = () => Number(/VmLck:\s+(\d+) kB/.exec(
+            fs.readFileSync("/proc/self/status", "utf8"))?.[1] ?? -1);
+          const lockedBefore = lockedKiB();
+          const source = Buffer.alloc(64 * 1024, 0x5a);
+          let key = addon.secureCopySync(source);
+          if (key === source || !key.equals(source)) {
+            throw new Error("secure mapping did not create an equal external Buffer");
           }
-          console.log("native mlock backend completed a 32-byte round trip");
+          if (lockedKiB() !== lockedBefore + 64) {
+            throw new Error("secure mapping did not add exactly 64 KiB of locked memory");
+          }
+          addon.secureZeroSync(source);
+          addon.secureZeroSync(key);
+          if (!source.equals(Buffer.alloc(source.length)) || !key.equals(Buffer.alloc(key.length))) {
+            throw new Error("native secure zero failed");
+          }
+          const mapping = fs.readFileSync("/proc/self/smaps", "utf8")
+            .split(/\n(?=[0-9a-f]+-[0-9a-f]+)/)
+            .find((entry) =>
+              /Locked:\s+64 kB/.test(entry) &&
+              /VmFlags:.*\blo\b/.test(entry) &&
+              /VmFlags:.*\bdd\b/.test(entry));
+          if (!mapping) throw new Error("locked DONTDUMP mapping not found");
+          key = null;
+          for (let attempt = 0; attempt < 10 && lockedKiB() !== lockedBefore; attempt += 1) {
+            global.gc();
+            await new Promise((resolve) => setImmediate(resolve));
+          }
+          if (lockedKiB() !== lockedBefore) {
+            throw new Error("native finalizer did not release the locked mapping");
+          }
+          console.log("native secure-memory mapping has lo + dd flags; copy/scrub passed");
+          })().catch((error) => {
+            console.error(error);
+            process.exitCode = 1;
+          });
           NODE
 
       - name: Run mlock helper tests with the addon present

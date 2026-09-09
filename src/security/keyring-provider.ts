@@ -25,7 +25,7 @@
 import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
-import { mlockKey, munlockKey } from "./mlock-helper.js";
+import { munlockKey, protectKey } from "./mlock-helper.js";
 import { OsKeyring } from "./os-keyring.js";
 
 /** Stable id of a keyring entry. The wrap envelope records this id so
@@ -148,11 +148,8 @@ export class FileKeyring implements KeyringProvider {
     }
     const raw = readFileSync(this.keyPath, "utf8").trim();
     const key = decodeBase64UrlKey(raw, `file:${this.keyPath}`);
-    this.cachedKey = key;
-    // mlock: lock the wrap key in physical RAM. No-op on Node < 24.0.0.
-    // PQC whitepaper §6.3 v2 (2026-09-01 follow-up).
-    mlockKey(this.cachedKey, `file:${this.keyPath}`);
-    return key;
+    this.cachedKey = protectKey(key, `file:${this.keyPath}`);
+    return this.cachedKey;
   }
 
   /** Drop the in-memory cache. Used by M7 rotation after the file
@@ -176,10 +173,13 @@ export class FileKeyring implements KeyringProvider {
 
 /** Environment-variable-backed keyring. Reads a base64url-encoded
  *  32-byte key from `process.env[name]`. Intended for CI / container
- *  deployments; the variable is read on every `getActiveKey` call so
- *  a parent process can rotate the key by re-exporting the env var
- *  and re-instantiating the keyring (no in-memory cache). */
+ *  deployments. The current encoded value is compared on every call so an
+ *  injected env object can rotate in place, while repeated reads reuse one
+ *  protected mapping instead of consuming one locked page per operation. */
 export class EnvKeyring implements KeyringProvider {
+  private cachedEncoded: string | null = null;
+  private cachedKey: Buffer | null = null;
+
   constructor(
     private readonly envName: string,
     private readonly env: NodeJS.ProcessEnv = process.env,
@@ -209,7 +209,29 @@ export class EnvKeyring implements KeyringProvider {
           `set it to a base64url-encoded 32-byte AES-256 key`,
       );
     }
-    return decodeBase64UrlKey(raw, `env:${this.envName}`);
+    if (this.cachedKey && this.cachedEncoded === raw) {
+      return this.cachedKey;
+    }
+    const key = decodeBase64UrlKey(raw, `env:${this.envName}`);
+    const protectedKey = protectKey(key, `env:${this.envName}`);
+    const previous = this.cachedKey;
+    this.cachedEncoded = raw;
+    this.cachedKey = protectedKey;
+    if (previous) {
+      previous.fill(0);
+      munlockKey(previous, `env:${this.envName}`);
+    }
+    return protectedKey;
+  }
+
+  release(): void {
+    const key = this.cachedKey;
+    this.cachedEncoded = null;
+    this.cachedKey = null;
+    if (key) {
+      key.fill(0);
+      munlockKey(key, `env:${this.envName}`);
+    }
   }
 }
 

@@ -12,6 +12,12 @@ declare const nativeAddon: {
 
   /** Release a Buffer with munlock(2), returning the unlocked byte count. */
   munlockSync(buf: Buffer): number;
+
+  /** Copy into addon-owned, locked memory with native finalizer cleanup. */
+  secureCopySync(buf: Buffer): Buffer;
+
+  /** Zero a Buffer using a native non-optimizable overwrite. */
+  secureZeroSync(buf: Buffer): number;
 };
 
 export = nativeAddon;

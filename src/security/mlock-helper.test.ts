@@ -21,9 +21,11 @@ import {
   mlockKey,
   munlockKey,
   mlockBackend,
+  protectKey,
   __resetMlockCacheForTests,
   MAX_MLOCK_BYTES,
 } from "./mlock-helper.js";
+import nativeAddon from "./native/mlock-addon.cjs";
 
 interface CapturedEvent {
   level: LogLevel;
@@ -59,6 +61,23 @@ describe("mlock-helper (defensive path on Node 22)", () => {
   it("mlockKey on a 32-byte Buffer does not throw, regardless of Node version", () => {
     const buf = Buffer.alloc(32, 0xab);
     expect(() => mlockKey(buf, "test:32")).not.toThrow();
+  });
+
+  it("protectKey preserves bytes and zeroes the source when secure mapping is available", () => {
+    const source = Buffer.alloc(32, 0xa5);
+    const protectedKey = protectKey(source, "test:protect");
+    expect(protectedKey).toEqual(Buffer.alloc(32, 0xa5));
+    if (protectedKey !== source) {
+      expect(source).toEqual(Buffer.alloc(32));
+      const ok = captured.find(
+        (event) =>
+          event.event === PQC_EVENT.Mlock &&
+          event.payload.provider === "test:protect (backend=native-secure-mapping)",
+      );
+      expect(ok?.payload.status).toBe("ok");
+    }
+    protectedKey.fill(0);
+    munlockKey(protectedKey, "test:protect");
   });
 
   it("mlockKey is a no-op for empty Buffer", () => {
@@ -187,6 +206,14 @@ describe("mlock-helper N-API native addon (M6.B v2 path 2)", () => {
   // on a host where it has not, they no-op (the M6.B v2 path is
   // additive — the helper still works on the existing process or
   // no-op path).
+
+  it("native secureCopy rejects allocations above the helper limit", () => {
+    if (!nativeAddon.isAvailable()) {
+      return;
+    }
+    const oversized = Buffer.alloc(MAX_MLOCK_BYTES + 1);
+    expect(() => nativeAddon.secureCopySync(oversized)).toThrow(/exceeds 1 MiB limit/);
+  });
 
   it("native backend emits a mlock-ok debug event with backend=native", () => {
     if (mlockBackend() !== "native") {

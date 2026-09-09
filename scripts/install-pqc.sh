@@ -2,7 +2,8 @@
 # install-pqc.sh — one-command install for the PQC OpenClaw fork (production).
 #
 # This script provisions a supported Node.js runtime when needed,
-# installs pnpm + the fork's dependencies, builds the dist tree,
+# installs pnpm + the fork's dependencies, builds the dist tree and native
+# secure-memory addon,
 # provisions a file-backed fresh 32-byte wrap key, renders a Linux systemd
 # unit, and creates the gateway-token environment file. It is idempotent:
 # re-running after a
@@ -60,7 +61,7 @@ OPTIONS
   --service-user USER   System user for the service.   [default: pqc-openclaw]
   --sandbox-root PATH   Install and build inside an empty 0700 test root.
   --skip-keyring        Skip wrap-key file provisioning.
-  --skip-build          Skip pnpm build (use existing dist/).
+  --skip-build          Skip dist and native-addon builds (use existing output).
   --skip-systemd        Skip systemd unit install.
   --skip-backup-timer   Render no daily backup service/timer.
   --help                Show this message.
@@ -79,6 +80,7 @@ REQUIREMENTS
   - Linux (Ubuntu 22.04+), macOS 13+, or WSL2 Ubuntu
   - root for a production install (system user, /opt, /usr/local, systemd)
   - Internet access (for Node + pnpm download)
+  - python3, make, and a C++17 compiler (unless --skip-build)
 
 POST-INSTALL
   On Linux the script writes the systemd unit and gateway-token env file.
@@ -128,6 +130,12 @@ esac
 for tool in curl git tar; do
   command -v "$tool" >/dev/null 2>&1 || die "missing required tool: $tool"
 done
+if [[ $SKIP_BUILD -eq 0 ]]; then
+  for tool in python3 make; do
+    command -v "$tool" >/dev/null 2>&1 || die "missing native-build tool: $tool (required unless --skip-build)"
+  done
+  command -v c++ >/dev/null 2>&1 || die "missing C++17 compiler: c++ (required unless --skip-build)"
+fi
 
 SOURCE_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || die "run this installer from a Git checkout"
 SOURCE_ROOT=$(cd "$SOURCE_ROOT" && pwd -P)
@@ -278,12 +286,13 @@ log "step 4/6: pnpm install"
 # ----------------------------------------------------------------------
 
 if [[ $SKIP_BUILD -eq 0 ]]; then
-  log "step 5/6: pnpm build"
+  log "step 5/6: pnpm build + native secure-memory addon"
   (
     cd "$INSTALL_ROOT"
     pnpm run build
-  ) || die "pnpm build failed"
-  ok "dist tree built"
+    pnpm run build:native
+  ) || die "build failed (native addon requires python3, make, and a C++17 compiler)"
+  ok "dist tree and native secure-memory addon built"
 else
   ok "build skipped (--skip-build)"
 fi

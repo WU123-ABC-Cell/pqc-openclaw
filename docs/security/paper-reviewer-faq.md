@@ -37,9 +37,11 @@
 
 ## Q4: wrap key 的内存保护现在是什么状态?
 
-**A**: Linux swap protection 已通过 native addon 实现，并在 Node 24.15.0 上完成真实 32-byte `mlock`/`munlock` roundtrip。Node 24.15.0 本身没有 `process.mlock`。`FileKeyring` 和 `OsKeyring` release 会先断开 cache、清零 Buffer，再尝试 `munlock`。
+**A**: Linux x64 上的 addon-owned secure mapping 已在 Node 22.23.1 构建并通过 focused lifecycle tests。它在复制前锁定独立 mapping，Linux 上设置 `MADV_DONTDUMP`，立即清零源 Buffer，并在 native finalizer 中再次清零、解锁、释放。Node 24.15.0 本身没有 `process.mlock`。
 
-`mlock` 不会排除 core dump。addon-owned、page-aligned secure allocation 与 core-dump exclusion，以及 Linux arm64/macOS/Windows backend/build 验证仍是 backlog。
+普通 Buffer 上的 `mlock` 仍然只防 swap；只有日志标记 `backend=native-secure-mapping` 的 Linux 独立 mapping 才包含 core-dump exclusion。Linux arm64/macOS/Windows build/runtime 验证仍是 backlog。
+
+此保证覆盖 built-in provider 的 decoded working Buffer，不覆盖无法可靠清零的 base64url JavaScript string，也不声称控制 OpenSSL 内部 cipher-context copy 或第三方自定义 key provider。
 
 ## Q5: AES-GCM 走 OpenSSL 3.x FIPS 140-3 validated path, 还能信 cache-timing 0 leak?
 
