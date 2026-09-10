@@ -7,12 +7,12 @@ side-channel evidence to OpenClaw. It is maintained independently from
 
 ## Current snapshot
 
-The 2026-09-07 baseline at `d3b940a21e` passed locally:
+The 2026-09-10 baseline passed locally on Linux x64 / Node 24.16.0:
 
 - `pnpm tsgo:core`;
-- 275 focused Vitest tests;
-- 18 focused mlock-helper tests;
-- a Linux native-addon 32-byte `mlock`/`munlock` roundtrip;
+- 277 focused Vitest tests across the PQC, state, and secure-memory paths;
+- a native secure-mapping kernel probe showing locked, non-dumpable memory and
+  finalizer cleanup;
 - five deploy harnesses under `scripts/pqc-e2e/`;
 - a complete isolated installer/build/artifact check; and
 - integrity validation of all 14 checked-in cache-timing reports.
@@ -87,7 +87,7 @@ sudo bash scripts/install-pqc.sh \
   --install-root /opt/pqc-openclaw \
   --state-dir /var/lib/pqc-openclaw \
   --service-user pqc-openclaw \
-  --node-version 24.15.0
+  --node-version 24.16.0
 
 sudo systemctl daemon-reload
 sudo systemctl enable --now pqc-openclaw
@@ -100,10 +100,10 @@ The installer:
 - installs the complete committed workspace and builds `dist/`;
 - writes the file-backed wrap key and gateway-token environment file;
 - installs the healthcheck, backup, and textfile-collector wrappers; and
-- renders a Linux systemd unit.
+- renders Linux gateway and daily-backup systemd units.
 
-It does not start the unit, create backup/monitoring schedules, populate an OS
-keyring, or install a macOS launchd service.
+It does not start or enable those units, populate an OS keyring, or install a
+macOS launchd service.
 
 For isolated Linux validation, `--sandbox-root PATH` requires an existing,
 empty, non-symlink directory owned by the caller with mode 0700. Sandbox mode

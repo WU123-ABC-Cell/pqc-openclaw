@@ -126,7 +126,7 @@ sudo bash scripts/install-pqc.sh \
     --install-root /opt/pqc-openclaw \
     --state-dir /var/lib/pqc-openclaw \
     --service-user pqc-openclaw \
-    --node-version 24.15.0 \
+    --node-version 24.16.0 \
     --skip-keyring \
     --skip-systemd \
     --skip-build

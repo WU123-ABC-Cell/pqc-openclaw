@@ -1,8 +1,9 @@
 # Wrap-key memory locking
 
-> **Current status (2026-09-09)**: the Linux x64 native addon builds on Node
-> 22.23.1, and its dedicated 32-byte secure-mapping path passed focused keyring
-> lifecycle tests. Node 24.15.0 does not expose `process.mlock`. Backend
+> **Current status (2026-09-10)**: the Linux x64 native addon builds on Node
+> 22.23.1 and 24.16.0. Its dedicated secure-mapping path passed focused keyring
+> lifecycle tests plus a Linux kernel probe for locked, non-dumpable memory and
+> finalizer cleanup. Node 24.15.0 does not expose `process.mlock`. Backend
 > selection is feature-based, not Node-version-based.
 
 This document describes swap and core-dump protection for cached wrap keys and
@@ -91,8 +92,10 @@ NODE
 node scripts/run-vitest.mjs run src/security/mlock-helper.test.ts
 ```
 
-The 2026-09-09 local gate passed all 20 focused mlock-helper tests, 86 focused
-key lifecycle tests, and the native build on Linux x64 / Node 22.23.1. These
+The 2026-09-10 local gate passed all 20 focused mlock-helper tests, 277 focused
+PQC/state/secure-memory tests, the native build, and a `/proc` kernel probe on
+Linux x64 / Node 24.16.0. The probe observed `VmLck` rise by 64 KiB, a mapping
+with both `lo` and `dd` flags, and return to baseline after finalization. These
 local results do not imply that hosted GitHub Actions ran successfully.
 
 The healthcheck probes the runtime API first and the native addon second:

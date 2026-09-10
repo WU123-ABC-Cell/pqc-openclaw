@@ -75,11 +75,9 @@ sudo systemctl start openclaw-gateway
 sudo -n true && echo "sudo OK" || echo "sudo requires password — re-login first"
 
 # 4. Node.js is in range
-node --version    # needs 22.22.3+, 24.15+, or 25.9+
-# If not, install Node 22.23.1 from NodeSource first; the PQC
-# fork's install-pqc.sh will detect this and refuse to proceed
-# rather than install Node for you (the install script is
-# deliberately conservative).
+node --version    # Node 24.16.0 is the tested default; supported ranges are broader
+# If the requested version is missing, install-pqc.sh downloads the exact
+# pinned Node archive and verifies its SHA-256 before use.
 
 # 5. pnpm is available
 pnpm --version    # must match the packageManager pin (currently 11.15.1)
@@ -165,7 +163,7 @@ sudo bash scripts/install-pqc.sh \
     --install-root /opt/pqc-openclaw \
     --state-dir /var/lib/pqc-openclaw \
     --service-user openclaw \
-    --node-version 22.23.1
+    --node-version 24.16.0
 ```
 
 What this does, in order:

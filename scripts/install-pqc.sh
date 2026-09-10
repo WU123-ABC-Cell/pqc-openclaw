@@ -25,7 +25,7 @@
 #   bash scripts/install-pqc.sh                       # default install
 #   bash scripts/install-pqc.sh --install-root /srv/openclaw
 #   bash scripts/install-pqc.sh --state-dir /var/lib/openclaw
-#   bash scripts/install-pqc.sh --node-version 24.15.0
+#   bash scripts/install-pqc.sh --node-version 24.16.0
 #   bash scripts/install-pqc.sh --help
 
 set -euo pipefail
@@ -38,7 +38,7 @@ umask 077
 INSTALL_ROOT="${INSTALL_ROOT:-/opt/pqc-openclaw}"
 STATE_DIR="${STATE_DIR:-/var/lib/pqc-openclaw}"
 BACKUP_DIR="${BACKUP_DIR:-/var/backups/pqc-openclaw}"
-NODE_VERSION="${NODE_VERSION:-22.23.1}"
+NODE_VERSION="${NODE_VERSION:-24.16.0}"
 SERVICE_USER="${SERVICE_USER:-pqc-openclaw}"
 SKIP_KEYRING=0
 SKIP_BUILD=0
@@ -57,7 +57,7 @@ OPTIONS
   --install-root PATH   Where to install the fork.   [default: /opt/pqc-openclaw]
   --state-dir PATH      Where to put state (sqlite, key backups). [default: /var/lib/pqc-openclaw]
   --backup-dir PATH     Where scheduled backups are stored. [default: /var/backups/pqc-openclaw]
-  --node-version VER    Node.js version to install.    [default: 22.23.1]
+  --node-version VER    Node.js version to install.    [default: 24.16.0]
   --service-user USER   System user for the service.   [default: pqc-openclaw]
   --sandbox-root PATH   Install and build inside an empty 0700 test root.
   --skip-keyring        Skip wrap-key file provisioning.
@@ -74,7 +74,7 @@ EXAMPLES
   sudo bash scripts/install-pqc.sh --install-root /srv/openclaw
 
   # Use a specific Node version (recommended for production)
-  sudo bash scripts/install-pqc.sh --node-version 24.15.0
+  sudo bash scripts/install-pqc.sh --node-version 24.16.0
 
 REQUIREMENTS
   - Linux (Ubuntu 22.04+), macOS 13+, or WSL2 Ubuntu

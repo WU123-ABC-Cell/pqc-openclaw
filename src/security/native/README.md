@@ -58,7 +58,7 @@ status log.
 ## Platform support
 
 - **Linux x64**: secure mapping build and focused lifecycle tests passed on
-  Node 22.23.1 (2026-09-09).
+  Node 22.23.1 (2026-09-09) and Node 24.16.0 (2026-09-10).
 - **macOS / Windows / Linux arm64**: POSIX and `VirtualAlloc` / `VirtualLock`
   implementations are present, but native build and runtime validation on
   those hosts remain audit-grade backlog.
