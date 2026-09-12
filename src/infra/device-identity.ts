@@ -38,6 +38,7 @@ import {
   fingerprintMlDsa65PublicKey,
   isMlDsa65PublicKey,
   isMlDsa65SecretKey,
+  MLDSA65_PUBLIC_KEY_LENGTH,
   signMlDsa65Payload as signMlDsa65PayloadRaw,
   verifyMlDsa65Signature as verifyMlDsa65SignatureRaw,
 } from "./mldsa65-key-storage.js";
@@ -273,32 +274,44 @@ export function signDevicePayload(privateKeyPem: string, payload: string): strin
   return signMlDsa65PayloadRaw(secretKey, payload);
 }
 
-/** Normalize the MLDSA65-PUBLIC-KEY: prefixed string to canonical raw 1952-byte
- *  public key, then base64url-encode it. Returns null on any decode failure. */
-export function normalizeDevicePublicKeyBase64Url(publicKey: string): string | null {
+function decodeDevicePublicKey(publicKey: string): Uint8Array | null {
   try {
-    if (!isMlDsa65PublicKey(publicKey)) {
+    if (isMlDsa65PublicKey(publicKey)) {
+      return decodeMlDsa65PublicKey(publicKey);
+    }
+    const value = publicKey.trim();
+    const padding = value.match(/=+$/)?.[0] ?? "";
+    const unpadded = value
+      .slice(0, value.length - padding.length)
+      .replaceAll("+", "-")
+      .replaceAll("/", "_");
+    if (padding.length > 2 || !/^[A-Za-z0-9_-]+$/.test(unpadded)) {
       return null;
     }
-    const raw = decodeMlDsa65PublicKey(publicKey);
-    return Buffer.from(raw).toString("base64url");
+    const raw = new Uint8Array(Buffer.from(unpadded, "base64url"));
+    if (
+      raw.length !== MLDSA65_PUBLIC_KEY_LENGTH ||
+      Buffer.from(raw).toString("base64url") !== unpadded
+    ) {
+      return null;
+    }
+    return raw;
   } catch {
     return null;
   }
 }
 
+/** Normalize stored or wire-format ML-DSA-65 public keys to canonical raw base64url. */
+export function normalizeDevicePublicKeyBase64Url(publicKey: string): string | null {
+  const raw = decodeDevicePublicKey(publicKey);
+  return raw ? Buffer.from(raw).toString("base64url") : null;
+}
+
 /** Derive the stable 64-hex-char device id (SHA-256 of the raw 1952-byte
- *  ML-DSA-65 public key) from an MLDSA65-PUBLIC-KEY: prefixed string. */
+ *  ML-DSA-65 public key) from stored or wire-format key material. */
 export function deriveDeviceIdFromPublicKey(publicKey: string): string | null {
-  try {
-    if (!isMlDsa65PublicKey(publicKey)) {
-      return null;
-    }
-    const raw = decodeMlDsa65PublicKey(publicKey);
-    return fingerprintMlDsa65PublicKey(raw);
-  } catch {
-    return null;
-  }
+  const raw = decodeDevicePublicKey(publicKey);
+  return raw ? fingerprintMlDsa65PublicKey(raw) : null;
 }
 
 /** Export an MLDSA65-PUBLIC-KEY: prefixed string's raw 1952-byte public key
@@ -322,26 +335,22 @@ export function publicKeyRawBase64UrlFromPem(publicKeyPem: string): string {
  *  any decode failure. Use for untrusted / wire-format input where the
  *  caller wants to inspect / fail-closed without throwing. */
 export function tryDecodeMlDsa65PublicKeyRaw(publicKeyPem: string): string | null {
-  try {
-    if (!isMlDsa65PublicKey(publicKeyPem)) {
-      return null;
-    }
-    const raw = decodeMlDsa65PublicKey(publicKeyPem);
-    return Buffer.from(raw).toString("base64url");
-  } catch {
-    return null;
-  }
+  const raw = decodeDevicePublicKey(publicKeyPem);
+  return raw ? Buffer.from(raw).toString("base64url") : null;
 }
 
-/** Verify a base64url ML-DSA-65 signature against an MLDSA65-PUBLIC-KEY:
- *  prefixed public key. Returns false on any decode/verify failure. */
+/** Verify a base64url ML-DSA-65 signature against stored or wire-format key material. */
 export function verifyDeviceSignature(
   publicKey: string,
   payload: string,
   signatureBase64Url: string,
 ): boolean {
+  const raw = decodeDevicePublicKey(publicKey);
+  if (!raw) {
+    return false;
+  }
   return verifyMlDsa65SignatureRaw({
-    publicKey,
+    publicKey: raw,
     payload,
     signatureBase64Url,
   });

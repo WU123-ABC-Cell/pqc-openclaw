@@ -1,11 +1,15 @@
 // Covers TUI device pairing and operator scope upgrades through the real Gateway client.
 import { Buffer } from "node:buffer";
-import { generateKeyPairSync } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { describe, expect, it, vi } from "vitest";
 import { ConnectErrorDetailCodes } from "../../packages/gateway-protocol/src/connect-error-details.js";
 import { ErrorCodes, PROTOCOL_VERSION } from "../../packages/gateway-protocol/src/index.js";
 import { deriveDeviceIdFromPublicKey } from "../infra/device-identity.js";
+import {
+  encodeMlDsa65PublicKey,
+  encodeMlDsa65SecretKey,
+  generateMlDsa65KeyPair,
+} from "../infra/mldsa65-key-storage.js";
 import type { GatewayChatClient } from "./gateway-chat.js";
 
 type GatewayRequestFrame = {
@@ -42,15 +46,15 @@ describe("GatewayChatClient operator scopes", () => {
     const clearDeviceAuthToken = vi.fn();
     const sockets: ScopeUpgradeWebSocket[] = [];
     const clients: GatewayChatClient[] = [];
-    const { privateKey, publicKey } = generateKeyPairSync("ed25519");
-    const publicKeyPem = publicKey.export({ type: "spki", format: "pem" });
+    const { publicKey, secretKey } = generateMlDsa65KeyPair();
+    const publicKeyPem = encodeMlDsa65PublicKey(publicKey);
     const deviceId = deriveDeviceIdFromPublicKey(publicKeyPem);
     if (!deviceId) {
       throw new Error("expected a valid isolated TUI device identity");
     }
     const deviceIdentity = {
       deviceId,
-      privateKeyPem: privateKey.export({ type: "pkcs8", format: "pem" }),
+      privateKeyPem: encodeMlDsa65SecretKey(secretKey),
       publicKeyPem,
     };
 

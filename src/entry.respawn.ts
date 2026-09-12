@@ -123,6 +123,7 @@ export function buildCliRespawnPlan(
     params.autoNodeExtraCaCerts ??
     resolveNodeStartupTlsEnvironment({
       env,
+      platform,
       execPath,
       includeDarwinDefaults: false,
     }).NODE_EXTRA_CA_CERTS;

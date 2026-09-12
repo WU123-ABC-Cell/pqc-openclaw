@@ -1,10 +1,10 @@
 // SSH-verified node pairing policy and verifier tests (probe injected).
-import crypto from "node:crypto";
 import { describe, expect, test } from "vitest";
 import {
   deriveDeviceIdFromPublicKey,
   publicKeyRawBase64UrlFromPem,
 } from "../infra/device-identity.js";
+import { encodeMlDsa65PublicKey, generateMlDsa65KeyPair } from "../infra/mldsa65-key-storage.js";
 import type { FreshNodePairingEligibilityParams } from "./node-pairing-auto-approve.js";
 import { planNodePairingSshVerify, startNodePairingSshVerify } from "./node-pairing-ssh-verify.js";
 import type {
@@ -13,8 +13,8 @@ import type {
 } from "./node-pairing-ssh-verify.runtime.js";
 
 function makeIdentity(): { deviceId: string; publicKey: string } {
-  const { publicKey } = crypto.generateKeyPairSync("ed25519");
-  const publicKeyPem = publicKey.export({ type: "spki", format: "pem" }) as string;
+  const { publicKey } = generateMlDsa65KeyPair();
+  const publicKeyPem = encodeMlDsa65PublicKey(publicKey);
   const raw = publicKeyRawBase64UrlFromPem(publicKeyPem);
   const deviceId = deriveDeviceIdFromPublicKey(raw);
   if (!deviceId) {
