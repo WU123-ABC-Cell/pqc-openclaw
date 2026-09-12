@@ -518,9 +518,10 @@ EM / 功率 / 故障注入 旁路攻击完全没测 需要专业硬件 + 商业 
 ### 7.2 灾难恢复 (wrap-key 恢复)
 
 当前 installer 的 active source 是 `$STATE_DIR/wrap-key.b64`。恢复时必须从
-verified backup 取回**完全相同**的 key file，并保持 mode 0600 与 service-user
-ownership。不要假设当前 build 提供 `openclaw wrap-key import` CLI；先检查
-实际命令清单。若所有旧 key 副本都丢失，依赖它的 ciphertext 无法恢复。
+独立的离线或 KMS 恢复通道取回**完全相同**的 key file，并保持 mode 0600 与
+service-user ownership。加固后的 state backup 会主动排除 wrap key；不要假设
+当前 build 提供 `openclaw wrap-key import` CLI，先检查实际命令清单。若所有旧
+key 副本都丢失，依赖它的 ciphertext 无法恢复。
 
 ### 7.3 wrap-key 轮换
 
@@ -570,8 +571,8 @@ grep "\[PQC-MIGRATION\]" /var/log/openclaw/*.log | wc -l
 问题 2：wrap key 找不到（device identity 报错）
 
 - 症状：`wrapping key not found: <keyId>`
-- 解决：从 verified backup 恢复与 ciphertext 匹配的原 key file
-- 预防：定期 backup，定期测试 restore
+- 解决：从独立的离线/KMS 恢复通道恢复与 ciphertext 匹配的原 key file
+- 预防：分别保全 state backup 与 key，定期组合测试 restore
 
 问题 3：轮换中断
 

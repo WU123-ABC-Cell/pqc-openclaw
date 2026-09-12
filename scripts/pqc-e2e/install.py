@@ -178,8 +178,92 @@ def main():
     finally:
         shutil.rmtree(fake_bin, ignore_errors=True)
 
-    # 7. Documented exit behavior: help exits 0; non-root exits 1.
-    log("7. --help exits 0, missing-required-sudo exits non-zero")
+    # 7. Direct downloads use private temporary storage and are verified
+    #    against Node's SHA-256 manifest before root extraction.
+    log("7. Node.js direct-download path is private and checksum-verified")
+    source = open(args.script).read()
+    if "/tmp/node.tar.gz" in source:
+        fail("installer still uses the predictable /tmp/node.tar.gz path")
+    for required in ("mktemp -d", "SHASUMS256.txt", 'actual=$(sha256sum'):
+        if required not in source:
+            fail(f"installer download verification is missing: {required}")
+    if "EnvironmentFile=-$ENV_FILE" not in source:
+        fail("systemd does not load the protected environment file variable")
+    if 'CONFIG_DIR="${CONFIG_DIR:-/etc/pqc-openclaw}"' not in source:
+        fail("systemd environment file is not rooted in the protected config directory")
+    systemd_branch = source.index('if [[ $OS == "linux" && $SKIP_SYSTEMD -eq 0 ]]')
+    rendered_unit = source.index('ok "systemd unit rendered', systemd_branch)
+    legacy_removal = source.index('rm -f -- "$LEGACY_ENV_FILE"')
+    next_steps = source.index("# 9. Print next steps")
+    if not (systemd_branch < rendered_unit < legacy_removal < next_steps):
+        fail(
+            "legacy service env removal must occur only after the replacement "
+            "systemd unit is rendered"
+        )
+
+
+    r = run(args.script, "--node-version", "24.16.0/../../attacker")
+    if r.returncode == 0 or "must be an exact stable version" not in r.stderr:
+        fail("installer accepted an unsafe Node.js version string")
+
+    # Exercise the download branch with failure injection. A forged archive
+    # must fail checksum verification before tar is called, and curl must only
+    # receive output paths inside a mode-0700 directory.
+    function_match = re.search(
+        r"(install_node_tarball\(\) \{.*?\n\})\n\ninstall_node\(\)", source, re.DOTALL
+    )
+    if not function_match:
+        fail("could not isolate install_node_tarball for failure injection")
+    log("7b. checksum mismatch blocks extraction in a private download directory")
+    with tempfile.TemporaryDirectory(prefix="pqc-e2e-node-bin-") as fake_bin, \
+         tempfile.TemporaryDirectory(prefix="pqc-e2e-node-log-") as log_dir:
+        mode_log = os.path.join(log_dir, "modes")
+        tar_log = os.path.join(log_dir, "tar-called")
+        driver = os.path.join(log_dir, "download-driver.sh")
+        with open(driver, "w") as handle:
+            handle.write("#!/usr/bin/env bash\nset -euo pipefail\ndie() { echo \"$*\" >&2; exit 1; }\nOS=linux\nNODE_VERSION=24.16.0\n")
+            handle.write(function_match.group(1))
+            handle.write("\ninstall_node_tarball\n")
+        fake_curl = os.path.join(fake_bin, "curl")
+        with open(fake_curl, "w") as handle:
+            handle.write(
+                "#!/usr/bin/env bash\n"
+                "out=''\n"
+                "while [ \"$#\" -gt 0 ]; do\n"
+                "  case \"$1\" in -o) out=$2; shift 2 ;; *) shift ;; esac\n"
+                "done\n"
+                "stat -c %a \"$(dirname \"$out\")\" >> \"$PQC_TEST_MODE_LOG\"\n"
+                "case \"$out\" in\n"
+                "  */SHASUMS256.txt) printf '%064d  node-v24.16.0-linux-x64.tar.gz\\n' 0 > \"$out\" ;;\n"
+                "  *) printf 'tampered-node-archive' > \"$out\" ;;\n"
+                "esac\n"
+            )
+        fake_tar = os.path.join(fake_bin, "tar")
+        with open(fake_tar, "w") as handle:
+            handle.write(
+                "#!/usr/bin/env bash\n"
+                "printf 'called\\n' >> \"$PQC_TEST_TAR_LOG\"\n"
+                "exit 99\n"
+            )
+        for executable in (driver, fake_curl, fake_tar):
+            os.chmod(executable, 0o755)
+        env = {
+            **os.environ,
+            "PATH": fake_bin + os.pathsep + os.environ["PATH"],
+            "PQC_TEST_MODE_LOG": mode_log,
+            "PQC_TEST_TAR_LOG": tar_log,
+        }
+        r = run(driver, env=env)
+        if r.returncode == 0 or "checksum verification failed" not in r.stderr:
+            fail(f"checksum mismatch did not fail closed: {r.stdout} {r.stderr}")
+        if os.path.exists(tar_log):
+            fail("tar was invoked for a checksum-mismatched Node.js archive")
+        modes = open(mode_log).read().splitlines() if os.path.isfile(mode_log) else []
+        if modes != ["700", "700"]:
+            fail(f"Node.js downloads did not stay in a private mode-0700 directory: {modes}")
+
+    # 8. Documented exit behavior: help exits 0; non-root exits 1.
+    log("8. --help exits 0, missing-required-sudo exits non-zero")
     r = run(args.script, "--help")
     if r.returncode != 0:
         fail(f"--help should exit 0, got {r.returncode}")

@@ -103,6 +103,7 @@ jobs:
 
           install_root="$sandbox_root/opt/pqc-openclaw"
           state_dir="$sandbox_root/var/lib/pqc-openclaw"
+          config_dir="$sandbox_root/etc/pqc-openclaw"
           bin_dir="$sandbox_root/usr/local/bin"
           unit="$sandbox_root/etc/systemd/system/pqc-openclaw.service"
           backup_service="$sandbox_root/etc/systemd/system/pqc-openclaw-backup.service"
@@ -117,11 +118,12 @@ jobs:
           test -f "$backup_service"
           test -f "$backup_timer"
           test "$(stat -c %a "$state_dir/wrap-key.b64")" = "600"
-          test "$(stat -c %a "$state_dir/openclaw.env")" = "600"
+          test "$(stat -c %a "$config_dir/openclaw.env")" = "600"
+          test ! -e "$state_dir/openclaw.env"
           test "$(wc -c < "$state_dir/wrap-key.b64")" -ge 43
-          grep -q '^OPENCLAW_GATEWAY_TOKEN=[0-9a-f]\{64\}$' "$state_dir/openclaw.env"
+          grep -q '^OPENCLAW_GATEWAY_TOKEN=[0-9a-f]\{64\}$' "$config_dir/openclaw.env"
           grep -Fq "WorkingDirectory=$install_root" "$unit"
-          grep -Fq "EnvironmentFile=-$state_dir/openclaw.env" "$unit"
+          grep -Fq "EnvironmentFile=-$config_dir/openclaw.env" "$unit"
           grep -Fq "ReadWritePaths=$state_dir" "$unit"
           grep -Fq "ExecStart=$(command -v node) $install_root/dist/index.js gateway" "$unit"
           grep -Fq "User=$(id -un)" "$backup_service"

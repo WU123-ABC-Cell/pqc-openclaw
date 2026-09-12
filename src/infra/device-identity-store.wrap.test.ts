@@ -12,7 +12,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { resetDefaultKeyringCache } from "../security/keyring-provider.js";
+import { FileKeyring, resetDefaultKeyringCache } from "../security/keyring-provider.js";
 import {
   type ActiveWrappingKey,
   serializeWrappedSecret,
@@ -42,6 +42,7 @@ import {
   generateMlDsa65KeyPair,
 } from "./mldsa65-key-storage.js";
 import { requireNodeSqlite } from "./node-sqlite.js";
+import { repairInvalidCanonicalIdentity } from "./state-migrations.device-identity-repair.js";
 
 class InMemoryKeyring implements WrappingKeyProvider {
   private readonly activeId: string;
@@ -143,8 +144,11 @@ describe("device-identity store — M5 wrap integration", () => {
     expect(stored.privateKeyPem).toBe("");
   });
 
-  it("generates a plaintext identity when no WrappingKeyProvider is supplied", () => {
-    const stored = generateStoredDeviceIdentity(1_700_000_000_000);
+  it("refuses plaintext identity generation unless an explicit legacy override is supplied", () => {
+    expect(() => generateStoredDeviceIdentity(1_700_000_000_000)).toThrow(/Refusing.*plaintext/);
+    const stored = generateStoredDeviceIdentity(1_700_000_000_000, undefined, {
+      allowPlaintextPrivateKey: true,
+    });
     expect(stored.mldsaPrivateKeyPem).toMatch(/^MLDSA65-SECRET-KEY:/);
     expect(stored.mldsaPrivateKeyWrapped).toBeNull();
     expect(stored.mldsaPrivateKeyWrapKeyId).toBeNull();
@@ -225,7 +229,9 @@ describe("device-identity store — M5 wrap integration", () => {
 
     // Write path: no keyring -> plaintext form.
     const writeOptions = makeStoreOptions();
-    const candidate = generateStoredDeviceIdentity(1_700_000_000_000);
+    const candidate = generateStoredDeviceIdentity(1_700_000_000_000, undefined, {
+      allowPlaintextPrivateKey: true,
+    });
     const inserted = insertStoredDeviceIdentityIfAbsent(candidate, writeOptions);
     expect(inserted.mldsaPrivateKeyWrapped).toBeNull();
 
@@ -440,7 +446,7 @@ describe("M5.5 auto-inject default keyring from env", () => {
     }
   });
 
-  it("stays in plaintext mode when OPENCLAW_WRAP_KEY_FILE is unset (no auto-inject)", () => {
+  it("creates a private fallback wrap key when OPENCLAW_WRAP_KEY_FILE is unset", () => {
     const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-pqc-m55-"));
     tempDirs.push(stateDir);
     delete process.env.OPENCLAW_WRAP_KEY_FILE;
@@ -451,10 +457,74 @@ describe("M5.5 auto-inject default keyring from env", () => {
       env: { ...process.env, OPENCLAW_STATE_DIR: stateDir },
       path: path.join(stateDir, "state", "openclaw.sqlite"),
     };
-    const candidate = generateStoredDeviceIdentity(1_700_000_000_000);
-    const inserted = insertStoredDeviceIdentityIfAbsent(candidate, options);
-    expect(inserted.mldsaPrivateKeyWrapped).toBeNull();
-    expect(inserted.mldsaPrivateKeyPem).toMatch(/^MLDSA65-SECRET-KEY:/);
+    loadOrCreateDeviceIdentity(options);
+    const keyPath = path.join(stateDir, "wrap-key.b64");
+    expect(fs.statSync(keyPath).mode & 0o777).toBe(0o600);
+    const stored = readStoredDeviceIdentity({
+      ...options,
+      wrappingKeyProvider: new FileKeyring(keyPath),
+    });
+    expect(stored?.mldsaPrivateKeyPem).toBeNull();
+    expect(stored?.mldsaPrivateKeyWrapped).not.toBeNull();
+  });
+
+  it("Doctor repairs an invalid row with a wrapped fallback identity", () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-pqc-doctor-wrap-"));
+    tempDirs.push(stateDir);
+    delete process.env.OPENCLAW_WRAP_KEY_FILE;
+    delete process.env.OPENCLAW_WRAP_KEY_ID;
+    resetDefaultKeyringCache();
+
+    const env = { ...process.env, OPENCLAW_STATE_DIR: stateDir };
+    const databasePath = path.join(stateDir, "state", "openclaw.sqlite");
+    loadOrCreateDeviceIdentity({ env, path: databasePath });
+
+    const { DatabaseSync } = requireNodeSqlite();
+    const database = new DatabaseSync(databasePath);
+    try {
+      database
+        .prepare(
+          "UPDATE device_identities SET mldsa_private_key_wrapped = ? WHERE identity_key = ?",
+        )
+        .run(Buffer.from("invalid-wrap-envelope"), PRIMARY_DEVICE_IDENTITY_KEY);
+    } finally {
+      database.close();
+    }
+
+    const result = repairInvalidCanonicalIdentity(env);
+    expect(result.warnings).toEqual([]);
+    expect(result.changes).toEqual(["Replaced invalid primary device identity in SQLite."]);
+
+    const keyPath = path.join(stateDir, "wrap-key.b64");
+    expect(fs.statSync(keyPath).mode & 0o777).toBe(0o600);
+    const stored = readStoredDeviceIdentity({
+      env,
+      path: databasePath,
+      wrappingKeyProvider: new FileKeyring(keyPath),
+    });
+    expect(stored?.mldsaPrivateKeyPem).toBeNull();
+    expect(stored?.mldsaPrivateKeyWrapped).not.toBeNull();
+    expect(decodeMlDsa65SecretKey(stored?.privateKeyPem ?? "").length).toBe(4032);
+  });
+
+  it.runIf(process.platform !== "win32")("refuses a symlinked fallback wrap-key path", () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-pqc-m55-"));
+    tempDirs.push(stateDir);
+    delete process.env.OPENCLAW_WRAP_KEY_FILE;
+    delete process.env.OPENCLAW_WRAP_KEY_ID;
+    resetDefaultKeyringCache();
+
+    const attackerKey = path.join(stateDir, "attacker.key");
+    writeKeyFile(attackerKey, newKey(), 0o600);
+    fs.symlinkSync(attackerKey, path.join(stateDir, "wrap-key.b64"));
+
+    expect(() =>
+      loadOrCreateDeviceIdentity({
+        env: { ...process.env, OPENCLAW_STATE_DIR: stateDir },
+        path: path.join(stateDir, "state", "openclaw.sqlite"),
+      }),
+    ).toThrow(/unsafe.*wrapping-key path/i);
+    expect(fs.existsSync(path.join(stateDir, "state", "openclaw.sqlite"))).toBe(false);
   });
 
   it("explicit wrappingKeyProvider takes precedence over env-injected keyring", () => {

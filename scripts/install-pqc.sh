@@ -38,6 +38,7 @@ umask 077
 INSTALL_ROOT="${INSTALL_ROOT:-/opt/pqc-openclaw}"
 STATE_DIR="${STATE_DIR:-/var/lib/pqc-openclaw}"
 BACKUP_DIR="${BACKUP_DIR:-/var/backups/pqc-openclaw}"
+CONFIG_DIR="${CONFIG_DIR:-/etc/pqc-openclaw}"
 NODE_VERSION="${NODE_VERSION:-24.16.0}"
 SERVICE_USER="${SERVICE_USER:-pqc-openclaw}"
 SKIP_KEYRING=0
@@ -55,7 +56,7 @@ USAGE
 
 OPTIONS
   --install-root PATH   Where to install the fork.   [default: /opt/pqc-openclaw]
-  --state-dir PATH      Where to put state (sqlite, key backups). [default: /var/lib/pqc-openclaw]
+  --state-dir PATH      Where to put state and the live wrap key. [default: /var/lib/pqc-openclaw]
   --backup-dir PATH     Where scheduled backups are stored. [default: /var/backups/pqc-openclaw]
   --node-version VER    Node.js version to install.    [default: 24.16.0]
   --service-user USER   System user for the service.   [default: pqc-openclaw]
@@ -127,7 +128,10 @@ case "$(uname -s)" in
   *)      die "unsupported OS: $(uname -s). Use Linux or macOS." ;;
 esac
 
-for tool in curl git tar; do
+[[ "$NODE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+  || die "--node-version must be an exact stable version such as 24.16.0"
+
+for tool in curl git tar awk; do
   command -v "$tool" >/dev/null 2>&1 || die "missing required tool: $tool"
 done
 if [[ $SKIP_BUILD -eq 0 ]]; then
@@ -153,6 +157,7 @@ if [[ -n "$SANDBOX_ROOT" ]]; then
   INSTALL_ROOT="$SANDBOX_ROOT/opt/pqc-openclaw"
   STATE_DIR="$SANDBOX_ROOT/var/lib/pqc-openclaw"
   BACKUP_DIR="$SANDBOX_ROOT/var/backups/pqc-openclaw"
+  CONFIG_DIR="$SANDBOX_ROOT/etc/pqc-openclaw"
   BIN_DIR="$SANDBOX_ROOT/usr/local/bin"
   SYSTEMD_UNIT_DIR="$SANDBOX_ROOT/etc/systemd/system"
   SERVICE_USER=$(id -un)
@@ -178,7 +183,7 @@ fi
 # ----------------------------------------------------------------------
 
 install_node_tarball() {
-  local arch tarball
+  local arch tarball download_dir archive checksums expected actual
   arch="$(uname -m)"
   case "$OS-$arch" in
     linux-x86_64)   tarball="node-v${NODE_VERSION}-linux-x64" ;;
@@ -187,9 +192,37 @@ install_node_tarball() {
     darwin-arm64)   tarball="node-v${NODE_VERSION}-darwin-arm64" ;;
     *)              die "unsupported arch: $OS-$arch" ;;
   esac
-  curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/${tarball}.tar.gz" -o /tmp/node.tar.gz
-  tar -xzf /tmp/node.tar.gz -C /usr/local --strip-components=1
-  rm -f /tmp/node.tar.gz
+  download_dir=$(mktemp -d "${TMPDIR:-/tmp}/pqc-node.XXXXXX") \
+    || die "failed to create private Node.js download directory"
+  archive="$download_dir/${tarball}.tar.gz"
+  checksums="$download_dir/SHASUMS256.txt"
+
+  if ! curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/${tarball}.tar.gz" -o "$archive"; then
+    rm -rf -- "$download_dir"
+    die "failed to download Node.js archive"
+  fi
+  if ! curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt" -o "$checksums"; then
+    rm -rf -- "$download_dir"
+    die "failed to download Node.js checksum manifest"
+  fi
+  expected=$(awk -v file="${tarball}.tar.gz" '$2 == file { print $1 }' "$checksums")
+  if command -v sha256sum >/dev/null 2>&1; then
+    actual=$(sha256sum "$archive" | awk '{ print $1 }')
+  elif command -v shasum >/dev/null 2>&1; then
+    actual=$(shasum -a 256 "$archive" | awk '{ print $1 }')
+  else
+    rm -rf -- "$download_dir"
+    die "missing SHA-256 tool: install sha256sum or shasum"
+  fi
+  if [[ ! "$expected" =~ ^[a-f0-9]{64}$ || "$actual" != "$expected" ]]; then
+    rm -rf -- "$download_dir"
+    die "Node.js archive checksum verification failed"
+  fi
+  if ! tar -xzf "$archive" -C /usr/local --strip-components=1; then
+    rm -rf -- "$download_dir"
+    die "verified Node.js archive extraction failed"
+  fi
+  rm -rf -- "$download_dir"
 }
 
 install_node() {
@@ -326,7 +359,7 @@ if [[ $SKIP_KEYRING -eq 0 ]]; then
     if [[ -z "$SANDBOX_ROOT" ]]; then
       chown "$SERVICE_USER" "$keyfile" || die "failed to assign wrap key to $SERVICE_USER"
     fi
-    ok "wrap key written to $keyfile (backup)"
+    ok "live wrap key written to $keyfile"
   else
     ok "wrap key file already exists at $keyfile (keeping)"
   fi
@@ -343,7 +376,27 @@ else
 fi
 
 # ----------------------------------------------------------------------
-# 7. Install systemd unit (Linux only)
+# 7. Provision root-owned service configuration
+# ----------------------------------------------------------------------
+
+[[ "$CONFIG_DIR" == /* ]] || die "CONFIG_DIR must be an absolute path"
+[[ ! -L "$CONFIG_DIR" ]] || die "CONFIG_DIR must not be a symlink: $CONFIG_DIR"
+install -d -m 0700 "$CONFIG_DIR"
+ENV_FILE="$CONFIG_DIR/openclaw.env"
+[[ ! -L "$ENV_FILE" ]] || die "environment file must not be a symlink: $ENV_FILE"
+if [[ ! -f "$ENV_FILE" ]]; then
+  GATEWAY_TOKEN=$(node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))")
+  printf 'OPENCLAW_GATEWAY_TOKEN=%s\n' "$GATEWAY_TOKEN" > "$ENV_FILE"
+  unset GATEWAY_TOKEN
+fi
+chmod 0600 "$ENV_FILE"
+if [[ -z "$SANDBOX_ROOT" ]]; then
+  chown root:root "$CONFIG_DIR" "$ENV_FILE" \
+    || die "failed to make service configuration root-owned"
+fi
+
+# ----------------------------------------------------------------------
+# 8. Install systemd unit (Linux only)
 # ----------------------------------------------------------------------
 
 if [[ $OS == "linux" && $SKIP_SYSTEMD -eq 0 ]]; then
@@ -370,7 +423,7 @@ Environment=OPENCLAW_WRAP_KEY_OS_SERVICE=pqc-openclaw
 Environment=OPENCLAW_WRAP_KEY_OS_ACCOUNT=wrap-key-$(date +%Y-%m)
 Environment=OPENCLAW_WRAP_KEY_OS_ID=wrap-key-$(date +%Y-%m)
 Environment=OPENCLAW_WRAP_KEY_FILE=$keyfile
-EnvironmentFile=-$STATE_DIR/openclaw.env
+EnvironmentFile=-$ENV_FILE
 ExecStart=$NODE_BIN $INSTALL_ROOT/dist/index.js gateway
 Restart=on-failure
 RestartSec=5
@@ -386,6 +439,17 @@ PrivateTmp=true
 WantedBy=multi-user.target
 EOF
   ok "systemd unit rendered at $SYSTEMD_UNIT_DIR/pqc-openclaw.service"
+
+  # Older installers put the systemd EnvironmentFile in the service-owned
+  # state directory. Remove it only after the replacement unit has been
+  # written. With --skip-systemd (and on macOS/manual-service deployments),
+  # the installer cannot prove that no existing service still references it.
+  # Never import its contents: it may contain attacker-controlled NODE_OPTIONS.
+  LEGACY_ENV_FILE="$STATE_DIR/openclaw.env"
+  if [[ -e "$LEGACY_ENV_FILE" || -L "$LEGACY_ENV_FILE" ]]; then
+    rm -f -- "$LEGACY_ENV_FILE" || die "failed to remove unsafe legacy environment file"
+    warn "removed service-owned legacy environment file after replacing the systemd unit; gateway token was rotated"
+  fi
 
   if [[ $SKIP_BACKUP_TIMER -eq 0 ]]; then
     cat > "$SYSTEMD_UNIT_DIR/pqc-openclaw-backup.service" <<EOF
@@ -438,20 +502,10 @@ EOF
 fi
 
 # ----------------------------------------------------------------------
-# 8. Print next steps
+# 9. Print next steps
 # ----------------------------------------------------------------------
 
-GATEWAY_TOKEN=$(node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))")
 keyfile="$STATE_DIR/wrap-key.b64"
-ENV_FILE="$STATE_DIR/openclaw.env"
-if [[ ! -f "$ENV_FILE" ]]; then
-  printf 'OPENCLAW_GATEWAY_TOKEN=%s\n' "$GATEWAY_TOKEN" > "$ENV_FILE"
-  chmod 0600 "$ENV_FILE"
-  if [[ -z "$SANDBOX_ROOT" ]]; then
-    chown "$SERVICE_USER" "$ENV_FILE" || die "failed to assign environment file to $SERVICE_USER"
-  fi
-fi
-unset GATEWAY_TOKEN
 
 if [[ -n "$SANDBOX_ROOT" ]]; then
   cat <<EOF

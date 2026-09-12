@@ -65,7 +65,9 @@ describe("node-host startup state migrations", () => {
     deviceId: string;
     sourcePath: string;
   }> {
-    const identity = generateStoredDeviceIdentity(1_700_000_000_000);
+    const identity = generateStoredDeviceIdentity(1_700_000_000_000, undefined, {
+      allowPlaintextPrivateKey: true,
+    });
     const sourcePath = path.join(stateDir, "identity", "device.json");
     await fsp.mkdir(path.dirname(sourcePath), { recursive: true });
     await fsp.writeFile(sourcePath, JSON.stringify({ version: 1, ...identity }));
@@ -116,16 +118,19 @@ describe("node-host startup state migrations", () => {
     expect(log.warn).not.toHaveBeenCalled();
   });
 
-  it("migrates a legacy device identity", async () => {
+  it("preserves an unsupported legacy device identity for operator review", async () => {
     const { env, stateDir } = useStateDir();
     const { deviceId, sourcePath } = await writeDeviceIdentity(stateDir);
 
     await runStartupMigrations({ env, log });
 
-    expect(fs.existsSync(sourcePath)).toBe(false);
-    expect(loadDeviceIdentityIfPresent({ env })?.deviceId).toBe(deviceId);
-    expect(log.info).toHaveBeenCalledWith("Migrated primary device identity to SQLite.");
-    expect(log.warn).not.toHaveBeenCalled();
+    expect(fs.existsSync(sourcePath)).toBe(true);
+    expect(() => loadDeviceIdentityIfPresent({ env })).toThrow(/doctor --fix/);
+    expect(deviceId).toMatch(/^[a-f0-9]{64}$/);
+    expect(log.info).not.toHaveBeenCalled();
+    expect(log.warn).toHaveBeenCalledWith(
+      expect.stringContaining("legacy device identity is invalid or unsupported"),
+    );
   });
 
   it("preserves a pending native device identity claim and continues", async () => {

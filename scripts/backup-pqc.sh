@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # backup-pqc.sh — production backup for the PQC OpenClaw fork.
 #
-# Snapshots the PQC fork state directory (sqlite db, file-backed key material,
-# pqc-audit.log, wrap-key.b64 fallback copy) into a timestamped tarball,
+# Snapshots the recoverable PQC fork state (SQLite DB, auth profiles,
+# config, sessions, and pqc-audit.log) into a timestamped tarball while
+# keeping wrapping keys and service secrets in a separate trust domain,
 # writes a sha256 sidecar for integrity verification, rotates old
 # backups, and optionally uploads to S3 for off-host storage.
 #
@@ -47,6 +48,7 @@
 #   bash scripts/backup-pqc.sh --help
 
 set -euo pipefail
+umask 077
 
 # ----------------------------------------------------------------------
 # Defaults
@@ -67,6 +69,7 @@ S3_STORAGE_CLASS="${S3_STORAGE_CLASS:-STANDARD_IA}"
 DRY_RUN=0
 JSON_OUTPUT=0
 VERBOSE=0
+WRAP_KEY_FILE="${OPENCLAW_WRAP_KEY_FILE:-}"
 LABEL="${LABEL:-}"
 VERIFY_TARGET="${VERIFY_TARGET:-}"
 PASS=0
@@ -94,6 +97,7 @@ OPTIONS
   --s3-storage-class CLASS  S3 storage class.            [default: STANDARD_IA]
   --skip-s3                 Disable S3 even if env S3_BUCKET is set.
   --label LABEL             Custom label appended to filename.
+  --wrap-key-file PATH      Active file wrapping key to exclude. [default: $STATE_DIR/wrap-key.b64]
   --dry-run                 Print what would happen; do not write or upload.
   --json                    Emit machine-readable JSON summary.
   --verbose                 Show progress even on success.
@@ -109,6 +113,8 @@ WHAT GETS BACKED UP
   $STATE_DIR contents excluding:
     - mlock/  (tmpfs-only, not useful to back up)
     - *.sock  (Unix domain sockets, not storable)
+    - the active --wrap-key-file / OPENCLAW_WRAP_KEY_FILE (store it separately)
+    - openclaw.env (legacy service secrets; never archive)
     - *.log   (live audit log; we tar -P it for completeness)
   Plus the system-level OPENCLAW_INSTALL_ROOT/dist/ build artefacts
   are NOT included; backups are state-only. Rebuild dist from source
@@ -162,6 +168,7 @@ while [[ $# -gt 0 ]]; do
     --s3-storage-class)  S3_STORAGE_CLASS="$2"; shift 2 ;;
     --skip-s3)           SKIP_S3=1; shift ;;
     --label)             LABEL="$2"; shift 2 ;;
+    --wrap-key-file)     WRAP_KEY_FILE="$2"; shift 2 ;;
     --dry-run)           DRY_RUN=1; shift ;;
     --json)              JSON_OUTPUT=1; shift ;;
     --verbose)           VERBOSE=1; shift ;;
@@ -425,12 +432,36 @@ SCRATCH_TARBALL="$SCRATCH_DIR/$BASENAME"
 # (The dry-run short-circuit lives above, after the pre-flight checks;
 # we never reach this point under --dry-run.)
 
+if [[ -e "$WRAP_KEY_FILE" || -L "$WRAP_KEY_FILE" ]]; then
+  WRAP_KEY_PARENT=$(cd -P -- "$(dirname -- "$WRAP_KEY_FILE")" && pwd) \
+    || die "cannot resolve wrap key parent directory"
+  WRAP_KEY_FILE="$WRAP_KEY_PARENT/$(basename -- "$WRAP_KEY_FILE")"
+fi
+if [[ -z "$WRAP_KEY_FILE" ]]; then
+  WRAP_KEY_FILE="$STATE_DIR/wrap-key.b64"
+fi
+[[ "$WRAP_KEY_FILE" == /* ]] || die "wrap key file path must be absolute"
+STATE_ROOT=$(cd "$STATE_DIR" && pwd -P)
+WRAP_KEY_EXCLUDE=("--exclude=$(basename "$STATE_DIR")/wrap-key.b64")
+case "$WRAP_KEY_FILE" in
+  "$STATE_ROOT"/*)
+    WRAP_KEY_RELATIVE="${WRAP_KEY_FILE#"$STATE_ROOT"/}"
+    [[ -n "$WRAP_KEY_RELATIVE" && "$WRAP_KEY_RELATIVE" != ../* ]] \
+      || die "invalid wrap key path inside state directory"
+    if [[ "$WRAP_KEY_RELATIVE" != "wrap-key.b64" ]]; then
+      WRAP_KEY_EXCLUDE+=("--exclude=$(basename "$STATE_DIR")/$WRAP_KEY_RELATIVE")
+    fi
+    ;;
+esac
+
 # tar exclusions: skip mlock (tmpfs only, not useful to back up) and
 # any unix-domain sockets (which tar cannot store anyway, but listing
 # them in --exclude is cheap and makes the archive deterministic).
 tar -czf "$SCRATCH_TARBALL" \
   -C "$(dirname "$STATE_DIR")" \
   --exclude="$(basename "$STATE_DIR")/mlock" \
+  "${WRAP_KEY_EXCLUDE[@]}" \
+  --exclude="$(basename "$STATE_DIR")/openclaw.env" \
   --exclude="*.sock" \
   --exclude="*.pid" \
   --transform "s|$(basename "$STATE_DIR")|pqc-openclaw-state|" \

@@ -20,21 +20,22 @@ file says (new flag, new path, new check), file a PR to update it.
 
 After a default production run of `bash scripts/install-pqc.sh` on Linux:
 
-| Path                                              | What it is                                               | Why it is there                                          |
-| ------------------------------------------------- | -------------------------------------------------------- | -------------------------------------------------------- |
-| `/opt/pqc-openclaw/`                              | committed source tree plus the generated build           | `INSTALL_ROOT`, the systemd unit's `WorkingDirectory`    |
-| `/var/lib/pqc-openclaw/`                          | state root, mode-0600 `wrap-key.b64`, and `openclaw.env` | `STATE_DIR`; runtime data is created beneath it          |
-| `/var/backups/pqc-openclaw/`                      | local backup tarballs + `.sha256` sidecars               | default `BACKUP_DIR`; owned by the service user          |
-| `/etc/systemd/system/pqc-openclaw.service`        | generated systemd unit                                   | written by the installer; fixed service name             |
-| `/etc/systemd/system/pqc-openclaw-backup.service` | verified one-shot backup unit                            | accepts warning-only exit 2 as successful completion     |
-| `/etc/systemd/system/pqc-openclaw-backup.timer`   | daily persistent backup schedule                         | enabled automatically when systemd is active             |
-| `/usr/local/bin/healthcheck-pqc.sh`               | 8-check health probe                                     | installed wrapper; invoke from monitoring as desired     |
-| `/usr/local/bin/backup-pqc.sh`                    | on-demand and scheduled backup runner                    | installed wrapper; timer uses file-key healthcheck mode  |
-| `/usr/local/bin/pqc-textfile-collector.sh`        | Prometheus textfile collector                            | installed wrapper; no scheduler is created automatically |
-| `OPENCLAW_GATEWAY_TOKEN` env var                  | gateway client auth                                      | set in `$STATE_DIR/openclaw.env` (mode 0600)             |
-| `OPENCLAW_WRAP_KEY_FILE` env var                  | path to the file-backed 32-byte wrap key                 | set directly in the generated unit                       |
+| Path                                              | What it is                                              | Why it is there                                          |
+| ------------------------------------------------- | ------------------------------------------------------- | -------------------------------------------------------- |
+| `/opt/pqc-openclaw/`                              | committed source tree plus the generated build          | `INSTALL_ROOT`, the systemd unit's `WorkingDirectory`    |
+| `/var/lib/pqc-openclaw/`                          | state root and mode-0600 `wrap-key.b64`                 | `STATE_DIR`; runtime data is created beneath it          |
+| `/etc/pqc-openclaw/openclaw.env`                  | root-owned gateway environment and authentication token | mode 0600; read by systemd, not writable by the service  |
+| `/var/backups/pqc-openclaw/`                      | local backup tarballs + `.sha256` sidecars              | default `BACKUP_DIR`; owned by the service user          |
+| `/etc/systemd/system/pqc-openclaw.service`        | generated systemd unit                                  | written by the installer; fixed service name             |
+| `/etc/systemd/system/pqc-openclaw-backup.service` | verified one-shot backup unit                           | accepts warning-only exit 2 as successful completion     |
+| `/etc/systemd/system/pqc-openclaw-backup.timer`   | daily persistent backup schedule                        | enabled automatically when systemd is active             |
+| `/usr/local/bin/healthcheck-pqc.sh`               | 8-check health probe                                    | installed wrapper; invoke from monitoring as desired     |
+| `/usr/local/bin/backup-pqc.sh`                    | on-demand and scheduled backup runner                   | installed wrapper; timer uses file-key healthcheck mode  |
+| `/usr/local/bin/pqc-textfile-collector.sh`        | Prometheus textfile collector                           | installed wrapper; no scheduler is created automatically |
+| `OPENCLAW_GATEWAY_TOKEN` env var                  | gateway client auth                                     | set in `/etc/pqc-openclaw/openclaw.env` (mode 0600)      |
+| `OPENCLAW_WRAP_KEY_FILE` env var                  | path to the file-backed 32-byte wrap key                | set directly in the generated unit                       |
 
-The systemd unit loads `$STATE_DIR/openclaw.env` before
+The systemd unit loads `/etc/pqc-openclaw/openclaw.env` before
 starting the gateway. **Do not** edit env vars in the unit file
 directly — `install-pqc.sh` will overwrite them on the next run.
 The installer does not migrate the wrap key into an OS keyring; that
@@ -143,7 +144,7 @@ something deleted it.
 # Check an OS keyring only if this deployment was explicitly migrated to one:
 sudo -u pqc-openclaw secret-tool lookup service pqc-openclaw username wrap-key-current
 
-# Otherwise recover the exact key file from a verified backup.
+# Otherwise recover the exact key file from the separate offline/KMS recovery copy.
 ```
 
 Generating a fresh key does not recover existing ciphertext. If every retained
@@ -192,10 +193,13 @@ sudo journalctl -u pqc-openclaw -n 100 --no-pager | tail -50
 sudo dmesg | grep -i 'killed process'
 
 # Try a manual start in the foreground to see the error
-sudo -u pqc-openclaw bash -c '
+sudo bash -c '
+  set -a; source /etc/pqc-openclaw/openclaw.env; set +a
+  export OPENCLAW_STATE_DIR=/var/lib/pqc-openclaw
+  export OPENCLAW_WRAP_KEY_FILE=/var/lib/pqc-openclaw/wrap-key.b64
   cd /opt/pqc-openclaw
-  set -a; source /var/lib/pqc-openclaw/openclaw.env; set +a
-  node dist/index.js gateway --bind 127.0.0.1 --port 18789
+  exec runuser -u pqc-openclaw --preserve-environment -- \
+    node dist/index.js gateway --bind 127.0.0.1 --port 18789
 '
 ```
 
@@ -238,10 +242,18 @@ the current `$STATE_DIR/state/openclaw.sqlite` (or a legacy `state.db`) passes
 published, so failed validation does not leave a corrupt tarball among the
 available restore points.
 
+The state archive deliberately excludes `wrap-key.b64` and any legacy
+`openclaw.env`. Keep the wrapping key in a separate offline or KMS-protected
+recovery channel; rotate the gateway token after a restore. Older archives
+created before this hardening may contain both secrets and should be protected
+as credentials or replaced after rotating them.
+
 ### 3.2 Restore from a backup
 
 ```sh
 sudo systemctl stop pqc-openclaw
+sudo install -m 0600 -o pqc-openclaw -g pqc-openclaw \
+    /secure/offline/recovery/wrap-key.b64 /var/lib/pqc-openclaw/wrap-key.b64
 sudo tar -xzf /var/backups/pqc-openclaw/pqc-openclaw-YYYY-MM-DD-*.tar.gz \
     -C /var/lib/pqc-openclaw --strip-components=1
 sudo systemctl start pqc-openclaw

@@ -23,6 +23,15 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { Insertable, Selectable } from "kysely";
+import { pqcLog, PQC_EVENT } from "../logging/pqc-log.js";
+import {
+  deserializeWrappedSecret,
+  serializeWrappedSecret,
+  unwrapSecret,
+  type WrappedSecret,
+  type WrappingKeyProvider,
+  wrapSecret,
+} from "../security/secret-wrapping.js";
 import { withOpenClawStateDatabaseReadOnly } from "../state/openclaw-state-db-readonly.js";
 import type { DB as OpenClawStateKyselyDatabase } from "../state/openclaw-state-db.generated.js";
 import {
@@ -32,14 +41,10 @@ import {
 } from "../state/openclaw-state-db.js";
 import { resolveOpenClawStateSqlitePath } from "../state/openclaw-state-db.paths.js";
 import {
-  deserializeWrappedSecret,
-  serializeWrappedSecret,
-  unwrapSecret,
-  type WrappedSecret,
-  type WrappingKeyProvider,
-  wrapSecret,
-} from "../security/secret-wrapping.js";
-import { pqcLog, PQC_EVENT } from "../logging/pqc-log.js";
+  executeSqliteQuerySync,
+  executeSqliteQueryTakeFirstSync,
+  getNodeSqliteKysely,
+} from "./kysely-sync.js";
 import {
   decodeMlDsa65PublicKey,
   decodeMlDsa65SecretKey,
@@ -52,11 +57,6 @@ import {
   MLDSA65_PUBLIC_KEY_LENGTH,
   MLDSA65_SECRET_KEY_LENGTH,
 } from "./mldsa65-key-storage.js";
-import {
-  executeSqliteQuerySync,
-  executeSqliteQueryTakeFirstSync,
-  getNodeSqliteKysely,
-} from "./kysely-sync.js";
 
 export const PRIMARY_DEVICE_IDENTITY_KEY = "primary";
 
@@ -154,7 +154,13 @@ function fingerprintPublicKey(publicKeyPem: string): string {
 export function generateStoredDeviceIdentity(
   now: number = Date.now(),
   wrappingKeyProvider?: WrappingKeyProvider,
+  options: { allowPlaintextPrivateKey?: boolean } = {},
 ): StoredDeviceIdentity {
+  if (!wrappingKeyProvider && options.allowPlaintextPrivateKey !== true) {
+    throw new DeviceIdentityStorageError(
+      "Refusing to generate a plaintext device identity without a wrapping key provider.",
+    );
+  }
   const { publicKey, secretKey } = generateMlDsa65KeyPair();
   const deviceId = fingerprintMlDsa65PublicKey(publicKey);
   const publicKeyPem = encodeMlDsa65PublicKey(publicKey);
@@ -233,13 +239,15 @@ export function validateStoredDeviceIdentity(
     // form requires the wrap envelope to be parseable; the actual unwrap
     // is performed by `rowToStoredIdentity` because only the call site
     // holds the keyring. We do not unwrap here.
-    const hasPlaintext = typeof value.privateKeyPem === "string"
-      && value.privateKeyPem.length > 0
-      && (value.mldsaPrivateKeyPem === null || value.mldsaPrivateKeyPem === value.privateKeyPem);
-    const hasWrapped = typeof value.mldsaPrivateKeyWrapped === "string"
-      && value.mldsaPrivateKeyWrapped.length > 0
-      && typeof value.mldsaPrivateKeyWrapKeyId === "string"
-      && value.mldsaPrivateKeyWrapKeyId.length > 0;
+    const hasPlaintext =
+      typeof value.privateKeyPem === "string" &&
+      value.privateKeyPem.length > 0 &&
+      (value.mldsaPrivateKeyPem === null || value.mldsaPrivateKeyPem === value.privateKeyPem);
+    const hasWrapped =
+      typeof value.mldsaPrivateKeyWrapped === "string" &&
+      value.mldsaPrivateKeyWrapped.length > 0 &&
+      typeof value.mldsaPrivateKeyWrapKeyId === "string" &&
+      value.mldsaPrivateKeyWrapKeyId.length > 0;
     if (!hasPlaintext && !hasWrapped) {
       throw invalidStoredIdentityError(identityKey);
     }
@@ -286,22 +294,23 @@ function rowToStoredIdentity(
   // The fallback keeps the M5 migration non-destructive: existing rows
   // keep working until a Doctor backfill runs.
   const publicKeyPem =
-    (typeof row.mldsa_public_key_pem === "string" && row.mldsa_public_key_pem.length > 0
+    typeof row.mldsa_public_key_pem === "string" && row.mldsa_public_key_pem.length > 0
       ? row.mldsa_public_key_pem
       : typeof row.public_key_pem === "string"
         ? row.public_key_pem
-        : null);
+        : null;
 
   // The wrap envelope (BLOB -> base64url string + keyId) is new in M3.
   // Legacy rows (M1/M2) have these columns as null and a plaintext secret
   // in `mldsa_private_key_pem` / `private_key_pem`.
   const wrappedBlob = row.mldsa_private_key_wrapped;
   const wrapKeyId = row.mldsa_private_key_wrap_key_id;
-  const hasWrapped = wrappedBlob !== null
-    && wrappedBlob !== undefined
-    && wrappedBlob.length > 0
-    && typeof wrapKeyId === "string"
-    && wrapKeyId.length > 0;
+  const hasWrapped =
+    wrappedBlob !== null &&
+    wrappedBlob !== undefined &&
+    wrappedBlob.length > 0 &&
+    typeof wrapKeyId === "string" &&
+    wrapKeyId.length > 0;
 
   if (hasWrapped) {
     if (!wrappingKeyProvider) {
@@ -382,6 +391,7 @@ function salvageStoredIdentityRow(
   row: DeviceIdentityRow,
   expectedIdentityKey: string,
   repairedAtMs: number,
+  wrappingKeyProvider?: WrappingKeyProvider,
 ): StoredDeviceIdentity | null {
   // The PQC fork only stores one algorithm class (ML-DSA-65). Salvage is
   // limited to repairing the device_id fingerprint and timestamp; raw key
@@ -395,11 +405,12 @@ function salvageStoredIdentityRow(
 
   const wrappedBlob = row.mldsa_private_key_wrapped;
   const wrapKeyId = row.mldsa_private_key_wrap_key_id;
-  const hasWrapped = wrappedBlob !== null
-    && wrappedBlob !== undefined
-    && wrappedBlob.length > 0
-    && typeof wrapKeyId === "string"
-    && wrapKeyId.length > 0;
+  const hasWrapped =
+    wrappedBlob !== null &&
+    wrappedBlob !== undefined &&
+    wrappedBlob.length > 0 &&
+    typeof wrapKeyId === "string" &&
+    wrapKeyId.length > 0;
 
   if (hasWrapped) {
     // Salvage is a same-row re-validation: we just need the public side
@@ -407,11 +418,11 @@ function salvageStoredIdentityRow(
     // salvage time because Doctor runs without the keyring and only
     // fixes timestamps / device_id, not signing material.
     const publicKeyPem =
-      (typeof row.mldsa_public_key_pem === "string" && row.mldsa_public_key_pem.length > 0
+      typeof row.mldsa_public_key_pem === "string" && row.mldsa_public_key_pem.length > 0
         ? row.mldsa_public_key_pem
         : typeof row.public_key_pem === "string"
           ? row.public_key_pem
-          : null);
+          : null;
     if (publicKeyPem === null || !isMlDsa65PublicKey(publicKeyPem)) {
       return null;
     }
@@ -422,6 +433,21 @@ function salvageStoredIdentityRow(
       return null;
     }
     if (publicKeyRaw.length !== MLDSA65_PUBLIC_KEY_LENGTH) {
+      return null;
+    }
+    try {
+      if (!wrappingKeyProvider) {
+        return null;
+      }
+      const serialized = Buffer.from(wrappedBlob).toString("utf8");
+      const wrapped = deserializeWrappedSecret(serialized);
+      if (wrapped.keyId !== wrapKeyId) {
+        return null;
+      }
+      if (unwrapSecret(wrapped, wrappingKeyProvider).length !== MLDSA65_SECRET_KEY_LENGTH) {
+        return null;
+      }
+    } catch {
       return null;
     }
     const createdAtMs =
@@ -443,10 +469,7 @@ function salvageStoredIdentityRow(
 
   // Plaintext salvage path. Prefer the new column, fall back to the
   // legacy column so M1/M2 rows can still be repaired.
-  if (
-    typeof row.public_key_pem !== "string" ||
-    typeof row.private_key_pem !== "string"
-  ) {
+  if (typeof row.public_key_pem !== "string" || typeof row.private_key_pem !== "string") {
     return null;
   }
   if (!isMlDsa65PublicKey(row.public_key_pem) || !isMlDsa65SecretKey(row.private_key_pem)) {
@@ -673,6 +696,7 @@ export function repairInvalidStoredDeviceIdentity(
           existingRow,
           resolved.identityKey,
           candidate.createdAtMs,
+          options.wrappingKeyProvider,
         );
         if (salvaged) {
           executeSqliteQuerySync(

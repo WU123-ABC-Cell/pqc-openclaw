@@ -43,7 +43,7 @@ whole-repository call-path audit.
 The production installer creates a 32-byte base64url key at
 `$STATE_DIR/wrap-key.b64`, sets mode 0600, and points the generated systemd unit
 at it through `OPENCLAW_WRAP_KEY_FILE`. It also creates
-`$STATE_DIR/openclaw.env` containing the gateway token.
+`/etc/pqc-openclaw/openclaw.env` containing the gateway token (root-owned, mode 0600).
 
 The installer does not populate an OS keyring. `OsKeyring` and
 `CompositeKeyring` exist in the runtime, but migration to a platform keyring is

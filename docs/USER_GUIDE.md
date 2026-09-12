@@ -61,7 +61,7 @@ The installer does, in order:
 3. Runs `pnpm install --frozen-lockfile`, then `pnpm run build`.
 4. Writes a fresh 32-byte file-backed key at `$STATE_DIR/wrap-key.b64` (0600).
 5. Installs the healthcheck, backup, and Prometheus collector wrappers.
-6. Renders the Linux systemd unit and creates `$STATE_DIR/openclaw.env`.
+6. Renders the Linux systemd unit and creates `/etc/pqc-openclaw/openclaw.env` (root-owned, 0600).
 
 The installer does not populate an OS keyring. That is an explicit later
 operation because platform keyrings may require an interactive unlock.
@@ -153,10 +153,10 @@ verifies each piece is healthy.
 sudo systemctl enable --now pqc-openclaw
 
 # WSL2 / manual foreground start
-sudo -u pqc-openclaw bash -c '
+sudo bash -c '
   cd /opt/pqc-openclaw
-  set -a; source /var/lib/pqc-openclaw/openclaw.env; set +a
-  node dist/index.js gateway --bind 127.0.0.1 --port 18789
+  set -a; source /etc/pqc-openclaw/openclaw.env; set +a
+  exec runuser -u pqc-openclaw -- node dist/index.js gateway --bind 127.0.0.1 --port 18789
 '
 ```
 
@@ -321,7 +321,8 @@ sudo bash /usr/local/bin/backup-pqc.sh --verify "$LATEST"
 ```
 
 For off-host storage, set these variables in the scheduler environment (the
-gateway's `$STATE_DIR/openclaw.env` is not loaded by the backup service):
+gateway's `/etc/pqc-openclaw/openclaw.env` is not loaded by the backup service).
+If a custom file key is inside the state tree, also pass `--wrap-key-file`.
 
 ```sh
 S3_BUCKET=my-pqc-backups
@@ -529,8 +530,9 @@ both commands read the current `.nvmrc`.
 ### 7.2 "`[FAIL] wrap-key-file: not found`"
 
 Do not generate a replacement if encrypted state already exists. Recover the
-exact file from a verified backup. On a truly fresh deployment, rerun the
-installer from its source checkout to provision the initial file key.
+exact file from the separate offline/KMS recovery channel; hardened state
+backups intentionally exclude wrapping keys. On a truly fresh deployment,
+rerun the installer from its source checkout to provision the initial file key.
 
 ### 7.3 "`[FAIL] healthz: GET /healthz returned 000000`"
 
@@ -542,7 +544,7 @@ for the actual error. Common causes:
   `WorkingDirectory=/opt/pqc-openclaw`. Check
   `systemctl show pqc-openclaw | grep WorkingDirectory`
 - Missing env vars: the systemd unit should
-  `EnvironmentFile=-/var/lib/pqc-openclaw/openclaw.env`.
+  `EnvironmentFile=-/etc/pqc-openclaw/openclaw.env`.
   Check `systemctl show pqc-openclaw | grep EnvironmentFile`
 
 ### 7.4 "Restart loop (systemd says `activating` then `failed` repeatedly)"

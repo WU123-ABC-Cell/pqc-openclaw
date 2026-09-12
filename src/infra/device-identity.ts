@@ -13,6 +13,12 @@
 import fs from "node:fs";
 import path from "node:path";
 import { resolveStateDir } from "../config/paths.js";
+import {
+  encodeBase64UrlKey,
+  FileKeyring,
+  generateWrappingKey,
+  getDefaultKeyringFromEnv,
+} from "../security/keyring-provider.js";
 import { acquireDeviceIdentityCoordinator } from "./device-identity-coordinator.js";
 import {
   generateStoredDeviceIdentity,
@@ -25,6 +31,7 @@ import {
   type DeviceIdentityStoreOptions,
   type StoredDeviceIdentity,
 } from "./device-identity-store.js";
+import { pruneMapToMaxSize } from "./map-size.js";
 import {
   decodeMlDsa65PublicKey,
   decodeMlDsa65SecretKey,
@@ -34,8 +41,6 @@ import {
   signMlDsa65Payload as signMlDsa65PayloadRaw,
   verifyMlDsa65Signature as verifyMlDsa65SignatureRaw,
 } from "./mldsa65-key-storage.js";
-import { getDefaultKeyringFromEnv } from "../security/keyring-provider.js";
-import { pruneMapToMaxSize } from "./map-size.js";
 
 export type { DeviceIdentity } from "./device-identity-store.js";
 
@@ -138,6 +143,52 @@ function withDeviceIdentityCoordinator<T>(
   return result;
 }
 
+function createFallbackFileKeyring(options: DeviceIdentityStoreOptions): FileKeyring {
+  const stateDir = resolveLegacyStateDir(options);
+  const keyPath = path.join(stateDir, "wrap-key.b64");
+  fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  try {
+    fs.writeFileSync(keyPath, encodeBase64UrlKey(generateWrappingKey()), {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600,
+    });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+      throw error;
+    }
+  }
+  const keyStat = fs.lstatSync(keyPath);
+  if (!keyStat.isFile() || keyStat.isSymbolicLink()) {
+    throw new Error(`Refusing unsafe device identity wrapping-key path: ${keyPath}`);
+  }
+  if (process.platform !== "win32" && (keyStat.mode & 0o077) !== 0) {
+    throw new Error(`Refusing device identity wrapping key with unsafe permissions: ${keyPath}`);
+  }
+  return new FileKeyring(
+    keyPath,
+    options.env?.OPENCLAW_WRAP_KEY_ID ?? process.env.OPENCLAW_WRAP_KEY_ID ?? "file-keyring",
+  );
+}
+
+export function resolveDeviceIdentityWrappingOptions(
+  options: DeviceIdentityStoreOptions,
+  createFallback: boolean,
+): DeviceIdentityStoreOptions {
+  if (options.wrappingKeyProvider) {
+    return options;
+  }
+  const defaultKeyring = getDefaultKeyringFromEnv(options.env ?? process.env);
+  if (defaultKeyring) {
+    return { ...options, wrappingKeyProvider: defaultKeyring };
+  }
+  const fallbackPath = path.join(resolveLegacyStateDir(options), "wrap-key.b64");
+  if (!createFallback && !pathMayExist(fallbackPath)) {
+    return options;
+  }
+  return { ...options, wrappingKeyProvider: createFallbackFileKeyring(options) };
+}
+
 function loadOrCreateDeviceIdentityOwned(options: DeviceIdentityStoreOptions): DeviceIdentity {
   assertNoPendingLegacyIdentity(options);
   // M5.5 auto-inject: when the caller didn't supply a wrapping keyring
@@ -149,13 +200,7 @@ function loadOrCreateDeviceIdentityOwned(options: DeviceIdentityStoreOptions): D
   // repeated `getActiveKey()` calls during startup are memory lookups
   // (replaces the per-call `readFileSync + chmodSync + base64.decode`
   // pattern of the M5.5 v1/v2 runtime patches).
-  let resolvedOptions = options;
-  if (!options.wrappingKeyProvider) {
-    const defaultKeyring = getDefaultKeyringFromEnv();
-    if (defaultKeyring) {
-      resolvedOptions = { ...options, wrappingKeyProvider: defaultKeyring };
-    }
-  }
+  const resolvedOptions = resolveDeviceIdentityWrappingOptions(options, true);
   const existing = readStoredDeviceIdentity(resolvedOptions);
   if (existing) {
     return toDeviceIdentity(existing);
@@ -167,10 +212,7 @@ function loadOrCreateDeviceIdentityOwned(options: DeviceIdentityStoreOptions): D
   // path actually wraps the freshly generated secret; without this the
   // candidate would be plaintext and `insertStoredDeviceIdentityIfAbsent`
   // would persist a plaintext row even though the keyring is configured.
-  const candidate = generateStoredDeviceIdentity(
-    Date.now(),
-    resolvedOptions.wrappingKeyProvider,
-  );
+  const candidate = generateStoredDeviceIdentity(Date.now(), resolvedOptions.wrappingKeyProvider);
   return toDeviceIdentity(insertStoredDeviceIdentityIfAbsent(candidate, resolvedOptions));
 }
 
@@ -210,7 +252,9 @@ export function loadDeviceIdentityIfPresent(
 ): DeviceIdentity | null {
   return withDeviceIdentityCoordinator(options, (_resolved, resolvedOptions) => {
     assertNoPendingLegacyIdentity(resolvedOptions);
-    const stored = readStoredDeviceIdentityReadOnly(resolvedOptions);
+    const stored = readStoredDeviceIdentityReadOnly(
+      resolveDeviceIdentityWrappingOptions(resolvedOptions, false),
+    );
     return stored ? toDeviceIdentity(stored) : null;
   });
 }

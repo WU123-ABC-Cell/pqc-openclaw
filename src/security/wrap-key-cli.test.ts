@@ -10,19 +10,20 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
-  encodeMlDsa65SecretKey,
-  generateMlDsa65KeyPair,
-  encodeMlDsa65PublicKey,
-  fingerprintMlDsa65PublicKey,
-} from "../infra/mldsa65-key-storage.js";
-import {
   generateStoredDeviceIdentity,
   insertStoredDeviceIdentityIfAbsent,
   PRIMARY_DEVICE_IDENTITY_KEY,
   readStoredDeviceIdentity,
   type DeviceIdentityStoreOptions,
 } from "../infra/device-identity-store.js";
+import {
+  encodeMlDsa65SecretKey,
+  generateMlDsa65KeyPair,
+  encodeMlDsa65PublicKey,
+  fingerprintMlDsa65PublicKey,
+} from "../infra/mldsa65-key-storage.js";
 import { closeOpenClawStateDatabaseForTest } from "../state/openclaw-state-db.js";
+import { FileKeyring } from "./keyring-provider.js";
 import {
   type ActiveWrappingKey,
   type WrappingKeyProvider,
@@ -37,7 +38,6 @@ import {
   wrapKeyImportCommand,
   wrapKeyStatusCommand,
 } from "./wrap-key-cli.js";
-import { FileKeyring } from "./keyring-provider.js";
 import { WRAP_KEY_BACKUP_CONSTANTS } from "./wrap-key-rotation.js";
 
 class InMemoryKeyring implements WrappingKeyProvider {
@@ -163,9 +163,7 @@ describe("wrapKeyHealthCheck (whitepaper 2.2.7)", () => {
     const row = status.rows[0];
     expect(row.state).toBe("wrapped");
     expect(row.wrapKeyId).toBe("wrap-key-2026-08");
-    expect(
-      status.notes.some((n) => /is NOT the active keyId/.test(n)),
-    ).toBe(true);
+    expect(status.notes.some((n) => /is NOT the active keyId/.test(n))).toBe(true);
   });
 
   it("flags a plaintext row (legacy M1/M2) as a hint, not an error", async () => {
@@ -173,7 +171,9 @@ describe("wrapKeyHealthCheck (whitepaper 2.2.7)", () => {
     keyring.addKey("wrap-key-2026-08", newKey());
     const options = makeStoreOptions(keyring);
     // Insert a plaintext row (no keyring on the insert path).
-    const candidate = generateStoredDeviceIdentity(1_700_000_000_000);
+    const candidate = generateStoredDeviceIdentity(1_700_000_000_000, undefined, {
+      allowPlaintextPrivateKey: true,
+    });
     insertStoredDeviceIdentityIfAbsent(candidate, {
       env: options.env,
       path: path.join(options.stateDir, "state", "openclaw.sqlite"),
@@ -184,9 +184,7 @@ describe("wrapKeyHealthCheck (whitepaper 2.2.7)", () => {
     });
     const row = status.rows[0];
     expect(row.state).toBe("plaintext");
-    expect(
-      status.notes.some((n) => /plaintext; consider migrating/.test(n)),
-    ).toBe(true);
+    expect(status.notes.some((n) => /plaintext; consider migrating/.test(n))).toBe(true);
   });
 
   it("returns an empty rows array when the caller does not list identity keys", async () => {
@@ -234,9 +232,7 @@ describe("wrapKeyExportCommand / wrapKeyImportCommand (whitepaper 2.2.8)", () =>
       passphrase: "right",
       keyId: "wrap-key-2026-08",
     });
-    expect(() =>
-      wrapKeyImportCommand({ backup, passphrase: "wrong" }),
-    ).toThrow();
+    expect(() => wrapKeyImportCommand({ backup, passphrase: "wrong" })).toThrow();
   });
 
   it("rejects a wrong-size key on export", () => {

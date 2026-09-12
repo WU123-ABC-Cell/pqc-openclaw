@@ -68,6 +68,11 @@ def make_state_dir():
     conn.close()
     with open(os.path.join(state, "wrap-key.b64"), "w") as f:
         f.write("dGVzdC1rZXktMzItYnl0ZXMtZm9yLXRlc3RpbmcxMjM0NQ==")
+    os.makedirs(os.path.join(state, "keys"), exist_ok=True)
+    with open(os.path.join(state, "keys", "current.key"), "w") as f:
+        f.write("Y3VzdG9tLWtleS1tdXN0LXN0YXktb3V0LW9mLWJhY2t1cHM=")
+    with open(os.path.join(state, "openclaw.env"), "w") as f:
+        f.write("OPENCLAW_GATEWAY_TOKEN=must-not-enter-backup\n")
     with open(os.path.join(state, "pqc-audit.log"), "w") as f:
         f.write('{"event":"mlock","bytes":32,"timestamp":"2026-09-02T15:00:00Z"}\n')
     return state
@@ -108,6 +113,7 @@ def main():
             args.script,
             "--state-dir", state,
             "--backup-dir", backup,
+            "--wrap-key-file", os.path.join(state, "keys", "..", "keys", "current.key"),
             "--skip-s3", "--skip-healthcheck",
             "--label", "e2e-test",
         )
@@ -150,6 +156,12 @@ def main():
             fail("no current state/openclaw.sqlite inside the tarball")
         if any("/mlock/" in m for m in members):
             fail("mlock/ tmpfs was included in the tarball (should be excluded)")
+        if "pqc-openclaw-state/wrap-key.b64" in members:
+            fail("wrapping key was co-located with encrypted state in the backup")
+        if "pqc-openclaw-state/keys/current.key" in members:
+            fail("custom wrapping key was co-located with encrypted state in the backup")
+        if "pqc-openclaw-state/openclaw.env" in members:
+            fail("legacy service secrets were included in the backup")
 
         # 5. Restore the archive and prove the current database plus key material
         #    survive with their contents intact, not merely as readable files.
@@ -174,9 +186,11 @@ def main():
             lines = r.stdout.strip().splitlines()
             if lines != ["ok", "hello,world,pqc"]:
                 fail(f"restored database contents differ: {lines}")
-            if not os.path.isfile(os.path.join(restored_root, "wrap-key.b64")):
-                fail("restored tree is missing wrap-key.b64")
-            log("5. restored current SQLite database + key material: OK")
+            if os.path.exists(os.path.join(restored_root, "wrap-key.b64")):
+                fail("restored tree unexpectedly contains wrap-key.b64")
+            if os.path.exists(os.path.join(restored_root, "keys", "current.key")):
+                fail("restored tree unexpectedly contains custom wrapping key")
+            log("5. restored current SQLite database without co-located key material: OK")
 
         # 6. --verify standalone mode
         log(f"6. backup-pqc.sh --verify {latest}")

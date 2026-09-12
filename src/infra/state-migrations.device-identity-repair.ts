@@ -7,6 +7,7 @@ import {
   readStoredDeviceIdentityReadOnly,
   repairInvalidStoredDeviceIdentity,
 } from "./device-identity-store.js";
+import { resolveDeviceIdentityWrappingOptions } from "./device-identity.js";
 import { formatErrorMessage } from "./errors.js";
 import type { LegacyDeviceIdentityDetection } from "./state-migrations.device-identity.types.js";
 import type { MigrationMessages } from "./state-migrations.types.js";
@@ -68,10 +69,19 @@ export function hasLegacyDeviceIdentityPath(detected: LegacyDeviceIdentityDetect
 /** Generate a replacement only after the caller acquires Doctor's exclusive state lock. */
 export function repairInvalidCanonicalIdentity(env: NodeJS.ProcessEnv): MigrationMessages {
   try {
-    const result = repairInvalidStoredDeviceIdentity(generateStoredDeviceIdentity(), {
-      env,
-      identityKey: IDENTITY_KEY,
-    });
+    const options = resolveDeviceIdentityWrappingOptions({ env, identityKey: IDENTITY_KEY }, true);
+    const wrappingKeyProvider = options.wrappingKeyProvider;
+    if (!wrappingKeyProvider) {
+      throw new DeviceIdentityStorageError(
+        "A wrapping key provider is required before Doctor can replace a device identity.",
+      );
+    }
+    const result = repairInvalidStoredDeviceIdentity(
+      generateStoredDeviceIdentity(Date.now(), wrappingKeyProvider),
+      {
+        ...options,
+      },
+    );
     if (!result.repaired) {
       return { changes: [], warnings: [] };
     }

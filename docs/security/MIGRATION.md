@@ -174,7 +174,7 @@ What this does, in order:
 4. Writes a fresh file-backed key to `$STATE_DIR/wrap-key.b64` (mode 0600).
 5. Installs the healthcheck, backup, and Prometheus collector wrappers.
 6. Renders `/etc/systemd/system/pqc-openclaw.service` and creates
-   `$STATE_DIR/openclaw.env`; it does not start the unit or populate an OS keyring.
+   `/etc/pqc-openclaw/openclaw.env`; it does not start the unit or populate an OS keyring.
 
 ---
 
@@ -294,19 +294,19 @@ the upstream stays on 18789.
 ```sh
 sudo useradd --system --home /var/lib/pqc-openclaw-test --shell /usr/sbin/nologin openclaw-test
 cd /srv/pqc-openclaw-source
-sudo bash scripts/install-pqc.sh \
+sudo env CONFIG_DIR=/etc/pqc-openclaw-test bash scripts/install-pqc.sh \
     --install-root /opt/pqc-openclaw \
     --state-dir /var/lib/pqc-openclaw-test \
     --service-user openclaw-test \
     --skip-systemd
 
 # Start it manually on a different port:
-sudo -u openclaw-test bash -c '
+sudo bash -c '
   export OPENCLAW_STATE_DIR=/var/lib/pqc-openclaw-test
   export OPENCLAW_GATEWAY_PORT=28789
   export OPENCLAW_GATEWAY_BIND=loopback
-  set -a; source /var/lib/pqc-openclaw-test/openclaw.env; set +a
-  node /opt/pqc-openclaw/dist/index.js gateway --bind loopback --port 28789
+  set -a; source /etc/pqc-openclaw-test/openclaw.env; set +a
+  exec runuser -u openclaw-test -- node /opt/pqc-openclaw/dist/index.js gateway --bind loopback --port 28789
 '
 
 # Smoke test:
