@@ -4,6 +4,7 @@
 import os from "node:os";
 
 const MAX_LOCAL_FULL_SUITE_PARALLELISM = 10;
+const MAX_MEMORY_GB_FOR_SERIAL_FULL_SUITE = 8;
 const TRUTHY_ENV_VALUES = new Set(["1", "true", "yes", "on"]);
 
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
@@ -199,10 +200,19 @@ export function resolveLocalVitestScheduling(
 /** @internal Shared repository-script contract. */
 export function resolveLocalFullSuiteProfile(env = process.env, system = detectVitestHostInfo()) {
   const scheduling = resolveLocalVitestScheduling(env, system, "threads");
+  const totalMemoryGb = (system.totalMemoryBytes ?? 0) / 1024 ** 3;
+  const mustSerializeForMemory =
+    totalMemoryGb > 0 &&
+    totalMemoryGb <= MAX_MEMORY_GB_FOR_SERIAL_FULL_SUITE &&
+    !isSystemThrottleDisabled(env);
   return {
     // Each shard is a separate Vitest process with its own module graph. Spend the
     // host worker budget once across shards instead of multiplying it inside them.
-    shardParallelism: Math.min(scheduling.maxWorkers, MAX_LOCAL_FULL_SUITE_PARALLELISM),
+    // Two broad shards can each retain more than 1 GiB, so an 8 GiB host needs
+    // enough headroom for one shard, the WSL VM, and native child processes.
+    shardParallelism: mustSerializeForMemory
+      ? 1
+      : Math.min(scheduling.maxWorkers, MAX_LOCAL_FULL_SUITE_PARALLELISM),
     vitestMaxWorkers: 1,
   };
 }

@@ -102,6 +102,25 @@ describe("vitest local full-suite profile", () => {
     });
   });
 
+  it("serializes broad shards on an 8 GiB host even when memory is initially free", () => {
+    const hostInfo = {
+      cpuCount: 24,
+      loadAverage1m: 0,
+      totalMemoryBytes: 8 * 1024 ** 3,
+      freeMemoryBytes: 7 * 1024 ** 3,
+    };
+
+    expect(resolveLocalVitestScheduling({}, hostInfo, "threads")).toEqual({
+      maxWorkers: 2,
+      fileParallelism: true,
+      throttledBySystem: false,
+    });
+    expect(resolveLocalFullSuiteProfile({}, hostInfo)).toEqual({
+      shardParallelism: 1,
+      vitestMaxWorkers: 1,
+    });
+  });
+
   it("limits local full-suite shards when memory is tight", () => {
     const hostInfo = {
       cpuCount: 10,

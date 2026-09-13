@@ -233,6 +233,8 @@ describe("production lint suppressions", () => {
         "src/plugins/runtime/runtime-plugin-boundary.ts|typescript/no-unnecessary-type-parameters|1",
         "src/plugins/runtime/types-channel.ts|typescript/no-unnecessary-type-parameters|1",
         "src/plugins/trusted-tool-policy.ts|typescript/no-unnecessary-type-parameters|1",
+        "src/security/mlock-helper.ts|@typescript-eslint/no-require-imports|1",
+        "src/security/native/mlock-addon.cjs|@typescript-eslint/no-require-imports|1",
         "src/state/config-machine-state.ts|typescript/no-unnecessary-type-parameters|1",
         "src/system-agent/setup-inference-activate.ts|no-unsafe-finally|1",
         "src/system-agent/setup-inference-activate.ts|preserve-caught-error|1",

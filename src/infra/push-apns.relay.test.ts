@@ -1,5 +1,4 @@
 // Covers APNs relay request signing, config, and response handling.
-import { generateKeyPairSync } from "node:crypto";
 import { MAX_TIMER_TIMEOUT_MS } from "@openclaw/normalization-core/number-coercion";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -7,11 +6,16 @@ import {
   publicKeyRawBase64UrlFromPem,
   verifyDeviceSignature,
 } from "./device-identity.js";
+import {
+  encodeMlDsa65PublicKey,
+  encodeMlDsa65SecretKey,
+  generateMlDsa65KeyPair,
+} from "./mldsa65-key-storage.js";
 import { resolveApnsRelayConfigFromEnv, sendApnsRelayPush } from "./push-apns.relay.js";
 
 const relayGatewayIdentity = (() => {
-  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
-  const publicKeyPem = publicKey.export({ format: "pem", type: "spki" });
+  const { publicKey, secretKey } = generateMlDsa65KeyPair();
+  const publicKeyPem = encodeMlDsa65PublicKey(publicKey);
   const publicKeyRaw = publicKeyRawBase64UrlFromPem(publicKeyPem);
   const deviceId = deriveDeviceIdFromPublicKey(publicKeyRaw);
   if (!deviceId) {
@@ -20,7 +24,7 @@ const relayGatewayIdentity = (() => {
   return {
     deviceId,
     publicKey: publicKeyRaw,
-    privateKeyPem: privateKey.export({ format: "pem", type: "pkcs8" }),
+    privateKeyPem: encodeMlDsa65SecretKey(secretKey),
   };
 })();
 

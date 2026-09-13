@@ -187,11 +187,24 @@ function readStagedSources(root, filePaths) {
   if (filePaths.length === 0) {
     return new Map();
   }
-  const output = execFileSync("git", ["cat-file", "--batch", "-z"], {
+  const result = spawnSync("git", ["cat-file", "--batch", "-z"], {
     cwd: root,
     input: filePaths.map((filePath) => ":" + filePath).join("\0") + "\0",
     maxBuffer: GIT_MAX_BUFFER,
   });
+  if (result.error) {
+    throw result.error;
+  }
+  if (result.status !== 0) {
+    const stderr = result.stderr.toString("utf8");
+    if (/unknown (?:switch|option) [`'"]?z/.test(stderr)) {
+      return new Map(
+        filePaths.map((filePath) => [filePath, readSnapshotFile(root, filePath, true)]),
+      );
+    }
+    throw new Error(stderr.trim() || "git cat-file failed");
+  }
+  const output = result.stdout;
   const sources = new Map();
   let offset = 0;
   // -z keeps request paths NUL-framed on older Git; response headers remain newline-framed.
