@@ -5,6 +5,7 @@
 import { IncomingMessage, ServerResponse } from "node:http";
 import { Socket } from "node:net";
 import { expectDefined } from "@openclaw/normalization-core";
+import { openClawPqcDm } from "openclaw/plugin-sdk/security-runtime";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createNostrProfileHttpHandler } from "./nostr-profile-http.js";
 
@@ -34,6 +35,8 @@ vi.mock("./nostr-profile-http-runtime.js", async () => {
 vi.mock("./channel.js", () => ({
   publishNostrProfile: vi.fn(),
   getNostrProfileState: vi.fn(),
+  publishNostrPqcKeyAnnouncement: vi.fn(),
+  discoverNostrPeerPqcKey: vi.fn(),
 }));
 
 // Mock the import module
@@ -42,9 +45,22 @@ vi.mock("./nostr-profile-import.js", () => ({
   mergeProfiles: vi.fn((local, imported) => ({ ...imported, ...local })),
 }));
 
-import { publishNostrProfile, getNostrProfileState } from "./channel.js";
+import {
+  discoverNostrPeerPqcKey,
+  getNostrProfileState,
+  publishNostrPqcKeyAnnouncement,
+  publishNostrProfile,
+} from "./channel.js";
+import {
+  fingerprintMlKemPublicKey,
+  type NostrPqcKeyAnnouncement,
+} from "./nostr-pqc-key-announcement.js";
 import { importProfileFromRelays } from "./nostr-profile-import.js";
-import { TEST_HEX_PUBLIC_KEY, TEST_SETUP_RELAY_URLS } from "./test-fixtures.js";
+import {
+  TEST_HEX_PUBLIC_KEY,
+  TEST_ML_KEM_PUBLIC_KEY,
+  TEST_SETUP_RELAY_URLS,
+} from "./test-fixtures.js";
 
 // ============================================================================
 // Test Helpers
@@ -157,6 +173,8 @@ function createMockContext(overrides?: Partial<NostrProfileHttpContext>): NostrP
       pubkey: TEST_HEX_PUBLIC_KEY,
       relays: [TEST_PROFILE_RELAY_URL],
     }),
+    getPinnedPqcKey: vi.fn().mockReturnValue(undefined),
+    updatePinnedPqcKey: vi.fn().mockResolvedValue(true),
     log: {
       info: vi.fn(),
       warn: vi.fn(),
@@ -294,6 +312,148 @@ describe("nostr-profile-http", () => {
       expect(data.ok).toBe(true);
       expect(data.profile.name).toBe("testuser");
       expect(data.publishState.lastPublishedAt).toBe(1234567890);
+    });
+  });
+
+  describe("PQC key exchange", () => {
+    const fingerprint = fingerprintMlKemPublicKey(TEST_ML_KEM_PUBLIC_KEY);
+    const announcement: NostrPqcKeyAnnouncement = {
+      eventId: "a".repeat(64),
+      pubkey: TEST_HEX_PUBLIC_KEY,
+      createdAt: 1234567890,
+      publicKey: TEST_ML_KEM_PUBLIC_KEY,
+      fingerprint,
+    };
+    const otherPair = openClawPqcDm.generateMlKem768KeyPair();
+    const otherPublicKey = openClawPqcDm.encodeMlKemKey(otherPair.publicKey);
+    otherPair.publicKey.fill(0);
+    otherPair.secretKey.fill(0);
+    const otherFingerprint = fingerprintMlKemPublicKey(otherPublicKey);
+
+    function mockDiscovery(candidate = announcement) {
+      vi.mocked(discoverNostrPeerPqcKey).mockResolvedValue({
+        announcement: candidate,
+        relaysQueried: [TEST_PROFILE_RELAY_URL],
+        sourceRelays: [TEST_PROFILE_RELAY_URL],
+      });
+    }
+
+    it("returns a signed relay candidate without trusting it", async () => {
+      mockDiscovery();
+      const { res, run } = createProfileHttpHarness(
+        "GET",
+        `/api/channels/nostr/default/pqc-keys/${TEST_HEX_PUBLIC_KEY}`,
+      );
+
+      await run();
+
+      const data = expectOkResponse(res);
+      expect(data.trustState).toBe("untrusted-first-key");
+      expect(data.announcement.fingerprint).toBe(fingerprint);
+    });
+
+    it("pins a confirmed first key with compare-and-set semantics", async () => {
+      mockDiscovery();
+      const { ctx, res, run } = createProfileHttpHarness(
+        "PUT",
+        `/api/channels/nostr/default/pqc-keys/${TEST_HEX_PUBLIC_KEY}`,
+        { body: { fingerprint, expectedCurrentFingerprint: null } },
+      );
+
+      await run();
+
+      const data = expectOkResponse(res);
+      expect(data.updated).toBe(true);
+      expect(ctx.updatePinnedPqcKey).toHaveBeenCalledWith(
+        "default",
+        TEST_HEX_PUBLIC_KEY,
+        TEST_ML_KEM_PUBLIC_KEY,
+        null,
+      );
+    });
+
+    it("rejects a well-formed fingerprint that does not match the relay candidate", async () => {
+      mockDiscovery();
+      const { ctx, res, run } = createProfileHttpHarness(
+        "PUT",
+        `/api/channels/nostr/default/pqc-keys/${TEST_HEX_PUBLIC_KEY}`,
+        { body: { fingerprint: otherFingerprint, expectedCurrentFingerprint: null } },
+      );
+
+      await run();
+
+      expect(res["_getStatusCode"]()).toBe(409);
+      expect(ctx.updatePinnedPqcKey).not.toHaveBeenCalled();
+    });
+
+    it("rejects a rotation that is not chained to the current pin", async () => {
+      mockDiscovery();
+      const { res, run } = createProfileHttpHarness(
+        "PUT",
+        `/api/channels/nostr/default/pqc-keys/${TEST_HEX_PUBLIC_KEY}`,
+        {
+          body: { fingerprint, expectedCurrentFingerprint: otherFingerprint },
+          ctx: { getPinnedPqcKey: vi.fn().mockReturnValue(otherPublicKey) },
+        },
+      );
+
+      await run();
+
+      expect(res["_getStatusCode"]()).toBe(409);
+    });
+
+    it("accepts an explicitly confirmed chained rotation", async () => {
+      mockDiscovery({ ...announcement, previousFingerprint: otherFingerprint });
+      const { ctx, res, run } = createProfileHttpHarness(
+        "PUT",
+        `/api/channels/nostr/default/pqc-keys/${TEST_HEX_PUBLIC_KEY}`,
+        {
+          body: { fingerprint, expectedCurrentFingerprint: otherFingerprint },
+          ctx: { getPinnedPqcKey: vi.fn().mockReturnValue(otherPublicKey) },
+        },
+      );
+
+      await run();
+
+      const data = expectOkResponse(res);
+      expect(data.updated).toBe(true);
+      expect(ctx.updatePinnedPqcKey).toHaveBeenCalledWith(
+        "default",
+        TEST_HEX_PUBLIC_KEY,
+        TEST_ML_KEM_PUBLIC_KEY,
+        otherPublicKey,
+      );
+    });
+
+    it("requires operator.admin before pinning", async () => {
+      setGatewayRuntimeScopes(["operator.read"]);
+      const { ctx, res, run } = createProfileHttpHarness(
+        "PUT",
+        `/api/channels/nostr/default/pqc-keys/${TEST_HEX_PUBLIC_KEY}`,
+        { body: { fingerprint, expectedCurrentFingerprint: null } },
+      );
+
+      await run();
+
+      expect(res["_getStatusCode"]()).toBe(403);
+      expect(ctx.updatePinnedPqcKey).not.toHaveBeenCalled();
+    });
+
+    it("publishes the local signed key announcement", async () => {
+      vi.mocked(publishNostrPqcKeyAnnouncement).mockResolvedValue({
+        ...announcement,
+        successes: [TEST_PROFILE_RELAY_URL],
+        failures: [],
+      });
+      const { res, run } = createProfileHttpHarness(
+        "POST",
+        "/api/channels/nostr/default/pqc-keys/publish",
+      );
+
+      await run();
+
+      expectOkResponse(res);
+      expect(publishNostrPqcKeyAnnouncement).toHaveBeenCalledWith("default");
     });
   });
 

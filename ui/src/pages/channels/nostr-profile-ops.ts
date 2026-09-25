@@ -1,25 +1,25 @@
-// Nostr profile HTTP operations for the channels page: gateway REST calls for
-// publishing and importing the relay profile, plus validation-error parsing.
+// Nostr HTTP operations for the channels page: gateway REST calls for profile
+// management and the operator-confirmed PQC peer-key trust workflow.
 import type { NostrProfile } from "../../api/types.ts";
 
-const NOSTR_PROFILE_REQUEST_TIMEOUT_MS = 30_000;
+const NOSTR_REQUEST_TIMEOUT_MS = 30_000;
 
-type NostrProfileHttpResult<T> = {
+type NostrHttpResult<T> = {
   data: T | null;
   response: Response;
 };
 
-async function requestNostrProfile<T>(
+async function requestNostr<T>(
   url: string,
   init: Omit<RequestInit, "signal">,
-): Promise<NostrProfileHttpResult<T>> {
+): Promise<NostrHttpResult<T>> {
   const controller = new AbortController();
   const timeout = setTimeout(
     () =>
       controller.abort(
-        new DOMException("Nostr profile request timed out after 30 seconds", "TimeoutError"),
+        new DOMException("Nostr request timed out after 30 seconds", "TimeoutError"),
       ),
-    NOSTR_PROFILE_REQUEST_TIMEOUT_MS,
+    NOSTR_REQUEST_TIMEOUT_MS,
   );
   try {
     const response = await fetch(url, { ...init, signal: controller.signal });
@@ -63,12 +63,16 @@ function buildNostrProfileUrl(accountId: string, suffix = ""): string {
   return `/api/channels/nostr/${encodeURIComponent(accountId)}/profile${suffix}`;
 }
 
+function buildNostrPqcKeyUrl(accountId: string, suffix: string): string {
+  return `/api/channels/nostr/${encodeURIComponent(accountId)}/pqc-keys/${suffix}`;
+}
+
 export async function putNostrProfile(params: {
   accountId: string;
   headers: Record<string, string>;
   values: NostrProfile;
 }) {
-  return await requestNostrProfile<{
+  return await requestNostr<{
     ok?: boolean;
     error?: string;
     details?: unknown;
@@ -87,7 +91,7 @@ export async function importNostrProfile(params: {
   accountId: string;
   headers: Record<string, string>;
 }) {
-  return await requestNostrProfile<{
+  return await requestNostr<{
     ok?: boolean;
     error?: string;
     imported?: NostrProfile;
@@ -100,5 +104,93 @@ export async function importNostrProfile(params: {
       ...params.headers,
     },
     body: JSON.stringify({ autoMerge: true }),
+  });
+}
+
+export type NostrPqcTrustState =
+  | "not-found"
+  | "pinned"
+  | "untrusted-first-key"
+  | "untrusted-rotation"
+  | "rotation-chain-mismatch";
+
+export type NostrPqcKeyAnnouncement = {
+  eventId: string;
+  pubkey: string;
+  createdAt: number;
+  publicKey: string;
+  fingerprint: string;
+  previousFingerprint?: string;
+};
+
+export type NostrPqcKeyDiscovery = {
+  peerPubkey: string;
+  pinnedFingerprint: string | null;
+  trustState: NostrPqcTrustState;
+  announcement: NostrPqcKeyAnnouncement | null;
+  relaysQueried: string[];
+  sourceRelays: string[];
+};
+
+type NostrPqcErrorResponse = {
+  ok?: false;
+  error?: string;
+};
+
+export async function discoverNostrPqcKey(params: {
+  accountId: string;
+  peerPubkey: string;
+  headers: Record<string, string>;
+}) {
+  return await requestNostr<(NostrPqcKeyDiscovery & { ok: true }) | NostrPqcErrorResponse>(
+    buildNostrPqcKeyUrl(params.accountId, encodeURIComponent(params.peerPubkey)),
+    {
+      method: "GET",
+      headers: params.headers,
+    },
+  );
+}
+
+export async function pinNostrPqcKey(params: {
+  accountId: string;
+  peerPubkey: string;
+  fingerprint: string;
+  expectedCurrentFingerprint: string | null;
+  headers: Record<string, string>;
+}) {
+  return await requestNostr<
+    | {
+        ok: true;
+        updated: boolean;
+        announcement: NostrPqcKeyAnnouncement;
+      }
+    | NostrPqcErrorResponse
+  >(buildNostrPqcKeyUrl(params.accountId, encodeURIComponent(params.peerPubkey)), {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      ...params.headers,
+    },
+    body: JSON.stringify({
+      fingerprint: params.fingerprint,
+      expectedCurrentFingerprint: params.expectedCurrentFingerprint,
+    }),
+  });
+}
+
+export async function publishNostrPqcKey(params: {
+  accountId: string;
+  headers: Record<string, string>;
+}) {
+  return await requestNostr<
+    | (NostrPqcKeyAnnouncement & {
+        ok: true;
+        successes: string[];
+        failures: Array<{ relay: string; error: string }>;
+      })
+    | NostrPqcErrorResponse
+  >(buildNostrPqcKeyUrl(params.accountId, "publish"), {
+    method: "POST",
+    headers: params.headers,
   });
 }

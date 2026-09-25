@@ -31,6 +31,10 @@ import {
   startNostrGatewayAccount,
 } from "./gateway.js";
 import { normalizePubkey } from "./nostr-key-utils.js";
+import type {
+  NostrPqcKeyAnnouncement,
+  NostrPqcKeyPublishResult,
+} from "./nostr-pqc-key-announcement.js";
 import type { ProfilePublishResult } from "./nostr-profile.js";
 import { resolveNostrOutboundSessionRoute } from "./session-route.js";
 import { nostrSetupContract, nostrSetupWizard } from "./setup-surface.js";
@@ -77,6 +81,8 @@ const nostrConfigAdapter = createTopLevelChannelConfigAdapter<ResolvedNostrAccou
     "name",
     "defaultAccount",
     "privateKey",
+    "mlKemSecretKey",
+    "mlKemPeerPublicKeys",
     "relays",
     "dmPolicy",
     "allowFrom",
@@ -130,7 +136,7 @@ export const nostrPlugin: ChannelPlugin<ResolvedNostrAccount> = createChatChanne
       selectionLabel: "Nostr",
       docsPath: "/channels/nostr",
       docsLabel: "nostr",
-      blurb: "Decentralized DMs via Nostr relays (NIP-04)",
+      blurb: "OpenClaw PQC DMs via Nostr relays (ML-KEM-768 hybrid)",
       order: 100,
     },
     capabilities: {
@@ -150,6 +156,7 @@ export const nostrPlugin: ChannelPlugin<ResolvedNostrAccount> = createChatChanne
           configured: account.configured,
           extra: {
             publicKey: account.publicKey,
+            mlKemPublicKey: account.mlKemPublicKey,
           },
         }),
     },
@@ -238,4 +245,29 @@ export async function getNostrProfileState(accountId: string = DEFAULT_ACCOUNT_I
     return null;
   }
   return bus.getProfileState();
+}
+
+export async function publishNostrPqcKeyAnnouncement(
+  accountId: string = DEFAULT_ACCOUNT_ID,
+): Promise<NostrPqcKeyPublishResult> {
+  const bus = getActiveNostrBuses().get(accountId);
+  if (!bus) {
+    throw new Error(`Nostr bus not running for account ${accountId}`);
+  }
+  return await bus.publishPqcKeyAnnouncement();
+}
+
+export async function discoverNostrPeerPqcKey(
+  accountId: string,
+  pubkey: string,
+): Promise<{
+  announcement: NostrPqcKeyAnnouncement | null;
+  relaysQueried: string[];
+  sourceRelays: string[];
+}> {
+  const bus = getActiveNostrBuses().get(accountId);
+  if (!bus) {
+    throw new Error(`Nostr bus not running for account ${accountId}`);
+  }
+  return await bus.discoverPeerPqcKey(normalizePubkey(pubkey));
 }

@@ -201,6 +201,14 @@ function renderChannelBody(key: ChannelKey, props: ChannelsProps, data: Channels
         profileFormState: showForm,
         profileFormCallbacks,
         onEditProfile: () => props.onNostrProfileEdit(accountId, profile),
+        pqcKeyPanelState: props.nostrPqcKeyPanelState,
+        pqcKeyPanelCallbacks: {
+          onPeerPubkeyChange: props.onNostrPqcPeerPubkeyChange,
+          onConfirmedFingerprintChange: props.onNostrPqcConfirmedFingerprintChange,
+          onDiscover: props.onNostrPqcDiscover,
+          onPin: props.onNostrPqcPin,
+          onPublish: props.onNostrPqcPublish,
+        },
       });
     }
     default:

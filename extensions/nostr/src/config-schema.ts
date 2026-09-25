@@ -86,6 +86,14 @@ export const NostrConfigSchema = z.object({
   /** Private key in hex or nsec bech32 format */
   privateKey: buildSecretInputSchema().optional(),
 
+  /** Base64url-encoded ML-KEM-768 secret key for OpenClaw PQC DM v1. */
+  mlKemSecretKey: buildSecretInputSchema().optional(),
+
+  /** Operator-pinned ML-KEM public keys, keyed by lowercase Nostr public key. */
+  mlKemPeerPublicKeys: z
+    .record(z.string().regex(/^[0-9a-f]{64}$/u), z.string().regex(/^[A-Za-z0-9_-]{1579}$/u))
+    .optional(),
+
   /** WebSocket relay URLs to connect to */
   relays: z.array(z.string()).optional(),
 

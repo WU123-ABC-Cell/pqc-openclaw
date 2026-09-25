@@ -1,6 +1,16 @@
 /** Public security runtime helpers for plugin-side trust boundaries. */
 
 import { statRegularFileSync as inspectRegularFileSync } from "../infra/fs-safe.js";
+import {
+  decodeMlKem768PublicKey,
+  decodeMlKem768SecretKey,
+  decryptOpenClawPqcDmV1,
+  deriveMlKem768PublicKey,
+  encodeMlKemKey,
+  encryptOpenClawPqcDmV1,
+  generateMlKem768KeyPair,
+  OPENCLAW_PQC_DM_EVENT_KIND,
+} from "../security/nip44-v2.js";
 
 /** Return whether a path resolves to a regular file, treating filesystem errors as missing. */
 export function fileExists(filePath: string): boolean {
@@ -82,5 +92,15 @@ export {
 export { resolvePreferredOpenClawTmpDir } from "../infra/tmp-openclaw-dir.js";
 export { redactSensitiveText } from "../logging/redact.js";
 export { safeEqualSecret } from "../security/secret-equal.js";
+export const openClawPqcDm = {
+  decodeMlKem768PublicKey,
+  decodeMlKem768SecretKey,
+  decryptOpenClawPqcDmV1,
+  deriveMlKem768PublicKey,
+  encodeMlKemKey,
+  encryptOpenClawPqcDmV1,
+  generateMlKem768KeyPair,
+  OPENCLAW_PQC_DM_EVENT_KIND,
+} as const;
 
 export { resolvePinnedMainDmOwnerFromAllowlist } from "../security/dm-policy-shared.js";

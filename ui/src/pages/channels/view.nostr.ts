@@ -6,6 +6,11 @@ import { t } from "../../i18n/index.ts";
 import { formatRelativeTimestamp } from "../../lib/format.ts";
 import { renderChannelConfigSection } from "./view.config.ts";
 import {
+  renderNostrPqcKeyPanel,
+  type NostrPqcKeyPanelCallbacks,
+  type NostrPqcKeyPanelState,
+} from "./view.nostr-pqc-keys.ts";
+import {
   renderNostrProfileForm,
   type NostrProfileFormState,
   type NostrProfileFormCallbacks,
@@ -43,6 +48,9 @@ export function renderNostrCard(params: {
   profileFormCallbacks?: NostrProfileFormCallbacks | null;
   /** Called when Edit Profile is clicked */
   onEditProfile?: () => void;
+  /** Operator-facing PQC peer-key trust state and actions. */
+  pqcKeyPanelState: NostrPqcKeyPanelState;
+  pqcKeyPanelCallbacks: NostrPqcKeyPanelCallbacks;
 }) {
   const {
     props,
@@ -52,6 +60,8 @@ export function renderNostrCard(params: {
     profileFormState,
     profileFormCallbacks,
     onEditProfile,
+    pqcKeyPanelState,
+    pqcKeyPanelCallbacks,
   } = params;
   const primaryAccount = nostrAccounts[0];
   const summaryConfigured = nostr?.configured ?? primaryAccount?.configured ?? false;
@@ -205,7 +215,14 @@ export function renderNostrCard(params: {
             },
           ])}
       ${summaryLastError ? renderChannelErrorRow(summaryLastError) : nothing}
-      ${renderProfileSection()} ${renderChannelConfigSection({ channelId: "nostr", props })}
+      ${renderProfileSection()}
+      ${renderNostrPqcKeyPanel({
+        state: pqcKeyPanelState,
+        callbacks: pqcKeyPanelCallbacks,
+        canAdmin: props.canAdmin,
+        configured: summaryConfigured,
+      })}
+      ${renderChannelConfigSection({ channelId: "nostr", props })}
       ${renderChannelActionRow(
         html`<button class="btn" @click=${() => props.onRefresh(false)}>
           ${t("common.refresh")}

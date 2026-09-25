@@ -7,16 +7,21 @@ import {
 } from "openclaw/plugin-sdk/account-id";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { normalizeSecretInputString, type SecretInput } from "openclaw/plugin-sdk/secret-input";
+import { openClawPqcDm } from "openclaw/plugin-sdk/security-runtime";
 import { normalizeOptionalString } from "openclaw/plugin-sdk/string-coerce-runtime";
 import type { NostrProfile } from "./config-schema.js";
 import { DEFAULT_RELAYS } from "./default-relays.js";
 import { getPublicKeyFromPrivate } from "./nostr-key-utils.js";
+
+const { decodeMlKem768SecretKey, deriveMlKem768PublicKey, encodeMlKemKey } = openClawPqcDm;
 
 interface NostrAccountConfig {
   enabled?: boolean;
   name?: string;
   defaultAccount?: string;
   privateKey?: SecretInput;
+  mlKemSecretKey?: SecretInput;
+  mlKemPeerPublicKeys?: Record<string, string>;
   relays?: string[];
   dmPolicy?: "pairing" | "allowlist" | "open" | "disabled";
   allowFrom?: Array<string | number>;
@@ -30,6 +35,9 @@ export interface ResolvedNostrAccount {
   configured: boolean;
   privateKey: string;
   publicKey: string;
+  mlKemSecretKey: string;
+  mlKemPublicKey: string;
+  mlKemPeerPublicKeys: Record<string, string>;
   relays: string[];
   profile?: NostrProfile;
   config: NostrAccountConfig;
@@ -64,7 +72,7 @@ export function resolveNostrAccount(opts: {
 
   const baseEnabled = nostrCfg?.enabled !== false;
   const privateKey = normalizeSecretInputString(nostrCfg?.privateKey) ?? "";
-  const configured = Boolean(privateKey);
+  const mlKemSecretKey = normalizeSecretInputString(nostrCfg?.mlKemSecretKey) ?? "";
 
   let publicKey = "";
   if (privateKey) {
@@ -75,6 +83,21 @@ export function resolveNostrAccount(opts: {
     }
   }
 
+  let mlKemPublicKey = "";
+  if (mlKemSecretKey) {
+    let secretKey: Uint8Array | undefined;
+    try {
+      secretKey = decodeMlKem768SecretKey(mlKemSecretKey);
+      mlKemPublicKey = encodeMlKemKey(deriveMlKem768PublicKey(secretKey));
+    } catch {
+      // Invalid key - leave public key empty so configured remains false.
+    } finally {
+      secretKey?.fill(0);
+    }
+  }
+  const mlKemPeerPublicKeys = { ...nostrCfg?.mlKemPeerPublicKeys };
+  const configured = Boolean(privateKey && publicKey && mlKemSecretKey && mlKemPublicKey);
+
   return {
     accountId,
     name: normalizeOptionalString(nostrCfg?.name),
@@ -82,12 +105,17 @@ export function resolveNostrAccount(opts: {
     configured,
     privateKey,
     publicKey,
+    mlKemSecretKey,
+    mlKemPublicKey,
+    mlKemPeerPublicKeys,
     relays: nostrCfg?.relays ?? DEFAULT_RELAYS,
     profile: nostrCfg?.profile,
     config: {
       enabled: nostrCfg?.enabled,
       name: nostrCfg?.name,
       privateKey: nostrCfg?.privateKey,
+      mlKemSecretKey: nostrCfg?.mlKemSecretKey,
+      mlKemPeerPublicKeys: nostrCfg?.mlKemPeerPublicKeys,
       relays: nostrCfg?.relays,
       dmPolicy: nostrCfg?.dmPolicy,
       allowFrom: nostrCfg?.allowFrom,

@@ -21,16 +21,18 @@ type PairingTestPage = ChannelsPageTestElement & {
 };
 
 type NostrTestPage = ChannelsPageTestElement & {
-  nostrProfileFormState: {
-    values: NostrProfile;
-    saving: boolean;
-    importing: boolean;
-    error: string | null;
-  } | null;
-  nostrProfileAccountId: string | null;
-  editNostrProfile: (accountId: string, profile: NostrProfile | null) => void;
-  saveNostrProfile: () => Promise<void>;
-  importNostrProfile: () => Promise<void>;
+  nostrProfile: {
+    formState: {
+      values: NostrProfile;
+      saving: boolean;
+      importing: boolean;
+      error: string | null;
+    } | null;
+    accountId: string | null;
+    edit: (accountId: string, profile: NostrProfile | null) => void;
+    save: () => Promise<void>;
+    import: () => Promise<void>;
+  };
 };
 
 type TestGateway = ApplicationContext["gateway"] & {
@@ -209,14 +211,14 @@ describe("ChannelsPage lifecycle", () => {
     page.context = first.context;
     document.body.append(page);
     await page.updateComplete;
-    page.editNostrProfile("old-account", { name: "old" });
+    page.nostrProfile.edit("old-account", { name: "old" });
 
-    const save = page.saveNostrProfile();
+    const save = page.nostrProfile.save();
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
     page.context = second.context;
     page.requestUpdate();
     await page.updateComplete;
-    expect(page.nostrProfileFormState).toBeNull();
+    expect(page.nostrProfile.formState).toBeNull();
 
     response.resolve(
       new Response(JSON.stringify({ ok: true, persisted: true }), {
@@ -226,7 +228,7 @@ describe("ChannelsPage lifecycle", () => {
     );
     await save;
 
-    expect(page.nostrProfileFormState).toBeNull();
+    expect(page.nostrProfile.formState).toBeNull();
     expect(firstRefresh).not.toHaveBeenCalled();
     expect(secondRefresh).not.toHaveBeenCalled();
     first.runtimeConfig.dispose();
@@ -246,12 +248,12 @@ describe("ChannelsPage lifecycle", () => {
     page.context = source.context;
     document.body.append(page);
     await page.updateComplete;
-    page.editNostrProfile("old-account", { name: "old" });
+    page.nostrProfile.edit("old-account", { name: "old" });
 
-    const load = page.importNostrProfile();
+    const load = page.nostrProfile.import();
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
     gateway.emit({ phase: "stopped" });
-    expect(page.nostrProfileFormState).toBeNull();
+    expect(page.nostrProfile.formState).toBeNull();
 
     response.resolve(
       new Response(JSON.stringify({ ok: true, saved: true, merged: { name: "stale import" } }), {
@@ -261,7 +263,7 @@ describe("ChannelsPage lifecycle", () => {
     );
     await load;
 
-    expect(page.nostrProfileFormState).toBeNull();
+    expect(page.nostrProfile.formState).toBeNull();
     expect(refresh).not.toHaveBeenCalled();
     source.runtimeConfig.dispose();
     source.channels.dispose();
@@ -278,11 +280,11 @@ describe("ChannelsPage lifecycle", () => {
     page.context = source.context;
     document.body.append(page);
     await page.updateComplete;
-    page.editNostrProfile("old-account", { name: "old" });
+    page.nostrProfile.edit("old-account", { name: "old" });
 
-    const load = page.importNostrProfile();
+    const load = page.nostrProfile.import();
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
-    page.editNostrProfile("new-account", { name: "fresh" });
+    page.nostrProfile.edit("new-account", { name: "fresh" });
     response.resolve(
       new Response(JSON.stringify({ ok: true, saved: true, merged: { name: "stale import" } }), {
         status: 200,
@@ -291,8 +293,8 @@ describe("ChannelsPage lifecycle", () => {
     );
     await load;
 
-    expect(page.nostrProfileAccountId).toBe("new-account");
-    expect(page.nostrProfileFormState?.values.name).toBe("fresh");
+    expect(page.nostrProfile.accountId).toBe("new-account");
+    expect(page.nostrProfile.formState?.values.name).toBe("fresh");
     expect(refresh).not.toHaveBeenCalled();
     source.runtimeConfig.dispose();
     source.channels.dispose();
@@ -307,15 +309,15 @@ describe("ChannelsPage lifecycle", () => {
     page.context = source.context;
     document.body.append(page);
     await page.updateComplete;
-    page.editNostrProfile("default", { name: "Alice" });
+    page.nostrProfile.edit("default", { name: "Alice" });
 
-    const save = page.saveNostrProfile();
+    const save = page.nostrProfile.save();
     await vi.advanceTimersByTimeAsync(NOSTR_PROFILE_REQUEST_TIMEOUT_MS);
     await save;
 
     expect(fetchMock).toHaveBeenCalledOnce();
-    expect(page.nostrProfileFormState?.saving).toBe(false);
-    expect(page.nostrProfileFormState?.error).toBe(
+    expect(page.nostrProfile.formState?.saving).toBe(false);
+    expect(page.nostrProfile.formState?.error).toBe(
       "Request timed out after 30 seconds; the server may still have applied the change — check the profile before retrying.",
     );
     source.runtimeConfig.dispose();
@@ -331,15 +333,15 @@ describe("ChannelsPage lifecycle", () => {
     page.context = source.context;
     document.body.append(page);
     await page.updateComplete;
-    page.editNostrProfile("default", { name: "Alice" });
+    page.nostrProfile.edit("default", { name: "Alice" });
 
-    const load = page.importNostrProfile();
+    const load = page.nostrProfile.import();
     await vi.advanceTimersByTimeAsync(NOSTR_PROFILE_REQUEST_TIMEOUT_MS);
     await load;
 
     expect(fetchMock).toHaveBeenCalledOnce();
-    expect(page.nostrProfileFormState?.importing).toBe(false);
-    expect(page.nostrProfileFormState?.error).toBe(
+    expect(page.nostrProfile.formState?.importing).toBe(false);
+    expect(page.nostrProfile.formState?.error).toBe(
       "Request timed out after 30 seconds; the server may still have applied the change — check the profile before retrying.",
     );
     source.runtimeConfig.dispose();

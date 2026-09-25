@@ -23,6 +23,7 @@ import {
   createNostrSetupAdapter,
   createNostrSetupContract,
   createNostrSetupStatus,
+  generateNostrMlKemSecretKey,
   parseRelayUrls,
 } from "./setup-adapter.js";
 import { resolveDefaultNostrAccountId, resolveNostrAccount } from "./types.js";
@@ -30,6 +31,11 @@ import { resolveDefaultNostrAccountId, resolveNostrAccount } from "./types.js";
 const t = createSetupTranslator();
 
 const channel = "nostr" as const;
+
+function ensureNostrMlKemSecretKey(cfg: Parameters<typeof resolveNostrAccount>[0]["cfg"]) {
+  const account = resolveNostrAccount({ cfg });
+  return account.config.mlKemSecretKey ? {} : { mlKemSecretKey: generateNostrMlKemSecretKey() };
+}
 const NOSTR_SETUP_HELP_LINES = [
   t("wizard.nostr.helpPrivateKeyFormat"),
   t("wizard.nostr.helpRelaysOptional"),
@@ -114,7 +120,7 @@ export const nostrSetupWizard: ChannelSetupWizard = {
         channel,
         enabled: true,
         clearFields: ["privateKey"],
-        patch: buildNostrSetupPatch(accountId, {}),
+        patch: buildNostrSetupPatch(accountId, ensureNostrMlKemSecretKey(cfg)),
       }),
   },
   credentials: [
@@ -140,7 +146,10 @@ export const nostrSetupWizard: ChannelSetupWizard = {
           channel,
           enabled: true,
           clearFields,
-          patch: buildNostrSetupPatch(accountId, patch),
+          patch: buildNostrSetupPatch(accountId, {
+            ...patch,
+            ...ensureNostrMlKemSecretKey(cfg),
+          }),
         }),
       useEnv: { clearFields: ["privateKey"] },
       set: { value: "resolved" },

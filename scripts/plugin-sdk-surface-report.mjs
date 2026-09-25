@@ -222,7 +222,8 @@ export function readPluginSdkSurfaceBudgets(env = process.env) {
       // +1: auth-profile preservation decision for native model pickers.
       // +2: shared channel question-reaction store and preflight-audio factories.
       // +1: shared channel interactive dispatcher with canonical binding authorization.
-      4834,
+      // +1: namespaced OpenClaw PQC DM runtime for the Nostr channel.
+      4835,
       env,
     ),
     publicFunctionExports: readPluginSdkSurfaceBudgetEnv(

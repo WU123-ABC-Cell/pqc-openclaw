@@ -1,6 +1,7 @@
 /* @vitest-environment jsdom */
 import { render } from "lit";
 import { describe, expect, it, vi } from "vitest";
+import { createNostrPqcKeyPanelState } from "./view.nostr-pqc-keys.ts";
 import {
   renderChannelPairingDetail,
   renderChannelPairingPrompt,
@@ -67,6 +68,7 @@ function createProps(overrides: Partial<ChannelsProps> = {}): ChannelsProps {
     showAdvancedSettings: false,
     nostrProfileFormState: null,
     nostrProfileAccountId: null,
+    nostrPqcKeyPanelState: createNostrPqcKeyPanelState(),
     selectedChannel: null,
     wizard: { phase: "idle" },
     wizardMultiselect: [],
@@ -103,6 +105,11 @@ function createProps(overrides: Partial<ChannelsProps> = {}): ChannelsProps {
     onNostrProfileSave: () => undefined,
     onNostrProfileImport: () => undefined,
     onNostrProfileToggleAdvanced: () => undefined,
+    onNostrPqcPeerPubkeyChange: () => undefined,
+    onNostrPqcConfirmedFingerprintChange: () => undefined,
+    onNostrPqcDiscover: () => undefined,
+    onNostrPqcPin: () => undefined,
+    onNostrPqcPublish: () => undefined,
     ...overrides,
   };
 }

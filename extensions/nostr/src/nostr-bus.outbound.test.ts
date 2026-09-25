@@ -6,18 +6,23 @@ import {
   closeOpenClawStateDatabaseForTest,
   createChannelIngressQueueForTests,
 } from "openclaw/plugin-sdk/plugin-state-test-runtime";
+import { openClawPqcDm } from "openclaw/plugin-sdk/security-runtime";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PluginRuntime } from "../runtime-api.js";
 import { startNostrBus } from "./nostr-bus.js";
 import { setNostrRuntime } from "./runtime.js";
+import { TEST_ML_KEM_PUBLIC_KEY, TEST_ML_KEM_SECRET_KEY } from "./test-fixtures.js";
 
 const BAD_RELAY = "wss://bad-relay.example";
 const GOOD_RELAY = "wss://good-relay.example";
 const RECIPIENT_PUBKEY = "b".repeat(64);
+const SENDER_PUBKEY = "a".repeat(64);
+const TEST_CONVERSATION_KEY = new Uint8Array(32).fill(7);
 
 const mocks = vi.hoisted(() => ({
   poolPublish: vi.fn(),
   close: vi.fn(),
+  finalizeEvent: vi.fn((event: unknown) => event),
 }));
 
 vi.mock("nostr-tools", () => {
@@ -37,9 +42,16 @@ vi.mock("nostr-tools", () => {
 
   return {
     SimplePool: MockSimplePool,
-    finalizeEvent: vi.fn((event: unknown) => event),
-    getPublicKey: vi.fn(() => "a".repeat(64)),
+    finalizeEvent: mocks.finalizeEvent,
+    getPublicKey: vi.fn(() => SENDER_PUBKEY),
     verifyEvent: vi.fn(() => true),
+    nip44: {
+      v2: {
+        utils: {
+          getConversationKey: vi.fn(() => new Uint8Array(TEST_CONVERSATION_KEY)),
+        },
+      },
+    },
     nip19: {
       decode: vi.fn(),
       npubEncode: vi.fn(),
@@ -88,6 +100,7 @@ describe("Nostr outbound relay failover", () => {
         ),
       ]);
     mocks.close.mockReset();
+    mocks.finalizeEvent.mockClear();
   });
 
   afterEach(async () => {
@@ -98,6 +111,8 @@ describe("Nostr outbound relay failover", () => {
   it("tries the next relay when the first relay cannot connect", async () => {
     const bus = await startNostrBus({
       privateKey: "1".repeat(64),
+      mlKemSecretKey: TEST_ML_KEM_SECRET_KEY,
+      mlKemPeerPublicKeys: { [RECIPIENT_PUBKEY]: TEST_ML_KEM_PUBLIC_KEY },
       relays: [BAD_RELAY, GOOD_RELAY],
       onMessage: vi.fn(async () => {}),
       onMetric: () => {},
@@ -109,6 +124,41 @@ describe("Nostr outbound relay failover", () => {
       [BAD_RELAY],
       [GOOD_RELAY],
     ]);
+    const unsignedEvent = mocks.finalizeEvent.mock.calls[0]?.[0] as
+      | { kind: number; content: string }
+      | undefined;
+    expect(unsignedEvent?.kind).toBe(openClawPqcDm.OPENCLAW_PQC_DM_EVENT_KIND);
+    const recipientSecretKey = openClawPqcDm.decodeMlKem768SecretKey(TEST_ML_KEM_SECRET_KEY);
+    try {
+      expect(
+        openClawPqcDm.decryptOpenClawPqcDmV1({
+          classicalConversationKey: TEST_CONVERSATION_KEY,
+          recipientMlKemSecretKey: recipientSecretKey,
+          senderPubkey: SENDER_PUBKEY,
+          recipientPubkey: RECIPIENT_PUBKEY,
+          envelope: unsignedEvent?.content ?? "",
+        }),
+      ).toBe("hello");
+    } finally {
+      recipientSecretKey.fill(0);
+    }
+    await bus.close();
+  });
+
+  it("fails closed when the recipient has no pinned ML-KEM key", async () => {
+    const bus = await startNostrBus({
+      privateKey: "1".repeat(64),
+      mlKemSecretKey: TEST_ML_KEM_SECRET_KEY,
+      mlKemPeerPublicKeys: {},
+      relays: [GOOD_RELAY],
+      onMessage: vi.fn(async () => {}),
+      onMetric: () => {},
+    });
+
+    await expect(bus.sendDm(RECIPIENT_PUBKEY, "hello")).rejects.toThrow(
+      `No pinned ML-KEM-768 public key for Nostr peer ${RECIPIENT_PUBKEY}`,
+    );
+    expect(mocks.poolPublish).not.toHaveBeenCalled();
     await bus.close();
   });
 
@@ -116,6 +166,8 @@ describe("Nostr outbound relay failover", () => {
     const onError = vi.fn();
     const bus = await startNostrBus({
       privateKey: "1".repeat(64),
+      mlKemSecretKey: TEST_ML_KEM_SECRET_KEY,
+      mlKemPeerPublicKeys: { [RECIPIENT_PUBKEY]: TEST_ML_KEM_PUBLIC_KEY },
       relays: [BAD_RELAY],
       onMessage: vi.fn(async () => {}),
       onError,

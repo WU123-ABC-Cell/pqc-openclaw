@@ -7,7 +7,11 @@ import {
   waitForStartedMocks,
 } from "openclaw/plugin-sdk/channel-test-helpers";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { getActiveNostrBuses, startNostrGatewayAccount } from "./gateway.js";
+import {
+  getActiveNostrBuses,
+  startNostrGatewayAccount,
+  updateActiveNostrPeerPqcKey,
+} from "./gateway.js";
 import { setNostrRuntime } from "./runtime.js";
 import { buildResolvedNostrAccount } from "./test-fixtures.js";
 
@@ -27,6 +31,11 @@ function createMockBus() {
     getMetrics: vi.fn(() => ({ counters: {} })),
     publishProfile: vi.fn(),
     getProfileState: vi.fn(async () => null),
+    publishPqcKeyAnnouncement: vi.fn(async () => ({
+      successes: [],
+      failures: [],
+    })),
+    updatePinnedPeerPqcKey: vi.fn(),
   };
 }
 
@@ -76,6 +85,27 @@ describe("nostr gateway lifecycle", () => {
 
     expect(bus.close).toHaveBeenCalledOnce();
     expect(getActiveNostrBuses().has("default")).toBe(false);
+  });
+
+  it("applies a committed peer key to the active bus before config reload completes", async () => {
+    const bus = createMockBus();
+    mocks.startNostrBus.mockResolvedValueOnce(bus as never);
+    const abort = new AbortController();
+    const task = startNostrGatewayAccount(
+      createStartAccountContext({
+        account: buildResolvedNostrAccount(),
+        abortSignal: abort.signal,
+      }),
+    );
+    await vi.waitFor(() => expect(getActiveNostrBuses().get("default")).toBe(bus));
+
+    const updated = updateActiveNostrPeerPqcKey("default", "a".repeat(64), "encoded-key");
+
+    expect(updated).toBe(true);
+    expect(bus.updatePinnedPeerPqcKey).toHaveBeenCalledWith("a".repeat(64), "encoded-key");
+
+    abort.abort();
+    await task;
   });
 
   it("stops immediately when startAccount receives an already-aborted signal", async () => {

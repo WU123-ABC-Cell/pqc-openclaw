@@ -5,6 +5,7 @@ import {
 } from "openclaw/plugin-sdk/channel-setup";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { DEFAULT_ACCOUNT_ID } from "openclaw/plugin-sdk/routing";
+import { openClawPqcDm } from "openclaw/plugin-sdk/security-runtime";
 import {
   createSetupTranslator,
   createStandardChannelSetupStatus,
@@ -22,6 +23,22 @@ type NostrSetupInput = {
   relayUrls?: string;
   useEnv?: boolean;
 };
+
+export function generateNostrMlKemSecretKey(): string {
+  const keyPair = openClawPqcDm.generateMlKem768KeyPair();
+  try {
+    return openClawPqcDm.encodeMlKemKey(keyPair.secretKey);
+  } finally {
+    keyPair.secretKey.fill(0);
+  }
+}
+
+function hasMlKemSecretKey(cfg: OpenClawConfig): boolean {
+  const nostr = (cfg.channels as Record<string, unknown> | undefined)?.nostr as
+    | { mlKemSecretKey?: unknown }
+    | undefined;
+  return Boolean(nostr?.mlKemSecretKey);
+}
 
 export function buildNostrSetupPatch(accountId: string, patch: Record<string, unknown>) {
   return {
@@ -84,6 +101,7 @@ export function createNostrSetupAdapter(params: {
         clearFields: input.useEnv ? ["privateKey"] : undefined,
         patch: buildNostrSetupPatch(accountId, {
           ...(input.useEnv ? {} : { privateKey: input.privateKey?.trim() }),
+          ...(!hasMlKemSecretKey(cfg) ? { mlKemSecretKey: generateNostrMlKemSecretKey() } : {}),
           ...(relayResult.relays.length > 0 ? { relays: relayResult.relays } : {}),
         }),
       });

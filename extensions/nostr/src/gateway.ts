@@ -167,6 +167,8 @@ export const startNostrGatewayAccount: NostrGatewayStart = async (ctx) => {
       const bus = await startNostrBus({
         accountId: account.accountId,
         privateKey: account.privateKey,
+        mlKemSecretKey: account.mlKemSecretKey,
+        mlKemPeerPublicKeys: account.mlKemPeerPublicKeys,
         relays: account.relays,
         authorizeSender: async ({ senderPubkey, reply }) =>
           await authorizeSender({ senderId: senderPubkey, reply }),
@@ -284,6 +286,25 @@ export const startNostrGatewayAccount: NostrGatewayStart = async (ctx) => {
       busHandle = bus;
       activeBuses.set(account.accountId, bus);
 
+      void bus
+        .publishPqcKeyAnnouncement()
+        .then((result) => {
+          if (result.successes.length === 0) {
+            ctx.log?.warn?.(
+              `[${account.accountId}] ML-KEM key announcement was not accepted by any relay`,
+            );
+            return;
+          }
+          ctx.log?.info?.(
+            `[${account.accountId}] Published signed ML-KEM key announcement to ${result.successes.length} relay(s) (${result.fingerprint})`,
+          );
+        })
+        .catch((error: unknown) => {
+          ctx.log?.warn?.(
+            `[${account.accountId}] Failed to publish ML-KEM key announcement: ${String(error)}`,
+          );
+        });
+
       ctx.log?.info?.(
         `[${account.accountId}] Nostr provider started with ${account.relays.length} configured relay(s)`,
       );
@@ -376,4 +397,17 @@ export const nostrOutboundAdapter: NostrOutboundAdapter = {
 
 export function getActiveNostrBuses(): Map<string, NostrBusHandle> {
   return new Map(activeBuses);
+}
+
+export function updateActiveNostrPeerPqcKey(
+  accountId: string,
+  peerPubkey: string,
+  publicKey: string,
+): boolean {
+  const bus = activeBuses.get(accountId);
+  if (!bus) {
+    return false;
+  }
+  bus.updatePinnedPeerPqcKey(peerPubkey, publicKey);
+  return true;
 }

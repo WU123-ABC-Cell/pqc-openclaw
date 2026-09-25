@@ -10,7 +10,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PluginRuntime } from "../runtime-api.js";
 import { startNostrBus } from "./nostr-bus.js";
 import { setNostrRuntime } from "./runtime.js";
-import { buildResolvedNostrAccount, TEST_HEX_PRIVATE_KEY } from "./test-fixtures.js";
+import {
+  buildResolvedNostrAccount,
+  TEST_HEX_PRIVATE_KEY,
+  TEST_ML_KEM_PUBLIC_KEY,
+  TEST_ML_KEM_SECRET_KEY,
+} from "./test-fixtures.js";
 
 const BOT_PUBKEY = "b".repeat(64);
 
@@ -85,6 +90,13 @@ vi.mock("nostr-tools", () => {
     finalizeEvent: mockState.finalizeEvent,
     getPublicKey: vi.fn(() => BOT_PUBKEY),
     verifyEvent: mockState.verifyEvent,
+    nip44: {
+      v2: {
+        utils: {
+          getConversationKey: vi.fn(() => new Uint8Array(32).fill(7)),
+        },
+      },
+    },
     nip19: {
       decode: vi.fn(),
       npubEncode: vi.fn((value: string) => `npub-${value}`),
@@ -96,6 +108,17 @@ vi.mock("nostr-tools/nip04", () => ({
   decrypt: mockState.decrypt,
   encrypt: vi.fn(() => "ciphertext"),
 }));
+
+vi.mock("openclaw/plugin-sdk/security-runtime", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("openclaw/plugin-sdk/security-runtime")>();
+  return {
+    ...actual,
+    openClawPqcDm: {
+      ...actual.openClawPqcDm,
+      decryptOpenClawPqcDmV1: mockState.decrypt,
+    },
+  };
+});
 
 vi.mock("./nostr-state-store.js", () => ({
   readNostrBusState: mockState.readNostrBusState,
@@ -112,7 +135,7 @@ vi.mock("./nostr-profile.js", () => ({
 function createEvent(overrides: Record<string, unknown> = {}) {
   return {
     id: "event-1",
-    kind: 4,
+    kind: 4444,
     pubkey: "a".repeat(64),
     content: "ciphertext",
     created_at: Math.floor(Date.now() / 1000),
@@ -137,9 +160,23 @@ let stateDir = "";
 let ingressQueue: ReturnType<typeof createChannelIngressQueueForTests<Record<string, unknown>>>;
 let ingressTasks: Promise<void>[] = [];
 
-function startTestNostrBus(options: Parameters<typeof startNostrBus>[0]) {
+type NostrBusOptions = Parameters<typeof startNostrBus>[0];
+type TestNostrBusOptions = Omit<
+  NostrBusOptions,
+  "mlKemSecretKey" | "mlKemPeerPublicKeys" | "trackIngressTask"
+> &
+  Partial<Pick<NostrBusOptions, "mlKemSecretKey" | "mlKemPeerPublicKeys">>;
+
+function startTestNostrBus(options: TestNostrBusOptions) {
+  const {
+    mlKemSecretKey = TEST_ML_KEM_SECRET_KEY,
+    mlKemPeerPublicKeys = { ["a".repeat(64)]: TEST_ML_KEM_PUBLIC_KEY },
+    ...rest
+  } = options;
   return startNostrBus({
-    ...options,
+    ...rest,
+    mlKemSecretKey,
+    mlKemPeerPublicKeys,
     trackIngressTask: (task) => ingressTasks.push(task),
   });
 }
@@ -196,7 +233,7 @@ describe("startNostrBus inbound guards", () => {
       expect(relayList).toHaveLength(1);
       expect(Array.isArray(filters)).toBe(false);
       expect(filters).toMatchObject({
-        kinds: [4],
+        kinds: [4444],
         "#p": [BOT_PUBKEY],
         since: 0,
       });
@@ -217,6 +254,24 @@ describe("startNostrBus inbound guards", () => {
     expect(onConnect).toHaveBeenCalledOnce();
     expect(onConnect).toHaveBeenCalledWith("wss://relay.example/");
 
+    await bus.close();
+  });
+
+  it("rejects live NIP-04 kind 4 events before durable admission", async () => {
+    const enqueue = vi.spyOn(ingressQueue, "enqueue");
+    const onMessage = vi.fn(async () => {});
+    const bus = await startTestNostrBus({
+      ...buildResolvedNostrAccount(),
+      onMessage,
+      onMetric: () => {},
+    });
+
+    await emitEvent(createEvent({ id: "legacy-live", kind: 4 }));
+
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(mockState.decrypt).not.toHaveBeenCalled();
+    expect(onMessage).not.toHaveBeenCalled();
+    expect(bus.getMetrics().eventsRejected.wrongKind).toBe(1);
     await bus.close();
   });
 
@@ -342,6 +397,7 @@ describe("startNostrBus inbound guards", () => {
     const recoveredPubkey = "a".repeat(64);
     const recovered = createEvent({
       id: recoveredId,
+      kind: 4,
       pubkey: recoveredPubkey,
       created_at: 1_000,
     });
@@ -500,7 +556,7 @@ describe("startNostrBus inbound guards", () => {
     expect(claimNext).toHaveBeenCalledTimes(callsAfterCleanup);
   });
 
-  it("links authorization replies to the inbound NIP-04 event", async () => {
+  it("links authorization replies to the inbound PQC event", async () => {
     const inboundEventId = "c".repeat(64);
     const senderPubkey = "a".repeat(64);
     const authorizeSender = vi.fn(async ({ reply }: { reply: (text: string) => Promise<void> }) => {

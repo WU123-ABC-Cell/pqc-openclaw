@@ -1,6 +1,12 @@
 // @vitest-environment node
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { importNostrProfile, putNostrProfile } from "./nostr-profile-ops.ts";
+import {
+  discoverNostrPqcKey,
+  importNostrProfile,
+  pinNostrPqcKey,
+  publishNostrPqcKey,
+  putNostrProfile,
+} from "./nostr-profile-ops.ts";
 
 const NOSTR_PROFILE_REQUEST_TIMEOUT_MS = 30_000;
 
@@ -17,7 +23,7 @@ function rejectWhenAborted(signal: AbortSignal): Promise<never> {
     signal.addEventListener(
       "abort",
       () => {
-        const error = new Error("Nostr profile request timed out after 30 seconds");
+        const error = new Error("Nostr request timed out after 30 seconds");
         error.name = "TimeoutError";
         reject(error);
       },
@@ -46,7 +52,7 @@ describe("Nostr profile HTTP operations", () => {
     });
     const result = expect(request).rejects.toMatchObject({
       name: "TimeoutError",
-      message: "Nostr profile request timed out after 30 seconds",
+      message: "Nostr request timed out after 30 seconds",
     });
     await vi.advanceTimersByTimeAsync(NOSTR_PROFILE_REQUEST_TIMEOUT_MS);
     await result;
@@ -124,5 +130,91 @@ describe("Nostr profile HTTP operations", () => {
       data: null,
       response,
     });
+  });
+
+  it("encodes account and peer identifiers for PQC discovery", async () => {
+    const response = new Response(
+      JSON.stringify({
+        ok: true,
+        peerPubkey: "npub1peer",
+        pinnedFingerprint: null,
+        trustState: "not-found",
+        announcement: null,
+        relaysQueried: [],
+        sourceRelays: [],
+      }),
+      { status: 200 },
+    );
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(response);
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      discoverNostrPqcKey({
+        accountId: "main/account",
+        peerPubkey: "npub1peer/unsafe",
+        headers: { Authorization: "Bearer test" },
+      }),
+    ).resolves.toMatchObject({ response });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/channels/nostr/main%2Faccount/pqc-keys/npub1peer%2Funsafe",
+      expect.objectContaining({
+        method: "GET",
+        headers: { Authorization: "Bearer test" },
+        signal: expect.any(AbortSignal),
+      }),
+    );
+  });
+
+  it("sends an explicit fingerprint and compare-and-set value when pinning", async () => {
+    const fingerprint = `sha256:${"a".repeat(64)}`;
+    const previous = `sha256:${"b".repeat(64)}`;
+    const response = new Response(JSON.stringify({ ok: true, updated: true }), { status: 200 });
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(response);
+    vi.stubGlobal("fetch", fetchMock);
+
+    await pinNostrPqcKey({
+      accountId: "default",
+      peerPubkey: "npub1peer",
+      fingerprint,
+      expectedCurrentFingerprint: previous,
+      headers: {},
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/channels/nostr/default/pqc-keys/npub1peer",
+      expect.objectContaining({
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          fingerprint,
+          expectedCurrentFingerprint: previous,
+        }),
+        signal: expect.any(AbortSignal),
+      }),
+    );
+  });
+
+  it("publishes the local PQC announcement without an unnecessary request body", async () => {
+    const response = new Response(JSON.stringify({ ok: true, successes: [], failures: [] }), {
+      status: 200,
+    });
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(response);
+    vi.stubGlobal("fetch", fetchMock);
+
+    await publishNostrPqcKey({
+      accountId: "default",
+      headers: { Authorization: "Bearer test" },
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/channels/nostr/default/pqc-keys/publish",
+      expect.objectContaining({
+        method: "POST",
+        headers: { Authorization: "Bearer test" },
+        signal: expect.any(AbortSignal),
+      }),
+    );
+    expect(fetchMock.mock.calls[0]?.[1]?.body).toBeUndefined();
   });
 });

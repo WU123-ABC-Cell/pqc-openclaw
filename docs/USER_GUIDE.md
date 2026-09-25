@@ -404,18 +404,17 @@ The shared secret can then be fed into a reviewed KDF/envelope construction; do
 not use it as an application protocol without domain separation and key
 confirmation appropriate to that protocol.
 
-### 5.3 When to use Ed25519 (legacy) instead of ML-DSA-65
+### 5.3 Legacy Ed25519 clients
 
-If a client cannot install `@noble/post-quantum` (e.g. an old
-embedded system), the fork can fall back to Ed25519 signatures
-on the same wire protocol. The client sends a flag in the
-TLS-like handshake; the daemon negotiates the strongest
-algorithm both sides support. See [OPERATIONS.md §"PQC vs
-Ed25519 client compatibility"](/security/OPERATIONS#2-the-five-things-that-will-page-you-and-what-to-do)
-for the negotiation table.
+This fork does not negotiate or accept Ed25519 device proofs. A client that
+cannot produce ML-DSA-65 wire keys and signatures is incompatible with the
+gateway and must fail closed. Android uses the bundled Bouncy Castle
+implementation. Apple clients require iOS, macOS, or watchOS 26 for CryptoKit
+ML-DSA-65.
 
-For new deployments, **always use ML-DSA-65**. Ed25519 is
-there for compatibility, not for security.
+Upgrading a client creates a new ML-DSA device ID. Authorization associated
+with a retired Ed25519 device ID is deliberately not copied; approve the new
+pairing request through the normal device-pairing flow.
 
 ---
 

@@ -15,6 +15,7 @@ import type {
   TelegramStatus,
   WhatsAppStatus,
 } from "../../api/types.ts";
+import type { NostrPqcKeyPanelState } from "./view.nostr-pqc-keys.ts";
 import type { NostrProfileFormState } from "./view.nostr-profile-form.ts";
 import type { ChannelWizardState } from "./wizard-controller.ts";
 
@@ -57,6 +58,7 @@ export type ChannelsProps = {
   showAdvancedSettings: boolean;
   nostrProfileFormState: NostrProfileFormState | null;
   nostrProfileAccountId: string | null;
+  nostrPqcKeyPanelState: NostrPqcKeyPanelState;
   selectedChannel: string | null;
   wizard: ChannelWizardState;
   wizardMultiselect: readonly unknown[];
@@ -95,6 +97,11 @@ export type ChannelsProps = {
   onNostrProfileSave: () => void;
   onNostrProfileImport: () => void;
   onNostrProfileToggleAdvanced: () => void;
+  onNostrPqcPeerPubkeyChange: (value: string) => void;
+  onNostrPqcConfirmedFingerprintChange: (value: string) => void;
+  onNostrPqcDiscover: () => void;
+  onNostrPqcPin: () => void;
+  onNostrPqcPublish: () => void;
 };
 
 export type ChannelsChannelData = {

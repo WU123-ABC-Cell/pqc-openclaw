@@ -1,10 +1,18 @@
 // Nostr plugin module implements nostr bus behavior.
-import { SimplePool, finalizeEvent, getPublicKey, verifyEvent, type Event } from "nostr-tools";
-import { decrypt, encrypt } from "nostr-tools/nip04";
+import {
+  SimplePool,
+  finalizeEvent,
+  getPublicKey,
+  nip44,
+  verifyEvent,
+  type Event,
+} from "nostr-tools";
+import { decrypt as decryptLegacyNip04 } from "nostr-tools/nip04";
 import {
   createDirectDmPreCryptoGuardPolicy,
   type DirectDmPreCryptoGuardPolicyOverrides,
 } from "openclaw/plugin-sdk/direct-dm-guard-policy";
+import { openClawPqcDm } from "openclaw/plugin-sdk/security-runtime";
 import type { NostrProfile } from "./config-schema.js";
 import { DEFAULT_RELAYS } from "./default-relays.js";
 import {
@@ -22,6 +30,13 @@ import {
   type NostrIngressLifecycle,
 } from "./nostr-ingress.js";
 import { validatePrivateKey } from "./nostr-key-utils.js";
+import {
+  discoverNostrPqcKeyAnnouncement,
+  fingerprintMlKemPublicKey,
+  publishNostrPqcKeyAnnouncement,
+  type NostrPqcKeyAnnouncement,
+  type NostrPqcKeyPublishResult,
+} from "./nostr-pqc-key-announcement.js";
 import { publishProfile as publishProfileFn, type ProfilePublishResult } from "./nostr-profile.js";
 import { createFixedWindowRateLimiter } from "./nostr-rate-limiter.js";
 import { createNostrRelaySubscriptionGroup } from "./nostr-relay-subscription.js";
@@ -31,8 +46,20 @@ import {
   computeSinceTimestamp,
   readNostrProfileState,
   writeNostrProfileState,
+  readNostrPqcKeyState,
+  writeNostrPqcKeyState,
 } from "./nostr-state-store.js";
 import { publishNostrEventToRelay } from "./relay-publish.js";
+
+const {
+  decodeMlKem768PublicKey,
+  decodeMlKem768SecretKey,
+  deriveMlKem768PublicKey,
+  decryptOpenClawPqcDmV1,
+  encodeMlKemKey,
+  encryptOpenClawPqcDmV1,
+  OPENCLAW_PQC_DM_EVENT_KIND,
+} = openClawPqcDm;
 
 // ============================================================================
 // Constants
@@ -58,6 +85,10 @@ const HEALTH_WINDOW_MS = 60000; // 1 minute window for health stats
 interface NostrBusOptions {
   /** Private key in hex or nsec format */
   privateKey: string;
+  /** Base64url-encoded ML-KEM-768 secret key for this account. */
+  mlKemSecretKey: string;
+  /** Operator-pinned peer ML-KEM keys keyed by lowercase Nostr pubkey. */
+  mlKemPeerPublicKeys: Record<string, string>;
   /** WebSocket relay URLs (defaults to damus + nos.lol) */
   relays?: string[];
   /** Account ID for state persistence (optional, defaults to pubkey prefix) */
@@ -108,6 +139,16 @@ export interface NostrBusHandle {
     lastPublishedEventId: string | null;
     lastPublishResults: Record<string, "ok" | "failed" | "timeout"> | null;
   }>;
+  /** Publish this account's signed, addressable ML-KEM key announcement. */
+  publishPqcKeyAnnouncement: () => Promise<NostrPqcKeyPublishResult>;
+  /** Discover the latest verified key announcement for a peer without trusting it. */
+  discoverPeerPqcKey: (pubkey: string) => Promise<{
+    announcement: NostrPqcKeyAnnouncement | null;
+    relaysQueried: string[];
+    sourceRelays: string[];
+  }>;
+  /** Apply a config-committed peer key to the running bus without a reload race. */
+  updatePinnedPeerPqcKey: (pubkey: string, publicKey: string) => void;
 }
 
 // ============================================================================
@@ -288,11 +329,13 @@ function createRelayHealthTracker(): RelayHealthTracker {
 }
 
 /**
- * Start the Nostr DM bus - subscribes to NIP-04 encrypted DMs
+ * Start the Nostr DM bus for OpenClaw PQC DM v1 events.
  */
 export async function startNostrBus(options: NostrBusOptions): Promise<NostrBusHandle> {
   const {
     privateKey,
+    mlKemSecretKey,
+    mlKemPeerPublicKeys,
     relays = DEFAULT_RELAYS,
     onMessage,
     authorizeSender,
@@ -303,6 +346,13 @@ export async function startNostrBus(options: NostrBusOptions): Promise<NostrBusH
 
   const sk = validatePrivateKey(privateKey);
   const pk = getPublicKey(sk);
+  const peerMlKemPublicKeys = new Map<string, Uint8Array>();
+  for (const [peerPubkey, encodedKey] of Object.entries(mlKemPeerPublicKeys)) {
+    if (!/^[0-9a-f]{64}$/u.test(peerPubkey)) {
+      throw new Error(`Nostr ML-KEM peer key id must be a lowercase 64-character hex pubkey`);
+    }
+    peerMlKemPublicKeys.set(peerPubkey, decodeMlKem768PublicKey(encodedKey));
+  }
   const pool = new SimplePool();
   pool.onRelayConnectionSuccess = options.onConnect;
   const accountId = options.accountId ?? pk.slice(0, 16);
@@ -314,6 +364,7 @@ export async function startNostrBus(options: NostrBusOptions): Promise<NostrBusH
       ...DEFAULT_INBOUND_GUARD_POLICY.rateLimit,
       ...options.guardPolicy?.rateLimit,
     },
+    allowedKinds: [4, OPENCLAW_PQC_DM_EVENT_KIND],
   });
 
   // Initialize metrics
@@ -430,6 +481,8 @@ export async function startNostrBus(options: NostrBusOptions): Promise<NostrBusH
       await sendEncryptedDm(
         pool,
         sk,
+        pk,
+        peerMlKemPublicKeys,
         event.pubkey,
         text,
         relays,
@@ -476,7 +529,24 @@ export async function startNostrBus(options: NostrBusOptions): Promise<NostrBusH
 
     let plaintext: string;
     try {
-      plaintext = decrypt(sk, event.pubkey, event.content);
+      if (event.kind === 4) {
+        // Kind 4 is accepted only for records already present in the durable
+        // ingress queue at upgrade time. Relay admission below is PQC-only.
+        plaintext = decryptLegacyNip04(sk, event.pubkey, event.content);
+      } else {
+        const classicalConversationKey = nip44.v2.utils.getConversationKey(sk, event.pubkey);
+        try {
+          plaintext = decryptOpenClawPqcDmV1({
+            classicalConversationKey,
+            recipientMlKemSecretKey,
+            senderPubkey: event.pubkey,
+            recipientPubkey: pk,
+            envelope: event.content,
+          });
+        } finally {
+          classicalConversationKey.fill(0);
+        }
+      }
       metrics.emit("decrypt.success");
     } catch (error) {
       metrics.emit("decrypt.failure");
@@ -507,7 +577,7 @@ export async function startNostrBus(options: NostrBusOptions): Promise<NostrBusH
     metrics.emit("event.processed");
   }
 
-  const dmFilter = { kinds: [4], "#p": [pk], since } satisfies Parameters<
+  const dmFilter = { kinds: [OPENCLAW_PQC_DM_EVENT_KIND], "#p": [pk], since } satisfies Parameters<
     typeof pool.subscribeMany
   >[1];
   const relayAbort = new AbortController();
@@ -562,6 +632,10 @@ export async function startNostrBus(options: NostrBusOptions): Promise<NostrBusH
   };
   const handleRelayEvent = async (event: Event): Promise<void> => {
     metrics.emit("event.received");
+    if (event.kind !== OPENCLAW_PQC_DM_EVENT_KIND) {
+      metrics.emit("event.rejected.wrong_kind");
+      return;
+    }
     // Apply the relay age fence once, before admission; recovered durable claims must still deliver.
     if (typeof event.created_at === "number" && event.created_at < since) {
       metrics.emit("event.rejected.stale");
@@ -607,6 +681,10 @@ export async function startNostrBus(options: NostrBusOptions): Promise<NostrBusH
     }
   };
   let backfillFinalizePromise: Promise<void> | undefined;
+  const recipientMlKemSecretKey = decodeMlKem768SecretKey(mlKemSecretKey);
+  const localMlKemPublicKeyBytes = deriveMlKem768PublicKey(recipientMlKemSecretKey);
+  const localMlKemPublicKey = encodeMlKemKey(localMlKemPublicKeyBytes);
+  localMlKemPublicKeyBytes.fill(0);
 
   try {
     await ingress.ready();
@@ -655,6 +733,7 @@ export async function startNostrBus(options: NostrBusOptions): Promise<NostrBusH
     relaySubscriptions.start();
   } catch (error) {
     await Promise.allSettled([stopRelays("startup failed"), ingress.stop()]);
+    recipientMlKemSecretKey.fill(0);
     throw error;
   }
 
@@ -663,6 +742,8 @@ export async function startNostrBus(options: NostrBusOptions): Promise<NostrBusH
     return await sendEncryptedDm(
       pool,
       sk,
+      pk,
+      peerMlKemPublicKeys,
       toPubkey,
       text,
       relays,
@@ -712,15 +793,57 @@ export async function startNostrBus(options: NostrBusOptions): Promise<NostrBusH
     };
   };
 
+  const publishPqcKeyAnnouncement = async (): Promise<NostrPqcKeyPublishResult> => {
+    const previousState = await readNostrPqcKeyState({ accountId });
+    const fingerprint = fingerprintMlKemPublicKey(localMlKemPublicKey);
+    const now = Math.floor(Date.now() / 1000);
+    const result = await publishNostrPqcKeyAnnouncement({
+      pool,
+      secretKey: sk,
+      publicKey: localMlKemPublicKey,
+      relays,
+      createdAt: Math.max(now, (previousState?.lastPublishedAt ?? 0) + 1),
+      ...(previousState && previousState.fingerprint !== fingerprint
+        ? { previousFingerprint: previousState.fingerprint }
+        : {}),
+    });
+    if (result.successes.length > 0) {
+      await writeNostrPqcKeyState({
+        accountId,
+        lastPublishedAt: result.createdAt,
+        lastPublishedEventId: result.eventId,
+        fingerprint: result.fingerprint,
+      });
+    }
+    return result;
+  };
+
+  const discoverPeerPqcKey = async (pubkey: string) =>
+    await discoverNostrPqcKeyAnnouncement({ pubkey, relays, pool });
+
+  const updatePinnedPeerPqcKey = (pubkey: string, publicKey: string): void => {
+    if (!/^[0-9a-f]{64}$/u.test(pubkey)) {
+      throw new Error(`Nostr ML-KEM peer key id must be a lowercase 64-character hex pubkey`);
+    }
+    const nextKey = decodeMlKem768PublicKey(publicKey);
+    const previousKey = peerMlKemPublicKeys.get(pubkey);
+    peerMlKemPublicKeys.set(pubkey, nextKey);
+    previousKey?.fill(0);
+  };
+
   let closePromise: Promise<void> | undefined;
   const close = (): Promise<void> => {
     closePromise ??= (async () => {
-      await stopRelays("closed by caller");
-      await ingress.stop();
-      await backfillFinalizePromise;
-      await cursorWriter.flushUntilSuccess();
-      perSenderRateLimiter.clear();
-      globalRateLimiter.clear();
+      try {
+        await stopRelays("closed by caller");
+        await ingress.stop();
+        await backfillFinalizePromise;
+        await cursorWriter.flushUntilSuccess();
+      } finally {
+        perSenderRateLimiter.clear();
+        globalRateLimiter.clear();
+        recipientMlKemSecretKey.fill(0);
+      }
     })();
     return closePromise;
   };
@@ -732,6 +855,9 @@ export async function startNostrBus(options: NostrBusOptions): Promise<NostrBusH
     getMetrics: () => metrics.getSnapshot(),
     publishProfile,
     getProfileState,
+    publishPqcKeyAnnouncement,
+    discoverPeerPqcKey,
+    updatePinnedPeerPqcKey,
   };
 }
 
@@ -743,6 +869,8 @@ export async function startNostrBus(options: NostrBusOptions): Promise<NostrBusH
 async function sendEncryptedDm(
   pool: SimplePool,
   sk: Uint8Array,
+  fromPubkey: string,
+  peerMlKemPublicKeys: ReadonlyMap<string, Uint8Array>,
   toPubkey: string,
   text: string,
   relays: string[],
@@ -752,15 +880,30 @@ async function sendEncryptedDm(
   onError?: (error: Error, context: string) => void,
   replyToEventId?: string,
 ): Promise<string> {
-  const ciphertext = encrypt(sk, toPubkey, text);
-  // NIP-04 uses an e tag to keep a reply attached to its verified inbound event.
+  const recipientMlKemPublicKey = peerMlKemPublicKeys.get(toPubkey);
+  if (!recipientMlKemPublicKey) {
+    throw new Error(`No pinned ML-KEM-768 public key for Nostr peer ${toPubkey}`);
+  }
+  const classicalConversationKey = nip44.v2.utils.getConversationKey(sk, toPubkey);
+  let ciphertext: string;
+  try {
+    ciphertext = encryptOpenClawPqcDmV1({
+      classicalConversationKey,
+      recipientMlKemPublicKey,
+      senderPubkey: fromPubkey,
+      recipientPubkey: toPubkey,
+      plaintext: text,
+    });
+  } finally {
+    classicalConversationKey.fill(0);
+  }
   const tags = [["p", toPubkey]];
   if (replyToEventId) {
     tags.push(["e", replyToEventId]);
   }
   const reply = finalizeEvent(
     {
-      kind: 4,
+      kind: OPENCLAW_PQC_DM_EVENT_KIND,
       content: ciphertext,
       tags,
       created_at: Math.floor(Date.now() / 1000),
@@ -806,3 +949,5 @@ async function sendEncryptedDm(
 
   throw new Error(`Failed to publish to any relay: ${lastError?.message}`);
 }
+
+/* oxlint-disable max-lines -- TODO: split this grandfathered oversized transport module. */

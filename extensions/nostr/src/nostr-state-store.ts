@@ -4,6 +4,7 @@ import { normalizeNostrStateAccountId } from "./state-account-id.js";
 
 const STORE_VERSION = 2;
 const PROFILE_STATE_VERSION = 1;
+const PQC_KEY_STATE_VERSION = 1;
 
 type NostrBusState = {
   version: 2;
@@ -26,6 +27,13 @@ type NostrProfileState = {
   lastPublishResults: Record<string, "ok" | "failed" | "timeout"> | null;
 };
 
+type NostrPqcKeyState = {
+  version: 1;
+  lastPublishedAt: number;
+  lastPublishedEventId: string;
+  fingerprint: string;
+};
+
 function openNostrBusStateStore(env?: NodeJS.ProcessEnv) {
   return getNostrRuntime().state.openKeyedStore<NostrBusState>({
     namespace: "bus-state",
@@ -37,6 +45,14 @@ function openNostrBusStateStore(env?: NodeJS.ProcessEnv) {
 function openNostrProfileStateStore(env?: NodeJS.ProcessEnv) {
   return getNostrRuntime().state.openKeyedStore<NostrProfileState>({
     namespace: "profile-state",
+    maxEntries: 256,
+    ...(env ? { env } : {}),
+  });
+}
+
+function openNostrPqcKeyStateStore(env?: NodeJS.ProcessEnv) {
+  return getNostrRuntime().state.openKeyedStore<NostrPqcKeyState>({
+    namespace: "pqc-key-state",
     maxEntries: 256,
     ...(env ? { env } : {}),
   });
@@ -127,5 +143,34 @@ export async function writeNostrProfileState(params: {
   await openNostrProfileStateStore(params.env).register(
     normalizeNostrStateAccountId(params.accountId),
     payload,
+  );
+}
+
+export async function readNostrPqcKeyState(params: {
+  accountId?: string;
+  env?: NodeJS.ProcessEnv;
+}): Promise<NostrPqcKeyState | null> {
+  return (
+    (await openNostrPqcKeyStateStore(params.env).lookup(
+      normalizeNostrStateAccountId(params.accountId),
+    )) ?? null
+  );
+}
+
+export async function writeNostrPqcKeyState(params: {
+  accountId?: string;
+  lastPublishedAt: number;
+  lastPublishedEventId: string;
+  fingerprint: string;
+  env?: NodeJS.ProcessEnv;
+}): Promise<void> {
+  await openNostrPqcKeyStateStore(params.env).register(
+    normalizeNostrStateAccountId(params.accountId),
+    {
+      version: PQC_KEY_STATE_VERSION,
+      lastPublishedAt: params.lastPublishedAt,
+      lastPublishedEventId: params.lastPublishedEventId,
+      fingerprint: params.fingerprint,
+    },
   );
 }

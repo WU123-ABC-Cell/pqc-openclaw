@@ -21,6 +21,15 @@ function getNostrRuntime() {
   })();
 }
 
+function updateActiveNostrPeerPqcKey() {
+  return loadBundledEntryExportSync<
+    (accountId: string, peerPubkey: string, publicKey: string) => boolean
+  >(import.meta.url, {
+    specifier: "./api.js",
+    exportName: "updateActiveNostrPeerPqcKey",
+  });
+}
+
 function resolveNostrAccount(params: { cfg: unknown; accountId: string }) {
   return loadBundledEntryExportSync<
     (params: { cfg: unknown; accountId: string }) => ResolvedNostrAccount
@@ -33,7 +42,7 @@ function resolveNostrAccount(params: { cfg: unknown; accountId: string }) {
 export default defineBundledChannelEntry({
   id: "nostr",
   name: "Nostr",
-  description: "Nostr DM channel plugin via NIP-04",
+  description: "Nostr channel plugin for OpenClaw PQC direct messages",
   importMetaUrl: import.meta.url,
   plugin: {
     specifier: "./channel-plugin-api.js",
@@ -81,6 +90,47 @@ export default defineBundledChannelEntry({
           pubkey: account.publicKey,
           relays: account.relays,
         };
+      },
+      getPinnedPqcKey: (accountId: string, peerPubkey: string) => {
+        const runtime = getNostrRuntime();
+        const cfg = runtime.config.current() as OpenClawConfig;
+        const account = resolveNostrAccount({ cfg, accountId });
+        return account.mlKemPeerPublicKeys[peerPubkey];
+      },
+      updatePinnedPqcKey: async (
+        accountId: string,
+        peerPubkey: string,
+        publicKey: string,
+        expectedCurrentKey: string | null,
+      ) => {
+        const runtime = getNostrRuntime();
+        let updated = false;
+        await runtime.config.mutateConfigFile({
+          afterWrite: { mode: "auto" },
+          mutate: (draft) => {
+            const channels = (draft.channels ?? {}) as Record<string, unknown>;
+            const nostrConfig = (channels.nostr ?? {}) as Record<string, unknown>;
+            const currentPins = {
+              ...((nostrConfig.mlKemPeerPublicKeys ?? {}) as Record<string, string>),
+            };
+            if ((currentPins[peerPubkey] ?? null) !== expectedCurrentKey) {
+              return;
+            }
+            currentPins[peerPubkey] = publicKey;
+            draft.channels = {
+              ...channels,
+              nostr: {
+                ...nostrConfig,
+                mlKemPeerPublicKeys: currentPins,
+              },
+            };
+            updated = true;
+          },
+        });
+        if (updated) {
+          updateActiveNostrPeerPqcKey()(accountId, peerPubkey, publicKey);
+        }
+        return updated;
       },
       log: api.logger,
     });

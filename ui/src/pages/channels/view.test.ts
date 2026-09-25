@@ -3,6 +3,7 @@ import { render } from "lit";
 import { describe, expect, it, vi } from "vitest";
 import type { WhatsAppStatus } from "../../api/types.ts";
 import { renderChannelDetail } from "./view.detail.ts";
+import { createNostrPqcKeyPanelState } from "./view.nostr-pqc-keys.ts";
 import {
   channelEnabled,
   resolveChannelConfigured,
@@ -48,6 +49,7 @@ function createProps(snapshot: ChannelsProps["snapshot"]): ChannelsProps {
     showAdvancedSettings: false,
     nostrProfileFormState: null,
     nostrProfileAccountId: null,
+    nostrPqcKeyPanelState: createNostrPqcKeyPanelState(),
     selectedChannel: null,
     wizard: { phase: "idle" },
     wizardMultiselect: [],
@@ -84,6 +86,11 @@ function createProps(snapshot: ChannelsProps["snapshot"]): ChannelsProps {
     onNostrProfileSave: () => {},
     onNostrProfileImport: () => {},
     onNostrProfileToggleAdvanced: () => {},
+    onNostrPqcPeerPubkeyChange: () => {},
+    onNostrPqcConfirmedFingerprintChange: () => {},
+    onNostrPqcDiscover: () => {},
+    onNostrPqcPin: () => {},
+    onNostrPqcPublish: () => {},
   };
 }
 

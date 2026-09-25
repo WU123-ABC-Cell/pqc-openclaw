@@ -56,6 +56,10 @@ async function startOutboundAccount(accountId?: string) {
     getMetrics: vi.fn(() => ({ counters: {} })),
     publishProfile: vi.fn(),
     getProfileState: vi.fn(async () => null),
+    publishPqcKeyAnnouncement: vi.fn(async () => ({
+      successes: [],
+      failures: [],
+    })),
   };
   mocks.startNostrBus.mockResolvedValueOnce(bus as unknown);
   const abort = new AbortController();

@@ -16,8 +16,15 @@ import {
   readStringValue,
 } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { z } from "zod";
-import { publishNostrProfile, getNostrProfileState } from "./channel.js";
+import {
+  discoverNostrPeerPqcKey,
+  getNostrProfileState,
+  publishNostrPqcKeyAnnouncement,
+  publishNostrProfile,
+} from "./channel.js";
 import { NostrProfileSchema, type NostrProfile } from "./config-schema.js";
+import { normalizePubkey } from "./nostr-key-utils.js";
+import { fingerprintMlKemPublicKey } from "./nostr-pqc-key-announcement.js";
 import {
   createFixedWindowRateLimiter,
   getPluginRuntimeGatewayRequestScope,
@@ -38,6 +45,15 @@ interface NostrProfileHttpContext {
   updateConfigProfile: (accountId: string, profile: NostrProfile) => Promise<void>;
   /** Get account's public key and relays */
   getAccountInfo: (accountId: string) => { pubkey: string; relays: string[] } | null;
+  /** Read an operator-pinned peer key from config. */
+  getPinnedPqcKey: (accountId: string, peerPubkey: string) => string | undefined;
+  /** Compare-and-set an operator-pinned peer key in config. */
+  updatePinnedPqcKey: (
+    accountId: string,
+    peerPubkey: string,
+    publicKey: string,
+    expectedCurrentKey: string | null,
+  ) => Promise<boolean>;
   /** Logger */
   log?: {
     info: (msg: string) => void;
@@ -95,6 +111,14 @@ const ProfileUpdateSchema = NostrProfileSchema.extend({
   lud16: lud16FormatSchema,
 });
 
+const PqcKeyPinSchema = z.object({
+  fingerprint: z.string().regex(/^sha256:[0-9a-f]{64}$/u),
+  expectedCurrentFingerprint: z
+    .string()
+    .regex(/^sha256:[0-9a-f]{64}$/u)
+    .nullable(),
+});
+
 const PROFILE_MUTATION_SCOPE = "operator.admin";
 
 // ============================================================================
@@ -133,9 +157,20 @@ async function readJsonBody(
 }
 
 function parseAccountIdFromPath(pathname: string): string | null {
-  // Match: /api/channels/nostr/:accountId/profile
-  const match = pathname.match(/^\/api\/channels\/nostr\/([^/]+)\/profile/);
+  const match = pathname.match(/^\/api\/channels\/nostr\/([^/]+)\/(?:profile|pqc-keys)(?:\/|$)/);
   return match?.[1] ?? null;
+}
+
+function parsePqcPeerFromPath(pathname: string): string | null {
+  const match = pathname.match(/^\/api\/channels\/nostr\/[^/]+\/pqc-keys\/([^/]+)$/);
+  if (!match?.[1] || match[1] === "publish") {
+    return null;
+  }
+  try {
+    return normalizePubkey(decodeURIComponent(match[1]));
+  } catch {
+    return null;
+  }
 }
 
 function isLoopbackRemoteAddress(remoteAddress: string | undefined): boolean {
@@ -303,23 +338,37 @@ export function createNostrProfileHttpHandler(
 
     const isImport = url.pathname.endsWith("/profile/import");
     const isProfilePath = url.pathname.endsWith("/profile") || isImport;
+    const isPqcPublish = url.pathname.endsWith("/pqc-keys/publish");
+    const pqcPeerPubkey = parsePqcPeerFromPath(url.pathname);
 
-    if (!isProfilePath) {
+    if (!isProfilePath && !isPqcPublish && !pqcPeerPubkey) {
       return false;
     }
 
     // Handle different HTTP methods
     try {
-      if (req.method === "GET" && !isImport) {
+      if (req.method === "GET" && isProfilePath && !isImport) {
         return await handleGetProfile(accountId, ctx, res);
       }
 
-      if (req.method === "PUT" && !isImport) {
+      if (req.method === "PUT" && isProfilePath && !isImport) {
         return await handleUpdateProfile(accountId, ctx, req, res);
       }
 
       if (req.method === "POST" && isImport) {
         return await handleImportProfile(accountId, ctx, req, res);
+      }
+
+      if (req.method === "POST" && isPqcPublish) {
+        return await handlePublishPqcKey(accountId, ctx, req, res);
+      }
+
+      if (req.method === "GET" && pqcPeerPubkey) {
+        return await handleDiscoverPqcKey(accountId, pqcPeerPubkey, ctx, res);
+      }
+
+      if (req.method === "PUT" && pqcPeerPubkey) {
+        return await handlePinPqcKey(accountId, pqcPeerPubkey, ctx, req, res);
       }
 
       // Method not allowed
@@ -331,6 +380,148 @@ export function createNostrProfileHttpHandler(
       return true;
     }
   };
+}
+
+async function handlePublishPqcKey(
+  accountId: string,
+  ctx: NostrProfileHttpContext,
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<true> {
+  if (
+    !enforceGatewayMutationScope(ctx, accountId, res) ||
+    !enforceLoopbackMutationGuards(ctx, req, res)
+  ) {
+    return true;
+  }
+  if (!checkRateLimit(accountId)) {
+    sendJson(res, 429, { ok: false, error: "Rate limit exceeded (5 requests/minute)" });
+    return true;
+  }
+  const result = await withPublishLock(
+    accountId,
+    async () => await publishNostrPqcKeyAnnouncement(accountId),
+  );
+  sendJson(res, result.successes.length > 0 ? 200 : 502, {
+    ok: result.successes.length > 0,
+    ...result,
+  });
+  return true;
+}
+
+async function handleDiscoverPqcKey(
+  accountId: string,
+  peerPubkey: string,
+  ctx: NostrProfileHttpContext,
+  res: ServerResponse,
+): Promise<true> {
+  const result = await discoverNostrPeerPqcKey(accountId, peerPubkey);
+  const pinnedKey = ctx.getPinnedPqcKey(accountId, peerPubkey);
+  const pinnedFingerprint = pinnedKey ? fingerprintMlKemPublicKey(pinnedKey) : null;
+  const candidate = result.announcement;
+  const trustState = !candidate
+    ? "not-found"
+    : candidate.fingerprint === pinnedFingerprint
+      ? "pinned"
+      : !pinnedFingerprint
+        ? "untrusted-first-key"
+        : candidate.previousFingerprint === pinnedFingerprint
+          ? "untrusted-rotation"
+          : "rotation-chain-mismatch";
+  sendJson(res, 200, {
+    ok: true,
+    peerPubkey,
+    pinnedFingerprint,
+    trustState,
+    ...result,
+  });
+  return true;
+}
+
+async function handlePinPqcKey(
+  accountId: string,
+  peerPubkey: string,
+  ctx: NostrProfileHttpContext,
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<true> {
+  if (
+    !enforceGatewayMutationScope(ctx, accountId, res) ||
+    !enforceLoopbackMutationGuards(ctx, req, res)
+  ) {
+    return true;
+  }
+  if (!checkRateLimit(accountId)) {
+    sendJson(res, 429, { ok: false, error: "Rate limit exceeded (5 requests/minute)" });
+    return true;
+  }
+  let body: unknown;
+  try {
+    body = await readJsonBody(req);
+  } catch (error) {
+    sendJson(res, 400, { ok: false, error: String(error) });
+    return true;
+  }
+  const parsed = PqcKeyPinSchema.safeParse(body);
+  if (!parsed.success) {
+    sendJson(res, 400, {
+      ok: false,
+      error: "A confirmed fingerprint and expected current fingerprint are required",
+    });
+    return true;
+  }
+
+  const outcome = await withPublishLock(accountId, async () => {
+    const currentKey = ctx.getPinnedPqcKey(accountId, peerPubkey) ?? null;
+    const currentFingerprint = currentKey ? fingerprintMlKemPublicKey(currentKey) : null;
+    if (currentFingerprint !== parsed.data.expectedCurrentFingerprint) {
+      return { status: 409, error: "Pinned key changed; discover and confirm again" } as const;
+    }
+    const discovery = await discoverNostrPeerPqcKey(accountId, peerPubkey);
+    const candidate = discovery.announcement;
+    if (!candidate) {
+      return { status: 404, error: "No valid signed PQC key announcement found" } as const;
+    }
+    if (candidate.fingerprint !== parsed.data.fingerprint) {
+      return {
+        status: 409,
+        error: "Relay candidate changed; confirm the new fingerprint",
+      } as const;
+    }
+    if (
+      currentFingerprint &&
+      currentFingerprint !== candidate.fingerprint &&
+      candidate.previousFingerprint !== currentFingerprint
+    ) {
+      return {
+        status: 409,
+        error: "Rotation does not continue from the currently pinned key",
+      } as const;
+    }
+    if (currentFingerprint === candidate.fingerprint) {
+      return { status: 200, candidate, updated: false } as const;
+    }
+    const updated = await ctx.updatePinnedPqcKey(
+      accountId,
+      peerPubkey,
+      candidate.publicKey,
+      currentKey,
+    );
+    return updated
+      ? ({ status: 200, candidate, updated: true } as const)
+      : ({ status: 409, error: "Pinned key changed during update" } as const);
+  });
+
+  if ("error" in outcome) {
+    sendJson(res, outcome.status, { ok: false, error: outcome.error });
+  } else {
+    sendJson(res, outcome.status, {
+      ok: true,
+      updated: outcome.updated,
+      announcement: outcome.candidate,
+    });
+  }
+  return true;
 }
 
 // ============================================================================

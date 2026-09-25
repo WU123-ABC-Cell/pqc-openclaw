@@ -7,13 +7,12 @@ import {
 } from "openclaw/plugin-sdk/setup-runtime";
 import { buildChannelConfigSchema, type ChannelPlugin } from "./channel-api.js";
 import { NostrConfigSchema } from "./config-schema.js";
-import { DEFAULT_RELAYS } from "./default-relays.js";
 import {
   createNostrSetupAdapter,
   createNostrSetupContract,
   createNostrSetupStatus,
 } from "./setup-adapter.js";
-import type { ResolvedNostrAccount } from "./types.js";
+import { resolveNostrAccount, type ResolvedNostrAccount } from "./types.js";
 
 const channel = "nostr" as const;
 
@@ -36,29 +35,10 @@ function resolveSetupNostrAccount(params: {
   cfg: OpenClawConfig;
   accountId?: string | null;
 }): ResolvedNostrAccount {
-  const nostrCfg = getNostrConfig(params.cfg);
-  const accountId = params.accountId?.trim() || resolveDefaultSetupNostrAccountId(params.cfg);
-  const privateKey = typeof nostrCfg?.privateKey === "string" ? nostrCfg.privateKey.trim() : "";
-  const configured = Boolean(privateKey);
-  return {
-    accountId,
-    name: typeof nostrCfg?.name === "string" ? nostrCfg.name : undefined,
-    enabled: nostrCfg?.enabled !== false,
-    configured,
-    privateKey,
-    publicKey: "",
-    relays: nostrCfg?.relays ?? DEFAULT_RELAYS,
-    profile: nostrCfg?.profile,
-    config: {
-      enabled: nostrCfg?.enabled,
-      name: nostrCfg?.name,
-      privateKey: nostrCfg?.privateKey,
-      relays: nostrCfg?.relays,
-      dmPolicy: nostrCfg?.dmPolicy,
-      allowFrom: nostrCfg?.allowFrom,
-      profile: nostrCfg?.profile,
-    },
-  };
+  return resolveNostrAccount({
+    cfg: params.cfg,
+    accountId: params.accountId?.trim() || resolveDefaultSetupNostrAccountId(params.cfg),
+  });
 }
 
 const nostrSetupWizard = createDelegatedSetupWizardProxy({
@@ -78,7 +58,7 @@ export const nostrSetupPlugin: ChannelPlugin<ResolvedNostrAccount> = {
     selectionLabel: "Nostr",
     docsPath: "/channels/nostr",
     docsLabel: "nostr",
-    blurb: "Decentralized DMs via Nostr relays (NIP-04)",
+    blurb: "OpenClaw post-quantum DMs via Nostr relays (ML-KEM-768 hybrid)",
     order: 100,
   },
   capabilities: {
@@ -107,6 +87,7 @@ export const nostrSetupPlugin: ChannelPlugin<ResolvedNostrAccount> = {
         configured: account.configured,
         extra: {
           publicKey: account.publicKey,
+          mlKemPublicKey: account.mlKemPublicKey,
         },
       }),
   },

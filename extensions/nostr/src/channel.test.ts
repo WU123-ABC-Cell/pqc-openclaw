@@ -13,6 +13,7 @@ import { nostrSetupWizard } from "./setup-surface.js";
 import {
   TEST_HEX_PRIVATE_KEY,
   TEST_HEX_PUBLIC_KEY,
+  TEST_ML_KEM_SECRET_KEY,
   TEST_SETUP_RELAY_URLS,
   buildResolvedNostrAccount,
   createConfiguredNostrCfg,
@@ -44,7 +45,7 @@ const nostrTestPlugin = {
   meta: {
     label: "Nostr",
     docsPath: "/channels/nostr",
-    blurb: "Decentralized DMs via Nostr relays (NIP-04)",
+    blurb: "OpenClaw post-quantum DMs via Nostr relays (ML-KEM-768 hybrid)",
   },
   capabilities: {
     chatTypes: ["direct"],
@@ -174,7 +175,7 @@ describe("nostrPlugin", () => {
     it("has required meta fields", () => {
       expect(nostrTestPlugin.meta.label).toBe("Nostr");
       expect(nostrTestPlugin.meta.docsPath).toBe("/channels/nostr");
-      expect(nostrTestPlugin.meta.blurb).toContain("NIP-04");
+      expect(nostrTestPlugin.meta.blurb).toContain("post-quantum");
     });
   });
 
@@ -376,6 +377,7 @@ describe("nostr setup wizard", () => {
     expect(result.accountId).toBe("default");
     expect(result.cfg.channels?.nostr?.enabled).toBe(true);
     expect(result.cfg.channels?.nostr?.privateKey).toBe(TEST_HEX_PRIVATE_KEY);
+    expect(result.cfg.channels?.nostr?.mlKemSecretKey).toMatch(/^[A-Za-z0-9_-]{3200}$/u);
     expect(result.cfg.channels?.nostr?.relays).toEqual(TEST_SETUP_RELAY_URLS);
   });
 
@@ -532,7 +534,7 @@ describe("nostr account helpers", () => {
       };
       const account = resolveNostrAccount({ cfg });
 
-      expect(account.configured).toBe(true);
+      expect(account.configured).toBe(false);
       expect(account.publicKey).toBe("");
     });
 
@@ -548,6 +550,7 @@ describe("nostr account helpers", () => {
 
       expect(account.config).toEqual({
         privateKey: TEST_HEX_PRIVATE_KEY,
+        mlKemSecretKey: TEST_ML_KEM_SECRET_KEY,
         name: "Bot",
         enabled: true,
         relays: ["wss://relay1", "wss://relay2"],

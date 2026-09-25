@@ -44,6 +44,10 @@ function createMockBus() {
     getMetrics: vi.fn(() => ({ counters: {} })),
     publishProfile: vi.fn(),
     getProfileState: vi.fn(async () => null),
+    publishPqcKeyAnnouncement: vi.fn(async () => ({
+      successes: [],
+      failures: [],
+    })),
   };
 }
 

@@ -1,11 +1,7 @@
 import { consume } from "@lit/context";
 import { html } from "lit";
 import { state } from "lit/decorators.js";
-import type {
-  ChannelsPairingListResult,
-  ChannelsPairingRequest,
-  NostrProfile,
-} from "../../api/types.ts";
+import type { ChannelsPairingListResult, ChannelsPairingRequest } from "../../api/types.ts";
 import { subtitleForRoute, titleForRoute } from "../../app-navigation.ts";
 import { applicationContext, type ApplicationContext } from "../../app/context.ts";
 import { resolveControlUiAuthHeader } from "../../app/control-ui-auth.ts";
@@ -23,13 +19,11 @@ import {
 import { OpenClawLightDomElement } from "../../lit/openclaw-element.ts";
 import { PollController } from "../../lit/poll-controller.ts";
 import { SubscriptionsController } from "../../lit/subscriptions-controller.ts";
-import { importNostrProfile, parseValidationErrors, putNostrProfile } from "./nostr-profile-ops.ts";
-import { createNostrProfileFormState } from "./view.nostr-profile-form.ts";
+import { NostrPqcKeyController } from "./nostr-pqc-key-controller.ts";
+import { NostrProfileController } from "./nostr-profile-controller.ts";
 import { renderChannels } from "./view.ts";
 import type { ChannelPairingPrompt } from "./view.types.ts";
 import { ChannelWizardHost } from "./wizard-host.ts";
-
-type NostrProfileFormState = ReturnType<typeof createNostrProfileFormState> | null;
 
 const CHANNEL_PAIRING_POLL_INTERVAL_MS = 30_000;
 const CHANNELS_DOCS_URL = "https://docs.openclaw.ai/channels";
@@ -38,26 +32,13 @@ type NostrOperation = {
   scope: GatewayConnectionScope;
   gateway: ApplicationContext["gateway"];
   channels: ApplicationContext["channels"];
-  formAccountId: string | null;
   accountId: string;
   headers: Record<string, string>;
 };
 
-function formatNostrProfileOperationError(error: unknown, prefix: string): string {
-  return error instanceof DOMException && error.name === "TimeoutError"
-    ? t("channels.nostr.notices.timeout")
-    : t("channels.nostr.notices.operationFailed", { prefix, error: String(error) });
-}
-
 class ChannelsPage extends OpenClawLightDomElement {
   @consume({ context: applicationContext, subscribe: true })
   private context!: ApplicationContext;
-
-  @state()
-  private nostrProfileFormState: NostrProfileFormState = null;
-
-  @state()
-  private nostrProfileAccountId: string | null = null;
 
   @state()
   private selectedChannel: string | null = null;
@@ -90,8 +71,37 @@ class ChannelsPage extends OpenClawLightDomElement {
   private gatewayPairingAuthSignature: string | null = null;
   private readonly gateway = new GatewayPageController(this, {
     getGateway: () => this.context?.gateway,
-    onIdentityChange: () => this.clearNostrForm(),
+    onIdentityChange: () => this.clearNostrState(),
     onSnapshot: (change) => this.handleGatewaySnapshot(change),
+  });
+  private readonly nostrProfile = new NostrProfileController({
+    beginOperation: () => {
+      const operation = this.beginNostrOperation();
+      return operation
+        ? {
+            accountId: operation.accountId,
+            headers: operation.headers,
+            isCurrent: () => this.isCurrentNostrOperation(operation),
+          }
+        : null;
+    },
+    invalidateOperations: () => this.gateway.invalidate(),
+    requestUpdate: () => this.requestUpdate(),
+    refreshChannels: async () => await this.context.channels.refresh(true),
+  });
+  private readonly nostrPqcKeys = new NostrPqcKeyController({
+    beginOperation: () => {
+      const operation = this.beginNostrOperation();
+      return operation
+        ? {
+            accountId: operation.accountId,
+            headers: operation.headers,
+            isCurrent: () => this.isCurrentNostrOperation(operation),
+          }
+        : null;
+    },
+    invalidateOperations: () => this.gateway.invalidate(),
+    requestUpdate: () => this.requestUpdate(),
   });
   private readonly pairingPolling = new PollController(
     this,
@@ -112,7 +122,7 @@ class ChannelsPage extends OpenClawLightDomElement {
         const sourceChanged = this.channelsSource !== undefined && this.channelsSource !== channels;
         this.channelsSource = channels;
         if (sourceChanged) {
-          this.invalidateNostrForm();
+          this.invalidateNostrState();
         }
         const handleChange = () => {
           if (this.channelsSource === channels) {
@@ -161,7 +171,7 @@ class ChannelsPage extends OpenClawLightDomElement {
     const pairingAuthChanged =
       !change.initial && this.gatewayPairingAuthSignature !== pairingAuthSignature;
     if (change.identityChanged || snapshot.phase !== "connected") {
-      this.clearNostrForm();
+      this.clearNostrState();
     }
     if (
       change.identityChanged ||
@@ -243,7 +253,7 @@ class ChannelsPage extends OpenClawLightDomElement {
     this.pairingAccountFilter = null;
     this.pairingNotice = null;
     this.pairingPolling.stop();
-    this.invalidateNostrForm();
+    this.invalidateNostrState();
     this.subscriptions.clear();
     this.schemaLoadStarted = false;
     super.disconnectedCallback();
@@ -285,7 +295,7 @@ class ChannelsPage extends OpenClawLightDomElement {
 
   private resolveNostrAccountId(): string {
     const accounts = this.context?.channels.state.channelsSnapshot?.channelAccounts?.nostr ?? [];
-    return this.nostrProfileAccountId ?? accounts[0]?.accountId ?? "default";
+    return this.nostrProfile.accountId ?? accounts[0]?.accountId ?? "default";
   }
 
   private buildGatewayHttpHeaders(gateway: ApplicationContext["gateway"]): Record<string, string> {
@@ -298,13 +308,17 @@ class ChannelsPage extends OpenClawLightDomElement {
   }
 
   private clearNostrForm() {
-    this.nostrProfileFormState = null;
-    this.nostrProfileAccountId = null;
+    this.nostrProfile.clear();
   }
 
-  private invalidateNostrForm() {
-    this.gateway.invalidate();
+  private clearNostrState() {
     this.clearNostrForm();
+    this.nostrPqcKeys.clear();
+  }
+
+  private invalidateNostrState() {
+    this.gateway.invalidate();
+    this.clearNostrState();
   }
 
   private beginNostrOperation(): NostrOperation | null {
@@ -328,200 +342,18 @@ class ChannelsPage extends OpenClawLightDomElement {
       scope,
       gateway,
       channels,
-      formAccountId: this.nostrProfileAccountId,
       accountId: this.resolveNostrAccountId(),
       headers: this.buildGatewayHttpHeaders(gateway),
     };
   }
 
-  private currentNostrForm(operation: NostrOperation): NonNullable<NostrProfileFormState> | null {
-    const form = this.nostrProfileFormState;
-    if (
-      !form ||
-      !this.gateway.isCurrent(operation.scope) ||
-      this.nostrProfileAccountId !== operation.formAccountId ||
-      this.context.gateway !== operation.gateway ||
-      this.context.channels !== operation.channels ||
-      operation.gateway.snapshot.client !== operation.scope.client
-    ) {
-      return null;
-    }
-    return form;
-  }
-
-  private editNostrProfile(accountId: string, profile: NostrProfile | null) {
-    this.gateway.invalidate();
-    this.nostrProfileAccountId = accountId;
-    this.nostrProfileFormState = createNostrProfileFormState(profile ?? undefined);
-  }
-
-  private cancelNostrProfile() {
-    this.invalidateNostrForm();
-  }
-
-  private changeNostrProfileField(field: keyof NostrProfile, value: string) {
-    const form = this.nostrProfileFormState;
-    if (!form) {
-      return;
-    }
-    this.nostrProfileFormState = {
-      ...form,
-      values: { ...form.values, [field]: value },
-      fieldErrors: { ...form.fieldErrors, [field]: "" },
-    };
-  }
-
-  private toggleNostrProfileAdvanced() {
-    const form = this.nostrProfileFormState;
-    if (!form) {
-      return;
-    }
-    this.nostrProfileFormState = { ...form, showAdvanced: !form.showAdvanced };
-  }
-
-  private async saveNostrProfile() {
-    const form = this.nostrProfileFormState;
-    if (!form || form.saving || form.importing) {
-      return;
-    }
-    const operation = this.beginNostrOperation();
-    if (!operation) {
-      return;
-    }
-    const pendingForm = {
-      ...form,
-      saving: true,
-      error: null,
-      success: null,
-      fieldErrors: {},
-    };
-    this.nostrProfileFormState = pendingForm;
-
-    try {
-      const { data, response } = await putNostrProfile({
-        accountId: operation.accountId,
-        headers: operation.headers,
-        values: form.values,
-      });
-      const currentForm = this.currentNostrForm(operation);
-      if (!currentForm) {
-        return;
-      }
-      if (!response.ok || data?.ok === false || !data) {
-        this.nostrProfileFormState = {
-          ...currentForm,
-          saving: false,
-          error:
-            data?.error ??
-            t("channels.nostr.notices.updateFailedStatus", {
-              status: String(response.status),
-            }),
-          success: null,
-          fieldErrors: parseValidationErrors(data?.details),
-        };
-        return;
-      }
-
-      if (!data.persisted) {
-        this.nostrProfileFormState = {
-          ...currentForm,
-          saving: false,
-          error: t("channels.nostr.notices.publishFailed"),
-          success: null,
-        };
-        return;
-      }
-
-      this.nostrProfileFormState = {
-        ...currentForm,
-        saving: false,
-        error: null,
-        success: t("channels.nostr.notices.published"),
-        fieldErrors: {},
-        original: { ...form.values },
-      };
-      await operation.channels.refresh(true);
-    } catch (err) {
-      const currentForm = this.currentNostrForm(operation);
-      if (!currentForm) {
-        return;
-      }
-      this.nostrProfileFormState = {
-        ...currentForm,
-        saving: false,
-        error: formatNostrProfileOperationError(err, t("channels.nostr.notices.updateFailed")),
-        success: null,
-      };
-    }
-  }
-
-  private async importNostrProfile() {
-    const form = this.nostrProfileFormState;
-    if (!form || form.importing || form.saving) {
-      return;
-    }
-    const operation = this.beginNostrOperation();
-    if (!operation) {
-      return;
-    }
-    this.nostrProfileFormState = {
-      ...form,
-      importing: true,
-      error: null,
-      success: null,
-    };
-
-    try {
-      const { data, response } = await importNostrProfile({
-        accountId: operation.accountId,
-        headers: operation.headers,
-      });
-      const currentForm = this.currentNostrForm(operation);
-      if (!currentForm) {
-        return;
-      }
-      if (!response.ok || data?.ok === false || !data) {
-        this.nostrProfileFormState = {
-          ...currentForm,
-          importing: false,
-          error:
-            data?.error ??
-            t("channels.nostr.notices.importFailedStatus", {
-              status: String(response.status),
-            }),
-          success: null,
-        };
-        return;
-      }
-
-      const merged = data.merged ?? data.imported ?? null;
-      const values = merged ? { ...currentForm.values, ...merged } : currentForm.values;
-      this.nostrProfileFormState = {
-        ...currentForm,
-        importing: false,
-        values,
-        error: null,
-        success: data.saved
-          ? t("channels.nostr.notices.importedFromRelays")
-          : t("channels.nostr.notices.imported"),
-        showAdvanced: Boolean(values.banner || values.website || values.nip05 || values.lud16),
-      };
-
-      if (data.saved) {
-        await operation.channels.refresh(true);
-      }
-    } catch (err) {
-      const currentForm = this.currentNostrForm(operation);
-      if (!currentForm) {
-        return;
-      }
-      this.nostrProfileFormState = {
-        ...currentForm,
-        importing: false,
-        error: formatNostrProfileOperationError(err, t("channels.nostr.notices.importFailed")),
-        success: null,
-      };
-    }
+  private isCurrentNostrOperation(operation: NostrOperation): boolean {
+    return (
+      this.gateway.isCurrent(operation.scope) &&
+      this.context.gateway === operation.gateway &&
+      this.context.channels === operation.channels &&
+      operation.gateway.snapshot.client === operation.scope.client
+    );
   }
 
   private reconcilePairingFilter(snapshot: ChannelsPairingListResult | null) {
@@ -670,8 +502,9 @@ class ChannelsPage extends OpenClawLightDomElement {
           configSaving: config.configSaving,
           configFormDirty: config.configFormDirty,
           showAdvancedSettings: this.showAdvancedSettings,
-          nostrProfileFormState: this.nostrProfileFormState,
-          nostrProfileAccountId: this.nostrProfileAccountId,
+          nostrProfileFormState: this.nostrProfile.formState,
+          nostrProfileAccountId: this.nostrProfile.accountId,
+          nostrPqcKeyPanelState: this.nostrPqcKeys.state,
           selectedChannel: this.selectedChannel,
           wizard: this.wizardHost.state,
           wizardMultiselect: this.wizardHost.multiselect,
@@ -712,12 +545,18 @@ class ChannelsPage extends OpenClawLightDomElement {
           onConfigPatch: (path, value) => context.runtimeConfig.patchForm(path, value),
           onConfigSave: () => void this.saveChannelConfig(),
           onConfigReload: () => void this.reloadChannelConfig(),
-          onNostrProfileEdit: (accountId, profile) => this.editNostrProfile(accountId, profile),
-          onNostrProfileCancel: () => this.cancelNostrProfile(),
-          onNostrProfileFieldChange: (field, value) => this.changeNostrProfileField(field, value),
-          onNostrProfileSave: () => void this.saveNostrProfile(),
-          onNostrProfileImport: () => void this.importNostrProfile(),
-          onNostrProfileToggleAdvanced: () => this.toggleNostrProfileAdvanced(),
+          onNostrProfileEdit: (accountId, profile) => this.nostrProfile.edit(accountId, profile),
+          onNostrProfileCancel: () => this.nostrProfile.cancel(),
+          onNostrProfileFieldChange: (field, value) => this.nostrProfile.changeField(field, value),
+          onNostrProfileSave: () => void this.nostrProfile.save(),
+          onNostrProfileImport: () => void this.nostrProfile.import(),
+          onNostrProfileToggleAdvanced: () => this.nostrProfile.toggleAdvanced(),
+          onNostrPqcPeerPubkeyChange: (value) => this.nostrPqcKeys.setPeerPubkey(value),
+          onNostrPqcConfirmedFingerprintChange: (value) =>
+            this.nostrPqcKeys.setConfirmedFingerprint(value),
+          onNostrPqcDiscover: () => void this.nostrPqcKeys.discover(),
+          onNostrPqcPin: () => void this.nostrPqcKeys.pin(),
+          onNostrPqcPublish: () => void this.nostrPqcKeys.publish(),
         }),
       )}
     `;

@@ -1,7 +1,7 @@
 {
   "name": "@openclaw/nostr",
   "version": "2026.7.2",
-  "description": "OpenClaw Nostr channel plugin for NIP-04 encrypted direct messages.",
+  "description": "OpenClaw Nostr channel plugin for authenticated ML-KEM-768 hybrid direct messages.",
   "repository": {
     "type": "git",
     "url": "https://github.com/openclaw/openclaw"
@@ -38,10 +38,10 @@
         }
       },
       "label": "Nostr",
-      "selectionLabel": "Nostr (NIP-04 DMs)",
+      "selectionLabel": "Nostr (OpenClaw PQC DMs)",
       "docsPath": "/channels/nostr",
       "docsLabel": "nostr",
-      "blurb": "Decentralized protocol; encrypted DMs via NIP-04.",
+      "blurb": "OpenClaw PQC DMs via Nostr relays; peer ML-KEM keys must be pinned.",
       "order": 55,
       "quickstartAllowFrom": true,
       "setup": {
