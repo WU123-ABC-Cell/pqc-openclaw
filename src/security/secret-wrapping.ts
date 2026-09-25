@@ -51,8 +51,8 @@ export interface ActiveWrappingKey {
 export interface WrappingKeyProvider {
   /** Return the currently-active 32-byte key plus its keyring id. */
   getActiveKey(): ActiveWrappingKey;
-  /** Look up a historical key by id, or null if the key is no longer
-   *  available (rotated out, file deleted, OS keyring cleared). */
+  /** Look up a historical key by id. Null means no owned/matching key;
+   * read, permission, malformed-key and backend errors must propagate. */
   getKeyById(keyId: string): Buffer | null;
 }
 
@@ -67,10 +67,7 @@ const REQUIRED_AUTH_TAG_BYTES = 16;
  *  `WrappedSecret` is JSON-serialisable; pass it through
  *  `serializeWrappedSecret` to flatten it into a single base64url string
  *  for the SQLite BLOB column. */
-export function wrapSecret(
-  plaintext: Buffer,
-  provider: WrappingKeyProvider,
-): WrappedSecret {
+export function wrapSecret(plaintext: Buffer, provider: WrappingKeyProvider): WrappedSecret {
   if (!Buffer.isBuffer(plaintext)) {
     throw new TypeError("wrapSecret: plaintext must be a Buffer");
   }
@@ -114,17 +111,22 @@ export function wrapSecret(
  *  - malformed base64url / JSON shape
  *  The thrown error names the keyId so log analysis can attribute failures
  *  to a specific keyring entry without leaking the ciphertext itself. */
-export function unwrapSecret(
-  wrapped: WrappedSecret,
-  provider: WrappingKeyProvider,
-): Buffer {
+export function unwrapSecret(wrapped: WrappedSecret, provider: WrappingKeyProvider): Buffer {
   const key = provider.getKeyById(wrapped.keyId);
   if (!key) {
-    pqcLog.error(PQC_EVENT.UnwrapSecret, { status: "fail", keyId: wrapped.keyId, detail: "key not found" });
+    pqcLog.error(PQC_EVENT.UnwrapSecret, {
+      status: "fail",
+      keyId: wrapped.keyId,
+      detail: "key not found",
+    });
     throw new Error(`unwrapSecret: wrapping key not found: ${wrapped.keyId}`);
   }
   if (key.length !== REQUIRED_KEY_BYTES) {
-    pqcLog.error(PQC_EVENT.UnwrapSecret, { status: "fail", keyId: wrapped.keyId, detail: "wrong-size key" });
+    pqcLog.error(PQC_EVENT.UnwrapSecret, {
+      status: "fail",
+      keyId: wrapped.keyId,
+      detail: "wrong-size key",
+    });
     throw new Error(
       `unwrapSecret: wrapping key must be ${REQUIRED_KEY_BYTES} bytes (AES-256), got ${key.length}`,
     );
@@ -135,13 +137,19 @@ export function unwrapSecret(
   const authTag = Buffer.from(wrapped.authTag, "base64url");
   const ciphertext = Buffer.from(wrapped.ciphertext, "base64url");
   if (iv.length !== REQUIRED_IV_BYTES) {
-    pqcLog.error(PQC_EVENT.UnwrapSecret, { status: "fail", keyId: wrapped.keyId, detail: "wrong-size iv" });
-    throw new Error(
-      `unwrapSecret: iv must be ${REQUIRED_IV_BYTES} bytes, got ${iv.length}`,
-    );
+    pqcLog.error(PQC_EVENT.UnwrapSecret, {
+      status: "fail",
+      keyId: wrapped.keyId,
+      detail: "wrong-size iv",
+    });
+    throw new Error(`unwrapSecret: iv must be ${REQUIRED_IV_BYTES} bytes, got ${iv.length}`);
   }
   if (authTag.length !== REQUIRED_AUTH_TAG_BYTES) {
-    pqcLog.error(PQC_EVENT.UnwrapSecret, { status: "fail", keyId: wrapped.keyId, detail: "wrong-size auth tag" });
+    pqcLog.error(PQC_EVENT.UnwrapSecret, {
+      status: "fail",
+      keyId: wrapped.keyId,
+      detail: "wrong-size auth tag",
+    });
     throw new Error(
       `unwrapSecret: authTag must be ${REQUIRED_AUTH_TAG_BYTES} bytes, got ${authTag.length}`,
     );
@@ -150,10 +158,18 @@ export function unwrapSecret(
   decipher.setAuthTag(authTag);
   try {
     const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-    pqcLog.info(PQC_EVENT.UnwrapSecret, { status: "ok", keyId: wrapped.keyId, byteLength: plaintext.length });
+    pqcLog.info(PQC_EVENT.UnwrapSecret, {
+      status: "ok",
+      keyId: wrapped.keyId,
+      byteLength: plaintext.length,
+    });
     return plaintext;
   } catch (error) {
-    pqcLog.error(PQC_EVENT.UnwrapSecret, { status: "fail", keyId: wrapped.keyId, detail: "gcm auth failed" });
+    pqcLog.error(PQC_EVENT.UnwrapSecret, {
+      status: "fail",
+      keyId: wrapped.keyId,
+      detail: "gcm auth failed",
+    });
     throw error;
   }
 }
@@ -185,6 +201,7 @@ export function deserializeWrappedSecret(serialized: string): WrappedSecret {
   } catch (error) {
     throw new Error(
       `deserializeWrappedSecret: wrapped-secret JSON is malformed: ${(error as Error).message}`,
+      { cause: error },
     );
   }
   if (typeof parsed !== "object" || parsed === null) {

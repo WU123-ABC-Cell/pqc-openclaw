@@ -29,9 +29,9 @@ export interface KeyringProvider {
 /** Minimal shape of the @napi-rs/keyring Entry we use. Loaded
  *  dynamically so a missing native dep does not break module load. */
 interface NapiKeyringEntry {
-  getPassword(): string;
+  getPassword(): string | null;
   setPassword(password: string): void;
-  deletePassword(): void;
+  deletePassword(): boolean;
 }
 
 interface NapiKeyringModule {
@@ -101,7 +101,7 @@ export class OsKeyring implements KeyringProvider {
   constructor(
     private readonly service: string,
     private readonly account: string,
-    private readonly keyId: string = "os-keyring",
+    private readonly keyId = "os-keyring",
   ) {
     if (typeof service !== "string" || service.length === 0) {
       throw new Error("OsKeyring: service must be a non-empty string");
@@ -120,7 +120,7 @@ export class OsKeyring implements KeyringProvider {
           `account=${account}. On Linux, is libsecret-1-0 installed and a ` +
           `Secret Service (gnome-keyring, KWallet, KeePassXC) running? ` +
           `Underlying error: ${cause instanceof Error ? cause.message : String(cause)}`,
-        cause instanceof Error ? { cause } : undefined,
+        { cause },
       );
     }
   }
@@ -134,7 +134,7 @@ export class OsKeyring implements KeyringProvider {
     if (this.cachedKey) {
       return { key: this.cachedKey, keyId: this.keyId };
     }
-    let password: string;
+    let password: string | null;
     try {
       password = this.entry.getPassword();
     } catch (cause) {
@@ -143,7 +143,14 @@ export class OsKeyring implements KeyringProvider {
           `account=${this.account}. Run the migration script to seed ` +
           `the key (pqc-fork-scripts/migrate-oskeyring.mjs). ` +
           `Underlying error: ${cause instanceof Error ? cause.message : String(cause)}`,
-        cause instanceof Error ? { cause } : undefined,
+        { cause },
+      );
+    }
+    // The native binding maps backend read errors to null, so null does not
+    // establish that an entry is merely absent. Never authorize fallback.
+    if (password === null) {
+      throw new Error(
+        `OsKeyring: configured entry unavailable for service=${this.service} account=${this.account}`,
       );
     }
     const key = decodeKeyMaterial(password, `os:${this.service}/${this.account}`);
@@ -154,8 +161,9 @@ export class OsKeyring implements KeyringProvider {
   /** Look up a specific keyId. The OS keyring identifies entries
    *  by (service, account) only; we treat the requested keyId as
    *  the account name so rotation just stores a new entry with a
-   *  different keyId. Returns null on "not found" so the composite
-   *  can walk providers. M6.B v2: same mlock-once pattern as
+   *  different keyId. Returns null only for an ID this provider does not own.
+   *  Owning-entry failures (including ambiguous native null) propagate.
+   *  M6.B v2: same mlock-once pattern as
    *  `getActiveKey()`. */
   getKeyById(keyId: string): Buffer | null {
     if (keyId !== this.keyId) {
@@ -170,14 +178,7 @@ export class OsKeyring implements KeyringProvider {
     if (this.cachedKey) {
       return this.cachedKey;
     }
-    try {
-      const password = this.entry.getPassword();
-      const key = decodeKeyMaterial(password, `os:${this.service}/${this.account}`);
-      this.cachedKey = protectKey(key, `os:${this.service}/${this.account}`);
-      return this.cachedKey;
-    } catch {
-      return null;
-    }
+    return this.getActiveKey().key;
   }
 
   /** Migration / rotation helper: store a base64url-encoded
@@ -189,6 +190,7 @@ export class OsKeyring implements KeyringProvider {
     const validationCopy = decodeKeyMaterial(base64urlKey, "setKeyBase64Url input");
     try {
       this.entry.setPassword(base64urlKey);
+      this.release();
     } finally {
       validationCopy.fill(0);
     }
@@ -197,13 +199,16 @@ export class OsKeyring implements KeyringProvider {
   /** Migration / rotation helper: delete the entry. */
   deleteKey(): void {
     try {
-      this.entry.deletePassword();
+      if (!this.entry.deletePassword()) {
+        throw new Error("OS backend did not confirm credential deletion");
+      }
+      this.release();
     } catch (cause) {
       throw new Error(
         `OsKeyring: failed to delete entry for service=${this.service} ` +
           `account=${this.account}. ` +
           `Underlying error: ${cause instanceof Error ? cause.message : String(cause)}`,
-        cause instanceof Error ? { cause } : undefined,
+        { cause },
       );
     }
   }

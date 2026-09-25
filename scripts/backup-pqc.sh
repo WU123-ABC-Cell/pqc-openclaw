@@ -113,9 +113,10 @@ WHAT GETS BACKED UP
   $STATE_DIR contents excluding:
     - mlock/  (tmpfs-only, not useful to back up)
     - *.sock  (Unix domain sockets, not storable)
-    - the active --wrap-key-file / OPENCLAW_WRAP_KEY_FILE (store it separately)
+    - wrap-key.b64 and both --wrap-key-file / OPENCLAW_WRAP_KEY_FILE,
+      including symlink targets and hardlink aliases (store keys separately)
     - openclaw.env (legacy service secrets; never archive)
-    - *.log   (live audit log; we tar -P it for completeness)
+    - *.pid   (runtime process identifiers)
   Plus the system-level OPENCLAW_INSTALL_ROOT/dist/ build artefacts
   are NOT included; backups are state-only. Rebuild dist from source
   on a fresh machine and re-apply state to recover.
@@ -143,13 +144,13 @@ EXAMPLES
   bash scripts/backup-pqc.sh --verify /var/backups/pqc-openclaw/pqc-openclaw-2026-08-30-030000.tar.gz
 
 REQUIREMENTS
-  - tar, gzip, sha256sum, ls, mkdir, sqlite3
+  - GNU tar (--transform, --null, --no-recursion), gzip, sha256sum,
+    find (-print0), stat, ls, mkdir, sqlite3
   - aws cli (only required when --s3-bucket is set)
   - bash 4.0+ (uses arrays)
-  - All listed tools are POSIX / present on Ubuntu 22.04+, macOS 13+,
-    and WSL2 Ubuntu out of the box. flock is intentionally NOT used
-    because it is util-linux (Linux only); concurrency is guarded by
-    a mkdir-based lock instead, which is portable to macOS BSD.
+  - Tested on Ubuntu/WSL Ubuntu. Install sqlite3 when unavailable.
+    Stock macOS tools are not sufficient; GNU tar and sha256sum are needed.
+    The mkdir lock and stat fallback do not establish macOS validation.
 EOF
 }
 
@@ -188,7 +189,7 @@ if [[ $JSON_OUTPUT -eq 1 ]]; then
     local status="$1" name="$2" detail="$3"
     JSON_EVENTS+=("{\"check\":\"$name\",\"status\":\"$status\",\"detail\":\"$detail\"}")
   }
-  ok()    { PASS=$((PASS+1)); json_emit "ok"    "$1" "$2"; [[ $VERBOSE -eq 1 ]] && echo "[OK]   $1: $2"; }
+  ok()    { PASS=$((PASS+1)); json_emit "ok"    "$1" "$2"; [[ $VERBOSE -eq 1 ]] && echo "[OK]   $1: $2"; return 0; }
   warn()  { WARN=$((WARN+1)); json_emit "warn"  "$1" "$2"; echo "[WARN] $1: $2" >&2; }
   fail()  { FAIL=$((FAIL+1)); json_emit "fail"  "$1" "$2"; echo "[FAIL] $1: $2" >&2; }
 else
@@ -432,40 +433,79 @@ SCRATCH_TARBALL="$SCRATCH_DIR/$BASENAME"
 # (The dry-run short-circuit lives above, after the pre-flight checks;
 # we never reach this point under --dry-run.)
 
-if [[ -e "$WRAP_KEY_FILE" || -L "$WRAP_KEY_FILE" ]]; then
-  WRAP_KEY_PARENT=$(cd -P -- "$(dirname -- "$WRAP_KEY_FILE")" && pwd) \
-    || die "cannot resolve wrap key parent directory"
-  WRAP_KEY_FILE="$WRAP_KEY_PARENT/$(basename -- "$WRAP_KEY_FILE")"
-fi
-if [[ -z "$WRAP_KEY_FILE" ]]; then
-  WRAP_KEY_FILE="$STATE_DIR/wrap-key.b64"
-fi
-[[ "$WRAP_KEY_FILE" == /* ]] || die "wrap key file path must be absolute"
-STATE_ROOT=$(cd "$STATE_DIR" && pwd -P)
-WRAP_KEY_EXCLUDE=("--exclude=$(basename "$STATE_DIR")/wrap-key.b64")
-case "$WRAP_KEY_FILE" in
-  "$STATE_ROOT"/*)
-    WRAP_KEY_RELATIVE="${WRAP_KEY_FILE#"$STATE_ROOT"/}"
-    [[ -n "$WRAP_KEY_RELATIVE" && "$WRAP_KEY_RELATIVE" != ../* ]] \
-      || die "invalid wrap key path inside state directory"
-    if [[ "$WRAP_KEY_RELATIVE" != "wrap-key.b64" ]]; then
-      WRAP_KEY_EXCLUDE+=("--exclude=$(basename "$STATE_DIR")/$WRAP_KEY_RELATIVE")
-    fi
-    ;;
-esac
+STATE_ROOT=$(cd -P -- "$STATE_DIR" && printf '%s' "$PWD")
+WRAP_KEY_FILES=("$STATE_ROOT/wrap-key.b64")
+[[ -z "$WRAP_KEY_FILE" ]] || WRAP_KEY_FILES+=("$WRAP_KEY_FILE")
+# A CLI exclusion must not stop protecting the daemon's env-selected key.
+[[ -z "${OPENCLAW_WRAP_KEY_FILE:-}" ]] || WRAP_KEY_FILES+=("$OPENCLAW_WRAP_KEY_FILE")
+WRAP_KEY_STATES=()
+WRAP_KEY_IDENTITIES=()
+die() { fail "wrapping-key" "$1"; exit 1; }
+file_metadata() {
+  stat -L -c '%d:%i:%s:%y:%z' -- "$1" 2>/dev/null \
+    || stat -L -f '%d:%i:%z:%m:%c' "$1" 2>/dev/null \
+    || die "cannot inspect wrapping key or archive source metadata"
+}
+wrapping_key_state() {
+  local key="$1" parent="${1%/*}"
+  [[ "$key" == /* ]] || die "wrap key file path must be absolute"
+  [[ -n "$parent" ]] || parent=/
+  (cd -P -- "$parent") || die "cannot inspect wrap key parent directory"
+  if [[ ! -e "$key" && ! -L "$key" ]]; then
+    printf '%s' missing
+    return
+  fi
+  [[ -f "$key" ]] || die "wrapping key must resolve to a regular file"
+  file_metadata "$key"
+}
+for key in "${WRAP_KEY_FILES[@]}"; do
+  key_state=$(wrapping_key_state "$key")
+  WRAP_KEY_STATES+=("$key_state")
+  key_tail="${key_state#*:}"
+  WRAP_KEY_IDENTITIES+=("${key_state%%:*}:${key_tail%%:*}")
+done
+assert_wrapping_keys_unchanged() {
+  local index current
+  for index in "${!WRAP_KEY_FILES[@]}"; do
+    current=$(wrapping_key_state "${WRAP_KEY_FILES[$index]}")
+    [[ "$current" == "${WRAP_KEY_STATES[$index]}" ]] \
+      || die "wrapping key changed during backup; retry backup"
+  done
+}
 
-# tar exclusions: skip mlock (tmpfs only, not useful to back up) and
-# any unix-domain sockets (which tar cannot store anyway, but listing
-# them in --exclude is cheap and makes the archive deterministic).
+# Tar must not recursively reintroduce excluded children. NUL names also keep
+# newlines, glob characters and leading dashes literal rather than tar options.
+CANDIDATES="$SCRATCH_DIR/candidates.nul"
+ARCHIVE_FILES="$SCRATCH_DIR/archive-files.nul"
+(cd -- "$STATE_ROOT" && find . \
+  \( -path ./mlock -o -path ./openclaw.env -o -name '*.sock' -o -name '*.pid' \) \
+  -prune -o -print0) > "$CANDIDATES"
+while IFS= read -r -d '' entry; do
+  entry_path="$STATE_ROOT/${entry#./}"
+  entry_identity=""
+  if [[ -f "$entry_path" ]]; then
+    entry_state=$(file_metadata "$entry_path")
+    entry_tail="${entry_state#*:}"
+    entry_identity="${entry_state%%:*}:${entry_tail%%:*}"
+  fi
+  exclude=0
+  # Pin the original identities: a selector retarget-and-restore must not make
+  # old key aliases look ordinary during enumeration (even if final stat agrees).
+  for index in "${!WRAP_KEY_FILES[@]}"; do
+    if [[ "$entry_path" == "${WRAP_KEY_FILES[$index]}" ||
+          "$entry_identity" == "${WRAP_KEY_IDENTITIES[$index]}" ]]; then
+      exclude=1
+      break
+    fi
+  done
+  [[ $exclude -eq 1 ]] || printf '%s\0' "$entry"
+done < "$CANDIDATES" > "$ARCHIVE_FILES"
+
+# Only manifest entries are archived; keep symbolic-link targets literal.
 tar -czf "$SCRATCH_TARBALL" \
-  -C "$(dirname "$STATE_DIR")" \
-  --exclude="$(basename "$STATE_DIR")/mlock" \
-  "${WRAP_KEY_EXCLUDE[@]}" \
-  --exclude="$(basename "$STATE_DIR")/openclaw.env" \
-  --exclude="*.sock" \
-  --exclude="*.pid" \
-  --transform "s|$(basename "$STATE_DIR")|pqc-openclaw-state|" \
-  "$(basename "$STATE_DIR")"
+  -C "$STATE_ROOT" --no-recursion --null \
+  --transform 'flags=rh;s|^\./|pqc-openclaw-state/|' \
+  -T "$ARCHIVE_FILES"
 
 TARBALL_BYTES=$(stat -c '%s' "$SCRATCH_TARBALL" 2>/dev/null || stat -f '%z' "$SCRATCH_TARBALL")
 ok "tar" "wrote $SCRATCH_TARBALL ($TARBALL_BYTES bytes)"
@@ -511,6 +551,8 @@ VERIFY_DIR=""
 # Atomic publication after verification
 # ----------------------------------------------------------------------
 
+assert_wrapping_keys_unchanged
+rm -f "$CANDIDATES" "$ARCHIVE_FILES"
 mv "$SCRATCH_TARBALL" "$FINAL_PATH"
 mv "$SCRATCH_SIDE"   "${FINAL_PATH}.sha256"
 rmdir "$SCRATCH_DIR"

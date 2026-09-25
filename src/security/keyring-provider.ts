@@ -235,12 +235,8 @@ export class EnvKeyring implements KeyringProvider {
   }
 }
 
-/** Composite keyring that tries providers in order. Used for
- *  "auto-inject default keyring" (whitepaper 2.2.5.A): a primary
- *  keyring (e.g. OS keyring on macOS) and one or more fallbacks
- *  (e.g. file keyring for tests / CI). `getKeyById` walks every
- *  provider so historical keys can still be unwrapped during a
- *  rotation grace period. */
+/** The first provider is the active source. Other providers only resolve
+ * historical key IDs; provider failures never authorize a downgrade. */
 export class CompositeKeyring implements KeyringProvider {
   private readonly providers: KeyringProvider[];
 
@@ -252,29 +248,14 @@ export class CompositeKeyring implements KeyringProvider {
   }
 
   getActiveKey(): ActiveWrappingKey {
-    const errors: string[] = [];
-    for (const provider of this.providers) {
-      try {
-        return provider.getActiveKey();
-      } catch (error) {
-        errors.push(`${provider.constructor.name}: ${(error as Error).message}`);
-      }
-    }
-    throw new Error(
-      `CompositeKeyring: no provider returned an active key. Errors: ${errors.join("; ")}`,
-    );
+    return this.providers[0]!.getActiveKey();
   }
 
   getKeyById(keyId: KeyId): Buffer | null {
     for (const provider of this.providers) {
-      try {
-        const key = provider.getKeyById(keyId);
-        if (key) {
-          return key;
-        }
-      } catch {
-        // A failing provider is not an error for `getKeyById`; the
-        // composite walks all providers and returns the first match.
+      const key = provider.getKeyById(keyId);
+      if (key) {
+        return key;
       }
     }
     return null;
@@ -373,6 +354,8 @@ export { OsKeyring } from "./os-keyring.js";
  *  The `cachedKey` field on the class is per-instance, so the
  *  instance itself has to be reused for caching to be effective. */
 let cachedDefaultKeyring: KeyringProvider | null | undefined = undefined;
+let cachedDefaultEnv: NodeJS.ProcessEnv | undefined;
+let cachedDefaultConfig: string | undefined;
 
 /** Build a process-level cached keyring from environment variables.
  *  Implements the M5.5 "auto-inject default keyring" path
@@ -399,28 +382,22 @@ let cachedDefaultKeyring: KeyringProvider | null | undefined = undefined;
  *  - OS only → `OsKeyring`.
  *  - File only → `FileKeyring` (backward compat with M5.5).
  *  - Both → `CompositeKeyring([OsKeyring, FileKeyring])` so the
- *    OS keyring is the active source and the file is the fallback
- *    during the M6.B migration window. This is the recommended
- *    post-migration shape: the OS keyring is the live source of
- *    truth, the file is the recovery backup until the operator
- *    deletes it.
+ *    OS keyring is the active source; the file only resolves historical
+ *    file key IDs. An OS failure is fatal, not permission to use the file.
  *
  *  Returns `null` when neither source is configured, so callers can
  *  "auto-inject if configured" without forcing a keyring on
  *  environments that don't need one (tests, the unwrapped mode that
  *  predates M5, etc.).
  *
- *  The first call constructs and caches; subsequent calls return
- *  the same instance, so per-class caches (FileKeyring.cachedKey,
- *  OsKeyring's loaded Entry) are preserved and `getActiveKey()` is
- *  a memory lookup after the first read.
+ *  Reuses one bounded cache slot only for the same environment object and
+ *  effective configuration. Replacement zeroes/releases cached key buffers.
+ *  Returned key buffers are borrowed: do not retain them across configuration
+ *  changes or cache release. Explicitly injected providers remain caller-owned.
  */
 export function getDefaultKeyringFromEnv(
   env: NodeJS.ProcessEnv = process.env,
 ): KeyringProvider | null {
-  if (cachedDefaultKeyring !== undefined) {
-    return cachedDefaultKeyring;
-  }
   const keyPath = env.OPENCLAW_WRAP_KEY_FILE;
   const osService = env.OPENCLAW_WRAP_KEY_OS_SERVICE;
   const osAccount = env.OPENCLAW_WRAP_KEY_OS_ACCOUNT;
@@ -431,8 +408,30 @@ export function getDefaultKeyringFromEnv(
     typeof osAccount === "string" &&
     osAccount.length > 0;
 
+  const requestedOs =
+    osService !== undefined || osAccount !== undefined || env.OPENCLAW_WRAP_KEY_OS_ID !== undefined;
+  if (requestedOs && !hasOs) {
+    throw new Error(
+      "OS wrapping-key service and account must be configured together and non-empty",
+    );
+  }
+  const config = JSON.stringify([
+    keyPath,
+    env.OPENCLAW_WRAP_KEY_ID,
+    osService,
+    osAccount,
+    env.OPENCLAW_WRAP_KEY_OS_ID,
+  ]);
+  if (
+    cachedDefaultEnv === env &&
+    cachedDefaultConfig === config &&
+    cachedDefaultKeyring !== undefined
+  ) {
+    return cachedDefaultKeyring;
+  }
+  resetDefaultKeyringCache();
+
   if (!hasFile && !hasOs) {
-    cachedDefaultKeyring = null;
     return null;
   }
 
@@ -447,6 +446,8 @@ export function getDefaultKeyringFromEnv(
   }
 
   cachedDefaultKeyring = providers.length === 1 ? providers[0] : new CompositeKeyring(providers);
+  cachedDefaultEnv = env;
+  cachedDefaultConfig = config;
   return cachedDefaultKeyring ?? null;
 }
 
@@ -456,6 +457,8 @@ export function getDefaultKeyringFromEnv(
 export function resetDefaultKeyringCache(): void {
   releaseDefaultKeyring();
   cachedDefaultKeyring = undefined;
+  cachedDefaultEnv = undefined;
+  cachedDefaultConfig = undefined;
 }
 
 /** M6.B v2: release all mlocked buffers in the default keyring cache.
@@ -463,7 +466,9 @@ export function resetDefaultKeyringCache(): void {
  *  and safe to call multiple times. */
 export function releaseDefaultKeyring(): void {
   const keyring = cachedDefaultKeyring;
-  if (!keyring) return;
+  if (!keyring) {
+    return;
+  }
   if (typeof (keyring as { release?: () => void }).release === "function") {
     (keyring as { release: () => void }).release();
   }

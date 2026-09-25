@@ -25,6 +25,7 @@ import {
 } from "../state/openclaw-state-db.js";
 import {
   generateStoredDeviceIdentity,
+  ensureStoredDeviceIdentityWrapped,
   insertStoredDeviceIdentityIfAbsent,
   PRIMARY_DEVICE_IDENTITY_KEY,
   readStoredDeviceIdentity,
@@ -202,7 +203,7 @@ describe("device-identity store — M5 wrap integration", () => {
     insertStoredDeviceIdentityIfAbsent(candidate, options);
 
     keyring.drop("wrap-key-2026-08");
-    expect(() => readStoredDeviceIdentity(options)).toThrow(/not found|invalid persisted/i);
+    expect(() => readStoredDeviceIdentity(options)).toThrow(/Cannot authenticate or decrypt/);
   });
 
   it("readStoredDeviceIdentityReadOnly also unwraps when given a keyring", () => {
@@ -250,6 +251,65 @@ describe("device-identity store — M5 wrap integration", () => {
     // Plaintext rows keep the new mldsa_* columns NULL on the read path.
     expect(reloaded!.mldsaPrivateKeyWrapped).toBeNull();
     expect(reloaded!.mldsaPrivateKeyWrapKeyId).toBeNull();
+  });
+
+  it("canonicalizes a valid plaintext row into wrapped-only storage", () => {
+    const keyring = new InMemoryKeyring("wrap-key-2026-08");
+    keyring.addKey("wrap-key-2026-08", newKey());
+    const writeOptions = makeStoreOptions();
+    const candidate = generateStoredDeviceIdentity(1_700_000_000_000, undefined, {
+      allowPlaintextPrivateKey: true,
+    });
+    insertStoredDeviceIdentityIfAbsent(candidate, writeOptions);
+
+    const result = ensureStoredDeviceIdentityWrapped({
+      ...writeOptions,
+      wrappingKeyProvider: keyring,
+    });
+
+    expect(result.rewrapped).toBe(true);
+    expect(result.identity.deviceId).toBe(candidate.deviceId);
+    const { DatabaseSync } = requireNodeSqlite();
+    const database = new DatabaseSync(path.join(writeOptions.stateDir, "state", "openclaw.sqlite"));
+    try {
+      const row = database
+        .prepare(
+          "SELECT private_key_pem, mldsa_private_key_pem, mldsa_private_key_wrapped FROM device_identities WHERE identity_key = ?",
+        )
+        .get(PRIMARY_DEVICE_IDENTITY_KEY) as {
+        private_key_pem: string;
+        mldsa_private_key_pem: string | null;
+        mldsa_private_key_wrapped: Uint8Array | null;
+      };
+      expect(row.private_key_pem).toBe("");
+      expect(row.mldsa_private_key_pem).toBeNull();
+      expect(row.mldsa_private_key_wrapped).not.toBeNull();
+    } finally {
+      database.close();
+    }
+  });
+
+  it("rejects a wrapped row whose envelope and column key ids disagree", () => {
+    const keyring = new InMemoryKeyring("wrap-key-2026-08");
+    keyring.addKey("wrap-key-2026-08", newKey());
+    const options = makeStoreOptions(keyring);
+    insertStoredDeviceIdentityIfAbsent(
+      generateStoredDeviceIdentity(1_700_000_000_000, keyring),
+      options,
+    );
+    closeOpenClawStateDatabaseForTest();
+    const { DatabaseSync } = requireNodeSqlite();
+    const database = new DatabaseSync(path.join(options.stateDir, "state", "openclaw.sqlite"));
+    try {
+      database
+        .prepare(
+          "UPDATE device_identities SET mldsa_private_key_wrap_key_id = ? WHERE identity_key = ?",
+        )
+        .run("different-key-id", PRIMARY_DEVICE_IDENTITY_KEY);
+    } finally {
+      database.close();
+    }
+    expect(() => readStoredDeviceIdentity(options)).toThrow(/invalid persisted device identity/);
   });
 
   it("device_id (fingerprint) is stable across wrap + unwrap", () => {

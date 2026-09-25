@@ -37,6 +37,7 @@ import {
   createBackupLinkCache,
   createBackupVolatileStatCache,
 } from "./backup-volatile-stat-cache.js";
+import { createBackupWrappingKeyFilter } from "./backup-wrapping-key-filter.js";
 import { formatErrorMessage } from "./errors.js";
 import { sameFileIdentity } from "./fs-safe-advanced.js";
 import { writeJson } from "./json-files.js";
@@ -473,6 +474,7 @@ async function listStateSqlitePaths(params: {
   globalStateSqlitePath: string;
   gatewayLockDir: string;
   preservedStatePaths?: readonly string[];
+  wrappingKeys: Awaited<ReturnType<typeof createBackupWrappingKeyFilter>>;
 }): Promise<{ snapshotPaths: string[]; discoveredSourcePaths: Set<string> }> {
   const snapshotPaths = new Set<string>();
   const discoveredSourcePaths = new Set<string>();
@@ -486,6 +488,9 @@ async function listStateSqlitePaths(params: {
     }
     for (const entry of entries) {
       const entryPath = path.join(dir, entry.name);
+      if (params.wrappingKeys.excludes(entryPath)) {
+        continue;
+      }
       // Preserve noncanonical state-tree symlinks instead of dereferencing
       // their SQLite-looking targets. Canonical agent DBs mirror the global
       // DB contract: snapshot the target so restore receives a regular file.
@@ -503,6 +508,9 @@ async function listStateSqlitePaths(params: {
             throw new Error(
               `Canonical agent SQLite symlink must resolve to a regular file: ${entryPath}`,
             );
+          }
+          if (params.wrappingKeys.excludes(entryPath, targetEntry)) {
+            throw new Error(`Canonical SQLite path overlaps a wrapping key: ${entryPath}`);
           }
           const resolvedEntryPath = path.resolve(entryPath);
           snapshotPaths.add(resolvedEntryPath);
@@ -532,6 +540,9 @@ async function listStateSqlitePaths(params: {
           discoveredSourcePaths.add(resolvedEntryPath);
         }
         if (entry.name.endsWith(".sqlite") && sqliteSourceKind === "sqlite") {
+          if (params.wrappingKeys.excludes(entryPath, await fs.stat(entryPath))) {
+            continue;
+          }
           snapshotPaths.add(resolvedEntryPath);
         }
       }
@@ -549,6 +560,9 @@ async function listStateSqlitePaths(params: {
     }
   }
   if (globalStateEntry?.isFile()) {
+    if (params.wrappingKeys.excludes(globalStateSqlitePath, globalStateEntry)) {
+      throw new Error(`Canonical SQLite path overlaps a wrapping key: ${globalStateSqlitePath}`);
+    }
     snapshotPaths.add(globalStateSqlitePath);
     discoveredSourcePaths.add(globalStateSqlitePath);
   } else if (globalStateEntry?.isSymbolicLink()) {
@@ -565,6 +579,9 @@ async function listStateSqlitePaths(params: {
       throw new Error(
         `Canonical global SQLite symlink must resolve to a regular file: ${globalStateSqlitePath}`,
       );
+    }
+    if (params.wrappingKeys.excludes(globalStateSqlitePath, targetEntry)) {
+      throw new Error(`Canonical SQLite path overlaps a wrapping key: ${globalStateSqlitePath}`);
     }
     snapshotPaths.add(globalStateSqlitePath);
     discoveredSourcePaths.add(globalStateSqlitePath);
@@ -585,6 +602,7 @@ async function createStateSqliteBackupPlan(params: {
   tempDir: string;
   preservedStatePaths?: readonly string[];
   legacyAuditSnapshots: readonly LegacyAuditBackupSnapshot[];
+  wrappingKeys: Awaited<ReturnType<typeof createBackupWrappingKeyFilter>>;
 }): Promise<StateSqliteBackupPlan> {
   // Complete discovery before writing snapshots. chooseBackupTempRoot keeps
   // tempDir outside stateDir, and this ordering prevents future overlap from
@@ -600,6 +618,7 @@ async function createStateSqliteBackupPlan(params: {
     globalStateSqlitePath,
     gatewayLockDir: resolveGatewayLockDir(params.stateDir),
     preservedStatePaths: params.preservedStatePaths,
+    wrappingKeys: params.wrappingKeys,
   });
   const globalStateIdentity = await fs.stat(globalStateSqlitePath).catch((error: unknown) => {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
@@ -733,6 +752,12 @@ export async function createBackupArchive(
   const onlyConfig = Boolean(opts.onlyConfig);
   const includeWorkspace = onlyConfig ? false : (opts.includeWorkspace ?? true);
   const plan = await resolveBackupPlanFromDisk({ includeWorkspace, onlyConfig, nowMs });
+  const wrappingKeys = await createBackupWrappingKeyFilter(plan.stateDir);
+  for (const asset of plan.included) {
+    if (wrappingKeys.excludes(asset.sourcePath, await fs.stat(asset.sourcePath))) {
+      throw new Error(`Backup asset overlaps a wrapping key: ${asset.sourcePath}`);
+    }
+  }
   const outputPath = await resolveOutputPath({
     output: opts.output,
     nowMs,
@@ -772,7 +797,15 @@ export async function createBackupArchive(
     onlyConfig,
     verified: false,
     assets: plan.included,
-    skipped: plan.skipped,
+    skipped: [
+      ...plan.skipped,
+      ...wrappingKeys.excludedFiles.map((sourcePath) => ({
+        kind: "wrapping-key",
+        sourcePath,
+        displayPath: sourcePath,
+        reason: "excluded; encrypted identities require separately secured wrapping-key recovery",
+      })),
+    ],
     skippedVolatileCount: 0,
   };
 
@@ -822,6 +855,7 @@ export async function createBackupArchive(
             tempDir,
             preservedStatePaths,
             legacyAuditSnapshots,
+            wrappingKeys,
           })
         : { snapshots: [], discoveredSourcePaths: new Set<string>() };
       return { legacyAuditSnapshots, stateSqliteBackup };
@@ -878,6 +912,9 @@ export async function createBackupArchive(
       const resolvedEntryPath = path.resolve(entryPath);
       if (resolvedEntryPath === manifestPath) {
         return true;
+      }
+      if (wrappingKeys.excludes(entryPath, "isFile" in entryStat ? entryStat : undefined)) {
+        return false;
       }
       if (stateFilter && !stateFilter(entryPath)) {
         return false;
@@ -963,6 +1000,14 @@ export async function createBackupArchive(
           throw new Error(
             `SQLite state appeared after snapshot discovery: ${unexpectedSqliteSourcePath}. Retry backup so it can be snapshotted.`,
           );
+        }
+        try {
+          await wrappingKeys.assertUnchanged();
+        } catch (error) {
+          if (!removePreparedBackupArchive(prepared)) {
+            publication.pendingCleanupArchives.push(prepared);
+          }
+          throw error;
         }
         return prepared;
       },

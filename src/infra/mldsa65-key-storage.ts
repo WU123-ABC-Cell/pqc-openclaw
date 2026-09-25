@@ -62,6 +62,19 @@ export function generateMlDsa65KeyPair(): MlDsa65KeyPair {
   return { publicKey: kp.publicKey, secretKey: kp.secretKey };
 }
 
+/** Derive rather than sign with untrusted expanded keys: signing uses rejection
+ * sampling. This proves public/secret correspondence, not integrity of every
+ * redundant expanded-secret field (the dependency ignores stored tr/t0 here). */
+export function mlDsa65KeyPairMatches(publicKey: Uint8Array, secretKey: Uint8Array): boolean {
+  try {
+    assertLength(publicKey.length, MLDSA65_PUBLIC_KEY_LENGTH, "public key");
+    assertLength(secretKey.length, MLDSA65_SECRET_KEY_LENGTH, "secret key");
+    return asBuffer(publicKey).equals(asBuffer(ml_dsa65.getPublicKey(secretKey)));
+  } catch {
+    return false;
+  }
+}
+
 function encodeKey(prefix: string, raw: Uint8Array): string {
   if (prefix === PUBLIC_KEY_PREFIX) {
     assertLength(raw.length, MLDSA65_PUBLIC_KEY_LENGTH, "public key");
@@ -79,7 +92,9 @@ function decodeKey(prefix: string, encoded: string, expectedLength: number): Uin
   if (body.length === 0) {
     throw new Error("ML-DSA-65 key body must not be empty");
   }
-  const raw = new Uint8Array(Buffer.from(body, "base64url"));
+  // Return the owned decode buffer so callers can scrub it without leaving
+  // an intermediate secret-key copy behind.
+  const raw = Buffer.from(body, "base64url");
   assertLength(raw.length, expectedLength, "decoded key");
   return raw;
 }
@@ -187,9 +202,15 @@ export function verifyMlDsa65(
   publicKey: Uint8Array,
 ): boolean {
   try {
-    if (signature.length !== MLDSA65_SIGNATURE_LENGTH) return false;
-    if (publicKey.length !== MLDSA65_PUBLIC_KEY_LENGTH) return false;
-    if (message.length > MLDSA65_MAX_MESSAGE_BYTES) return false;
+    if (signature.length !== MLDSA65_SIGNATURE_LENGTH) {
+      return false;
+    }
+    if (publicKey.length !== MLDSA65_PUBLIC_KEY_LENGTH) {
+      return false;
+    }
+    if (message.length > MLDSA65_MAX_MESSAGE_BYTES) {
+      return false;
+    }
     return ml_dsa65.verify(signature, message, publicKey);
   } catch {
     return false;
@@ -215,11 +236,14 @@ export function verifyMlDsa65Signature(params: {
   options?: SignMlDsa65Options;
 }): boolean {
   try {
-    const rawPublic = typeof params.publicKey === "string"
-      ? decodeMlDsa65PublicKey(params.publicKey)
-      : params.publicKey;
+    const rawPublic =
+      typeof params.publicKey === "string"
+        ? decodeMlDsa65PublicKey(params.publicKey)
+        : params.publicKey;
     const message = Buffer.from(params.payload, "utf8");
-    if (message.length > MLDSA65_MAX_MESSAGE_BYTES) return false;
+    if (message.length > MLDSA65_MAX_MESSAGE_BYTES) {
+      return false;
+    }
     // ML-DSA-65 sigs are 4412 base64url chars; bypass any 4096-char input cap that
     // may exist in canonical-base64url decoders and decode directly.
     const sig = new Uint8Array(Buffer.from(params.signatureBase64Url, "base64url"));

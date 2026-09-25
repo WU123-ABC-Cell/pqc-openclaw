@@ -29,6 +29,9 @@ async function reportMigration(
     for (const warning of result?.warnings ?? []) {
       log.warn(warning);
     }
+    for (const notice of result?.notices ?? []) {
+      log.info(notice);
+    }
   } catch (error) {
     // Startup auto-migration is best-effort by operator decision. Existing store
     // gates remain the fail-closed authority when a Doctor-owned migrator throws.

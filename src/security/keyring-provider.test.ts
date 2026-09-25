@@ -9,14 +9,14 @@
 // Tests focus on the cryptographic / encoding contract — the 32-byte
 // AES-256 length check, the base64url wire format, the file-mode
 // guard, the env-var rotation, and the composite's first-match wins
-// rule for `getKeyById` / first-success for `getActiveKey`.
+// rule for `getKeyById` / fail-closed primary for `getActiveKey`.
+/* eslint-disable no-underscore-dangle -- Existing test-only native adapter injection/reset APIs. */
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
-  type ActiveWrappingKey,
   CompositeKeyring,
   createKeyring,
   decodeBase64UrlKey,
@@ -57,8 +57,8 @@ class MockEntry {
   setPassword(password: string): void {
     mockKeyringStore.set(this.key, password);
   }
-  deletePassword(): void {
-    mockKeyringStore.delete(this.key);
+  deletePassword(): boolean {
+    return mockKeyringStore.delete(this.key);
   }
 }
 
@@ -82,15 +82,7 @@ function newKey(): Buffer {
   return k;
 }
 
-function readKeyFile(filePath: string): Buffer {
-  // Authorised test-only reader that flips the file mode off
-  // briefly (via a clone with 0600) so the production FileKeyring
-  // can load the key without triggering the safety guard.
-  const raw = fs.readFileSync(filePath, "utf8").trim();
-  return decodeBase64UrlKey(raw, `file:${filePath}`);
-}
-
-function writeKeyFile(filePath: string, key: Buffer, mode: number = 0o600): void {
+function writeKeyFile(filePath: string, key: Buffer, mode = 0o600): void {
   fs.writeFileSync(filePath, encodeBase64UrlKey(key));
   if (process.platform !== "win32") {
     fs.chmodSync(filePath, mode);
@@ -98,14 +90,20 @@ function writeKeyFile(filePath: string, key: Buffer, mode: number = 0o600): void
 }
 
 beforeEach(() => {
-  while (tempDirs.length > 0) tempDirs.pop();
-  while (trackedKeys.length > 0) trackedKeys.pop();
+  while (tempDirs.length > 0) {
+    tempDirs.pop();
+  }
+  while (trackedKeys.length > 0) {
+    trackedKeys.pop();
+  }
 });
 
 afterEach(() => {
   while (tempDirs.length > 0) {
     const dir = tempDirs.pop();
-    if (!dir) continue;
+    if (!dir) {
+      continue;
+    }
     try {
       fs.rmSync(dir, { recursive: true, force: true });
     } catch {
@@ -294,15 +292,14 @@ describe("CompositeKeyring (whitepaper 2.2.5.A — auto-inject default)", () => 
     expect(active.keyId).toBe("primary");
   });
 
-  it("falls back to the next provider when the primary fails", () => {
+  it("rejects active selection when the primary fails, preserving historical lookup", () => {
     const b = newKey();
     const env: NodeJS.ProcessEnv = { OPENCLAW_TEST_KEY_B: encodeBase64UrlKey(b) };
     const primary = new EnvKeyring("OPENCLAW_MISSING", env, "primary");
     const fallback = new EnvKeyring("OPENCLAW_TEST_KEY_B", env, "fallback");
     const composite = new CompositeKeyring([primary, fallback]);
-    const active = composite.getActiveKey();
-    expect(active.key).toEqual(b);
-    expect(active.keyId).toBe("fallback");
+    expect(() => composite.getActiveKey()).toThrow(/not set/);
+    expect(composite.getKeyById("fallback")).toEqual(b);
   });
 
   it("throws a descriptive error when every provider fails", () => {
@@ -310,7 +307,7 @@ describe("CompositeKeyring (whitepaper 2.2.5.A — auto-inject default)", () => 
       new EnvKeyring("OPENCLAW_NOT_SET_1", {}, "primary"),
       new EnvKeyring("OPENCLAW_NOT_SET_2", {}, "fallback"),
     ]);
-    expect(() => composite.getActiveKey()).toThrow(/no provider returned/);
+    expect(() => composite.getActiveKey()).toThrow(/not set/);
   });
 
   it("getKeyById walks every provider in order", () => {
@@ -347,7 +344,6 @@ describe("createKeyring (factory)", () => {
 
   it('builds an EnvKeyring from {kind:"env"}', () => {
     const key = newKey();
-    const env: NodeJS.ProcessEnv = { OPENCLAW_TEST_KEY: encodeBase64UrlKey(key) };
     const originalEnv = process.env.OPENCLAW_TEST_KEY;
     process.env.OPENCLAW_TEST_KEY = encodeBase64UrlKey(key);
     try {
@@ -370,6 +366,9 @@ describe("createKeyring (factory)", () => {
       account: "device-identity",
     });
     expect(ring).toBeInstanceOf(OsKeyring);
+    if (!(ring instanceof OsKeyring)) {
+      throw new Error("Expected OS keyring factory result");
+    }
     const key = newKey();
     ring.setKeyBase64Url(encodeBase64UrlKey(key));
     expect(ring.getActiveKey().key).toEqual(key);
@@ -398,7 +397,8 @@ describe("createKeyring (factory)", () => {
       ],
     });
     expect(ring).toBeInstanceOf(CompositeKeyring);
-    expect(ring.getActiveKey().key).toEqual(key);
+    expect(() => ring.getActiveKey()).toThrow(/not set/);
+    expect(ring.getKeyById("file-keyring")).toEqual(key);
   });
 });
 
@@ -420,18 +420,20 @@ describe("OsKeyring (whitepaper 2.2.5.B, M6.B)", () => {
     expect(ring.getKeyById("wrap-key-2026-09")).toBeNull();
   });
 
-  it("getKeyById returns null when the entry is missing", () => {
-    const ring = new OsKeyring("openclaw", "wrap-key-2026-08");
-    expect(ring.getKeyById("wrap-key-2026-08")).toBeNull();
+  it("getKeyById rejects a missing owning entry", () => {
+    const ring = new OsKeyring("openclaw", "wrap-key-2026-08", "wrap-key-2026-08");
+    expect(() => ring.getKeyById("wrap-key-2026-08")).toThrow(/no entry found/);
   });
 
   it("deleteKey removes the entry", () => {
-    const ring = new OsKeyring("openclaw", "wrap-key-2026-08");
+    const ring = new OsKeyring("openclaw", "wrap-key-2026-08", "wrap-key-2026-08");
     const key = newKey();
     ring.setKeyBase64Url(encodeBase64UrlKey(key));
-    expect(ring.getActiveKey().key).toEqual(key);
+    const borrowed = ring.getActiveKey().key;
+    expect(borrowed).toEqual(key);
     ring.deleteKey();
-    expect(ring.getKeyById("wrap-key-2026-08")).toBeNull();
+    expect(borrowed).toEqual(Buffer.alloc(32));
+    expect(() => ring.getKeyById("wrap-key-2026-08")).toThrow(/no entry found/);
   });
 
   it("rejects malformed base64url key material in setKeyBase64Url", () => {
@@ -571,22 +573,22 @@ describe("getDefaultKeyringFromEnv (M5.5 auto-inject — whitepaper 2.2.5.A)", (
     expect((ring as OsKeyring).describe().keyId).toBe("os-keyring");
   });
 
-  it("returns a CompositeKeyring (OS primary, file fallback) when both env-var sets are present", () => {
+  it("uses OS as the sole active source and file only for historical IDs", () => {
     const dir = makeTempDir();
     const filePath = path.join(dir, "wrap.key");
     const fileKey = newKey();
     writeKeyFile(filePath, fileKey);
     const osKey = newKey();
     process.env.OPENCLAW_WRAP_KEY_FILE = filePath;
+    process.env.OPENCLAW_WRAP_KEY_ID = "historical-file";
     process.env.OPENCLAW_WRAP_KEY_OS_SERVICE = "openclaw";
     process.env.OPENCLAW_WRAP_KEY_OS_ACCOUNT = "wrap-key-os-and-file";
     resetDefaultKeyringCache();
     try {
       const ring = getDefaultKeyringFromEnv();
       expect(ring).toBeInstanceOf(CompositeKeyring);
-      // OS entry is empty → OsKeyring.getActiveKey throws "no entry found" →
-      // CompositeKeyring falls through to FileKeyring.
-      expect(ring!.getActiveKey().key).toEqual(fileKey);
+      expect(() => ring!.getActiveKey()).toThrow(/no entry found/);
+      expect(ring!.getKeyById("historical-file")).toEqual(fileKey);
       // Seed the OS entry and confirm the OS variant now wins.
       const providers = (ring as unknown as { providers: KeyringProvider[] }).providers;
       (providers[0] as OsKeyring).setKeyBase64Url(encodeBase64UrlKey(osKey));

@@ -1,812 +1,358 @@
-// PQC fork (whitepaper 2.1 + 2.2): Ed25519 device identity is removed. The
-// legacy Doctor migration that imports retired Ed25519 device.json no longer
-// applies; new device identities are ML-DSA-65 only. This file's body is
-// intentionally inert: the runtime caller (Doctor) refuses Ed25519 PEMs, and
-// every test below would fail with the strict MLDSA65-PUBLIC-KEY: check.
-import { afterEach, describe, expect, it } from "vitest";
-import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
-import type { DB as OpenClawStateKyselyDatabase } from "../state/openclaw-state-db.generated.js";
+// Active regression coverage for retiring legacy Ed25519 identities into ML-DSA-only state.
+import crypto, { createHash } from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, expect, it } from "vitest";
+import { FileKeyring, resetDefaultKeyringCache } from "../security/keyring-provider.js";
+import { closeOpenClawStateDatabaseForTest } from "../state/openclaw-state-db.js";
+import { loadDeviceAuthToken, storeDeviceAuthToken } from "./device-auth-store.js";
 import {
-  closeOpenClawStateDatabaseForTest,
-  openOpenClawStateDatabase,
-} from "../state/openclaw-state-db.js";
-import { acquireGatewayLock } from "./gateway-lock.js";
-import {
-  executeSqliteQuerySync,
-  executeSqliteQueryTakeFirstSync,
-  getNodeSqliteKysely,
-} from "./kysely-sync.js";
+  generateStoredDeviceIdentity,
+  insertStoredDeviceIdentityIfAbsent,
+  readStoredDeviceIdentity,
+} from "./device-identity-store.js";
+import { requireNodeSqlite } from "./node-sqlite.js";
 import {
   detectLegacyDeviceIdentity,
   migrateLegacyDeviceIdentity,
 } from "./state-migrations.device-identity.js";
 
-type MigrationDatabase = Pick<
-  OpenClawStateKyselyDatabase,
-  "device_auth_tokens" | "device_identities" | "migration_sources"
->;
+const dirs: string[] = [];
+const providers: FileKeyring[] = [];
 
-const CREATED_AT_MS = 1_700_000_000_000;
-const SWIFT_RAW_DEVICE_ID = "56475aa75463474c0285df5dbf2bcab73da651358839e9b77481b2eab107708c";
-const SWIFT_RAW_PUBLIC_KEY = "A6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=";
-const SWIFT_RAW_PRIVATE_KEY = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="; // pragma: allowlist secret
+function fixture() {
+  const stateDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "legacy-pqc-identity-")));
+  dirs.push(stateDir);
+  const keyPath = path.join(stateDir, "wrap-key.b64");
+  fs.writeFileSync(keyPath, Buffer.alloc(32, 23).toString("base64url"), { mode: 0o600 });
+  const env = {
+    ...process.env,
+    HOME: stateDir,
+    OPENCLAW_STATE_DIR: stateDir,
+    OPENCLAW_WRAP_KEY_FILE: keyPath,
+    OPENCLAW_WRAP_KEY_ID: "legacy-migration-test",
+  };
+  const provider = new FileKeyring(keyPath, "legacy-migration-test");
+  providers.push(provider);
+  return { env, provider, stateDir };
+}
 
-// PQC fork (whitepaper 2.1 + 2.2): Ed25519 device identity is removed. The
-// legacy Doctor migration that imports retired Ed25519 device.json no longer
-// applies; new device identities are ML-DSA-65 only. We delete the test body
-// by guarding the describe with a constant false so vitest never sees an `it`
-// and the eager helper initialisers (the top-level for-of fixtures) never run.
-// The migration source files are left in place; their behaviour is checked
-// separately by `mldsa65-kat.test.ts` + the new M3 schema tests, and the
-// Ed25519-removal rationale lives in this file's docblock.
-const PQC_LEGACY_DEVICE_IDENTITY_TESTS_DISABLED = false as const;
-
-if (PQC_LEGACY_DEVICE_IDENTITY_TESTS_DISABLED) {
-describe.skip("legacy device identity Doctor migration (PQC: Ed25519 removed by M2 — whitepaper 2.1)", () => {
-  const tempDirs = useAutoCleanupTempDirTracker((cleanup) => {
-    afterEach(() => {
-      closeOpenClawStateDatabaseForTest();
-      cleanup();
-    });
-  });
-
-  function useStateDir(): { env: NodeJS.ProcessEnv; stateDir: string } {
-    const stateDir = tempDirs.make("openclaw-device-identity-migration-");
-    return {
-      env: { ...process.env, HOME: stateDir, OPENCLAW_STATE_DIR: stateDir },
-      stateDir,
-    };
-  }
-
-  function database(env: NodeJS.ProcessEnv) {
-    return openOpenClawStateDatabase({ env }).db;
-  }
-
-  function swiftIdentity() {
-    return {
-      deviceId: SWIFT_RAW_DEVICE_ID,
-      publicKey: SWIFT_RAW_PUBLIC_KEY,
-      privateKey: SWIFT_RAW_PRIVATE_KEY,
-      createdAtMs: CREATED_AT_MS,
-    };
-  }
-
-  function normalizedSwift(): NormalizedLegacyDeviceIdentity {
-    const normalized = normalizeLegacyDeviceIdentity(swiftIdentity());
-    if (!normalized) {
-      throw new Error("expected valid Swift identity fixture");
-    }
-    return normalized;
-  }
-
-  function nodeIdentity() {
-    const identity = normalizedSwift();
-    return {
+function legacyNodeIdentity() {
+  const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
+  const publicKeyPem = publicKey.export({ type: "spki", format: "pem" });
+  const privateKeyPem = privateKey.export({ type: "pkcs8", format: "pem" });
+  const publicKeyRaw = publicKey.export({ type: "spki", format: "der" }).subarray(-32);
+  return {
+    deviceId: createHash("sha256").update(publicKeyRaw).digest("hex"),
+    value: {
       version: 1,
-      deviceId: identity.deviceId,
-      publicKeyPem: identity.publicKeyPem,
-      privateKeyPem: identity.privateKeyPem,
-      createdAtMs: identity.createdAtMs,
-    };
+      deviceId: "stale-device-id",
+      publicKeyPem,
+      privateKeyPem,
+      createdAtMs: 1_700_000_000_000,
+    },
+  };
+}
+
+function writeLegacy(stateDir: string, value: unknown): { bytes: Buffer; path: string } {
+  const sourcePath = path.join(stateDir, "identity", "device.json");
+  const bytes = Buffer.from(`${JSON.stringify(value)}\n`, "utf8");
+  fs.mkdirSync(path.dirname(sourcePath), { recursive: true });
+  fs.writeFileSync(sourcePath, bytes, { mode: 0o644 });
+  return { bytes, path: sourcePath };
+}
+
+async function migrate(stateDir: string, env: NodeJS.ProcessEnv) {
+  return await migrateLegacyDeviceIdentity({
+    detected: detectLegacyDeviceIdentity({
+      stateDir,
+      env,
+      doctorOnlyStateMigrations: true,
+    }),
+    stateDir,
+    env,
+    doctorOnlyStateMigrations: true,
+  });
+}
+
+afterEach(() => {
+  closeOpenClawStateDatabaseForTest();
+  resetDefaultKeyringCache();
+  for (const provider of providers.splice(0)) {
+    provider.release();
   }
-
-  function anotherIdentity(): NormalizedLegacyDeviceIdentity {
-    const { publicKey, privateKey } = generateKeyPairSync("ed25519");
-    const publicKeyPem = publicKey.export({ type: "spki", format: "pem" });
-    const privateKeyPem = privateKey.export({ type: "pkcs8", format: "pem" });
-    const deviceId = deriveDeviceIdFromPublicKey(publicKeyPem);
-    if (!deviceId) {
-      throw new Error("expected generated device id");
-    }
-    return { deviceId, publicKeyPem, privateKeyPem, createdAtMs: CREATED_AT_MS + 1 };
+  for (const dir of dirs.splice(0)) {
+    fs.rmSync(dir, { recursive: true, force: true });
   }
-
-  function rewrapPem(pem: string): string {
-    const [header, ...rest] = pem.trim().split("\n");
-    const footer = rest.pop();
-    if (!header || !footer) {
-      throw new Error("expected PEM fixture");
-    }
-    const lines = rest.join("").match(/.{1,20}/g) ?? [];
-    return `${header}\n${lines.join("\n")}\n${footer}\n`;
-  }
-
-  async function writeLegacy(params: {
-    stateDir: string;
-    value?: unknown;
-    bytes?: Buffer;
-  }): Promise<string> {
-    const sourcePath = path.join(params.stateDir, "identity", "device.json");
-    await fsp.mkdir(path.dirname(sourcePath), { recursive: true });
-    await fsp.writeFile(
-      sourcePath,
-      params.bytes ?? Buffer.from(`${JSON.stringify(params.value ?? nodeIdentity())}\n`, "utf8"),
-    );
-    return sourcePath;
-  }
-
-  function identityRow(env: NodeJS.ProcessEnv) {
-    const db = database(env);
-    return executeSqliteQueryTakeFirstSync(
-      db,
-      getNodeSqliteKysely<MigrationDatabase>(db)
-        .selectFrom("device_identities")
-        .selectAll()
-        .where("identity_key", "=", "primary"),
-    );
-  }
-
-  function receipt(env: NodeJS.ProcessEnv) {
-    const db = database(env);
-    return executeSqliteQueryTakeFirstSync(
-      db,
-      getNodeSqliteKysely<MigrationDatabase>(db)
-        .selectFrom("migration_sources")
-        .selectAll()
-        .where("migration_kind", "=", "legacy-device-identity-json"),
-    );
-  }
-
-  function seedCanonical(env: NodeJS.ProcessEnv, identity: NormalizedLegacyDeviceIdentity): void {
-    const db = database(env);
-    executeSqliteQuerySync(
-      db,
-      getNodeSqliteKysely<MigrationDatabase>(db)
-        .insertInto("device_identities")
-        .values({
-          identity_key: "primary",
-          device_id: identity.deviceId,
-          public_key_pem: identity.publicKeyPem,
-          private_key_pem: identity.privateKeyPem,
-          created_at_ms: identity.createdAtMs,
-          updated_at_ms: identity.createdAtMs + 10,
-        }),
-    );
-  }
-
-  function seedInvalidCanonical(env: NodeJS.ProcessEnv): void {
-    const db = database(env);
-    executeSqliteQuerySync(
-      db,
-      getNodeSqliteKysely<MigrationDatabase>(db)
-        .insertInto("device_identities")
-        .values({
-          identity_key: "primary",
-          device_id: "0".repeat(64),
-          public_key_pem: "invalid-public-key",
-          private_key_pem: "invalid-private-key",
-          created_at_ms: 1,
-          updated_at_ms: 2,
-        }),
-    );
-  }
-
-  async function migrate(
-    stateDir: string,
-    env: NodeJS.ProcessEnv,
-    overrides: {
-      beforeClaim?: (sourcePath: string) => void;
-      beforeCleanup?: () => void;
-      removeSource?: (sourcePath: string) => Promise<void> | void;
-    } = {},
-  ) {
-    return await migrateLegacyDeviceIdentity({
-      detected: detectLegacyDeviceIdentity({
-        stateDir,
-        env,
-        doctorOnlyStateMigrations: true,
-      }),
-      stateDir,
-      env,
-      doctorOnlyStateMigrations: true,
-      ...overrides,
-    });
-  }
-
-  it("detects exact source and claim paths only with explicit Doctor authority", async () => {
-    const { stateDir } = useStateDir();
-    const sourcePath = await writeLegacy({ stateDir });
-    const disabled = detectLegacyDeviceIdentity({ stateDir });
-    expect(disabled).toEqual({
-      sourcePath,
-      claimPath: `${sourcePath}.doctor-importing`,
-      nativeClaimPath: `${sourcePath}.native-importing`,
-      hasLegacy: false,
-      hasInvalidCanonical: false,
-    });
-
-    expect(
-      detectLegacyDeviceIdentity({ stateDir, doctorOnlyStateMigrations: true }).hasLegacy,
-    ).toBe(true);
-    await fsp.rename(sourcePath, `${sourcePath}.doctor-importing`);
-    expect(
-      detectLegacyDeviceIdentity({ stateDir, doctorOnlyStateMigrations: true }).hasLegacy,
-    ).toBe(true);
-    await fsp.rename(`${sourcePath}.doctor-importing`, `${sourcePath}.native-importing`);
-    expect(
-      detectLegacyDeviceIdentity({ stateDir, doctorOnlyStateMigrations: true }).hasLegacy,
-    ).toBe(true);
-  });
-
-  it("keeps normal migration read-only and imports only with Doctor authority", async () => {
-    const { env, stateDir } = useStateDir();
-    const sourcePath = await writeLegacy({ stateDir });
-
-    const skipped = await migrateLegacyDeviceIdentity({
-      detected: detectLegacyDeviceIdentity({ stateDir }),
-      env,
-      stateDir,
-    });
-
-    expect(skipped).toEqual({ changes: [], warnings: [] });
-    expect(fs.existsSync(sourcePath)).toBe(true);
-    expect(identityRow(env)).toBeUndefined();
-    closeOpenClawStateDatabaseForTest();
-
-    const repaired = await migrateLegacyDeviceIdentity({
-      detected: detectLegacyDeviceIdentity({ stateDir, doctorOnlyStateMigrations: true }),
-      env,
-      stateDir,
-      doctorOnlyStateMigrations: true,
-    });
-
-    expect(repaired.changes).toContain("Migrated primary device identity to SQLite.");
-    expect(fs.existsSync(sourcePath)).toBe(false);
-    expect(identityRow(env)?.device_id).toBe(SWIFT_RAW_DEVICE_ID);
-  });
-
-  for (const [label, value] of [
-    ["Node PEM", nodeIdentity],
-    ["Swift raw-key", swiftIdentity],
-  ] as const) {
-    it(`imports a valid ${label} identity and preserves device auth bytes`, async () => {
-      const { env, stateDir } = useStateDir();
-      const sourcePath = await writeLegacy({ stateDir, value: value() });
-      const authPath = path.join(stateDir, "identity", "device-auth.json");
-      const authBytes = Buffer.from([0x7b, 0x0a, 0xff, 0x00, 0x7d]);
-      await fsp.writeFile(authPath, authBytes);
-
-      const result = await migrate(stateDir, env);
-
-      expect(result.warnings).toEqual([]);
-      expect(result.changes).toEqual(["Migrated primary device identity to SQLite."]);
-      expect(identityRow(env)).toMatchObject({
-        identity_key: "primary",
-        device_id: SWIFT_RAW_DEVICE_ID,
-        created_at_ms: CREATED_AT_MS,
-      });
-      expect(fs.existsSync(sourcePath)).toBe(false);
-      await expect(fsp.readFile(authPath)).resolves.toEqual(authBytes);
-      expect(receipt(env)).toMatchObject({
-        removed_source: 1,
-        source_record_count: 1,
-        target_table: "device_identities",
-      });
-    });
-  }
-
-  for (const [label, value] of [
-    ["Node PEM identity with an invalid timestamp", { ...nodeIdentity(), createdAtMs: -1 }],
-    [
-      "Swift raw-key identity without a timestamp",
-      (() => {
-        const legacy = { ...swiftIdentity() } as Record<string, unknown>;
-        delete legacy.createdAtMs;
-        return legacy;
-      })(),
-    ],
-  ] as const) {
-    it(`imports a valid ${label}`, async () => {
-      const { env, stateDir } = useStateDir();
-      const sourcePath = await writeLegacy({ stateDir, value });
-      const startedAt = Date.now();
-
-      const result = await migrate(stateDir, env);
-      const finishedAt = Date.now();
-
-      expect(result.warnings).toEqual([]);
-      expect(identityRow(env)).toMatchObject({
-        identity_key: "primary",
-        device_id: SWIFT_RAW_DEVICE_ID,
-      });
-      expect(identityRow(env)?.created_at_ms).toBeGreaterThanOrEqual(startedAt);
-      expect(identityRow(env)?.created_at_ms).toBeLessThanOrEqual(finishedAt);
-      expect(fs.existsSync(sourcePath)).toBe(false);
-    });
-  }
-
-  it("repairs noncanonical PEM formatting before retiring JSON", async () => {
-    const { env, stateDir } = useStateDir();
-    const expected = normalizedSwift();
-    const preservedCreatedAtMs = expected.createdAtMs + 50;
-    seedCanonical(env, {
-      ...expected,
-      publicKeyPem: rewrapPem(expected.publicKeyPem),
-      privateKeyPem: rewrapPem(expected.privateKeyPem),
-      createdAtMs: preservedCreatedAtMs,
-    });
-    const sourcePath = await writeLegacy({ stateDir, value: nodeIdentity() });
-
-    const result = await migrate(stateDir, env);
-
-    expect(result.warnings).toEqual([]);
-    expect(result.changes).toEqual(["Migrated primary device identity to SQLite."]);
-    expect(identityRow(env)).toMatchObject({
-      device_id: expected.deviceId,
-      public_key_pem: expected.publicKeyPem,
-      private_key_pem: expected.privateKeyPem,
-      created_at_ms: expected.createdAtMs,
-    });
-    expect(fs.existsSync(sourcePath)).toBe(false);
-  });
-
-  it("repairs an invalid canonical row from a validated legacy identity", async () => {
-    const { env, stateDir } = useStateDir();
-    const expected = normalizedSwift();
-    seedInvalidCanonical(env);
-    const sourcePath = await writeLegacy({ stateDir, value: nodeIdentity() });
-
-    const result = await migrate(stateDir, env);
-
-    expect(result.warnings).toEqual([]);
-    expect(result.changes).toEqual(["Migrated primary device identity to SQLite."]);
-    expect(identityRow(env)).toMatchObject({
-      device_id: expected.deviceId,
-      public_key_pem: expected.publicKeyPem,
-      private_key_pem: expected.privateKeyPem,
-      created_at_ms: expected.createdAtMs,
-    });
-    expect(fs.existsSync(sourcePath)).toBe(false);
-    expect(JSON.parse(receipt(env)?.report_json ?? "null")).toMatchObject({
-      repairedSqliteRecordCount: 1,
-    });
-  });
-
-  it("replaces an invalid canonical row without legacy JSON only under Doctor authority", async () => {
-    const { env, stateDir } = useStateDir();
-    seedInvalidCanonical(env);
-
-    expect(detectLegacyDeviceIdentity({ stateDir, env }).hasInvalidCanonical).toBe(false);
-    const detected = detectLegacyDeviceIdentity({
-      stateDir,
-      env,
-      doctorOnlyStateMigrations: true,
-    });
-    expect(detected).toMatchObject({ hasLegacy: false, hasInvalidCanonical: true });
-
-    const skipped = await migrateLegacyDeviceIdentity({ detected, env, stateDir });
-    expect(skipped).toEqual({ changes: [], warnings: [] });
-    expect(identityRow(env)?.device_id).toBe("0".repeat(64));
-
-    const result = await migrateLegacyDeviceIdentity({
-      detected,
-      env,
-      stateDir,
-      doctorOnlyStateMigrations: true,
-    });
-
-    expect(result.warnings).toEqual([]);
-    expect(result.changes).toEqual(["Replaced invalid primary device identity in SQLite."]);
-    expect(result.notices).toEqual([
-      "The repaired device has a new identity and must be approved again.",
-    ]);
-    expect(identityRow(env)).toMatchObject({
-      identity_key: "primary",
-      device_id: expect.stringMatching(/^[a-f0-9]{64}$/),
-    });
-    expect(
-      detectLegacyDeviceIdentity({
-        stateDir,
-        env,
-        doctorOnlyStateMigrations: true,
-      }).hasInvalidCanonical,
-    ).toBe(false);
-  });
-
-  it("repairs canonical identity metadata without rotating valid key material", async () => {
-    const { env, stateDir } = useStateDir();
-    const expected = normalizedSwift();
-    seedCanonical(env, expected);
-    const db = database(env);
-    executeSqliteQuerySync(
-      db,
-      getNodeSqliteKysely<MigrationDatabase>(db)
-        .updateTable("device_identities")
-        .set({
-          device_id: "0".repeat(64),
-          public_key_pem: rewrapPem(expected.publicKeyPem),
-          private_key_pem: rewrapPem(expected.privateKeyPem),
-          created_at_ms: -1,
-          updated_at_ms: -1,
-        })
-        .where("identity_key", "=", "primary"),
-    );
-    const detected = detectLegacyDeviceIdentity({
-      stateDir,
-      env,
-      doctorOnlyStateMigrations: true,
-    });
-
-    const result = await migrateLegacyDeviceIdentity({
-      detected,
-      env,
-      stateDir,
-      doctorOnlyStateMigrations: true,
-    });
-
-    expect(result.warnings).toEqual([]);
-    expect(result.changes).toEqual([
-      "Repaired invalid primary device identity metadata in SQLite.",
-    ]);
-    expect(result.notices ?? []).toEqual([]);
-    expect(identityRow(env)).toMatchObject({
-      device_id: expected.deviceId,
-      public_key_pem: expected.publicKeyPem,
-      private_key_pem: expected.privateKeyPem,
-      created_at_ms: expect.any(Number),
-    });
-  });
-
-  it("prefers legacy key material that appears after invalid-row detection", async () => {
-    const { env, stateDir } = useStateDir();
-    seedInvalidCanonical(env);
-    const detected = detectLegacyDeviceIdentity({
-      stateDir,
-      env,
-      doctorOnlyStateMigrations: true,
-    });
-    expect(detected).toMatchObject({ hasLegacy: false, hasInvalidCanonical: true });
-    const sourcePath = await writeLegacy({ stateDir, value: nodeIdentity() });
-
-    const result = await migrateLegacyDeviceIdentity({
-      detected,
-      env,
-      stateDir,
-      doctorOnlyStateMigrations: true,
-    });
-
-    expect(result.warnings).toEqual([]);
-    expect(result.changes).toEqual(["Migrated primary device identity to SQLite."]);
-    expect(identityRow(env)?.device_id).toBe(SWIFT_RAW_DEVICE_ID);
-    expect(fs.existsSync(sourcePath)).toBe(false);
-  });
-
-  it("reports a generated identity when the invalid row disappears before repair", async () => {
-    const { env, stateDir } = useStateDir();
-    seedInvalidCanonical(env);
-    const detected = detectLegacyDeviceIdentity({
-      stateDir,
-      env,
-      doctorOnlyStateMigrations: true,
-    });
-    const db = database(env);
-    executeSqliteQuerySync(
-      db,
-      getNodeSqliteKysely<MigrationDatabase>(db)
-        .deleteFrom("device_identities")
-        .where("identity_key", "=", "primary"),
-    );
-
-    const result = await migrateLegacyDeviceIdentity({
-      detected,
-      env,
-      stateDir,
-      doctorOnlyStateMigrations: true,
-    });
-
-    expect(result.changes).toEqual(["Replaced invalid primary device identity in SQLite."]);
-    expect(result.notices).toEqual([
-      "The repaired device has a new identity and must be approved again.",
-    ]);
-    expect(identityRow(env)?.device_id).toMatch(/^[a-f0-9]{64}$/);
-  });
-
-  it("requires mutation-time Doctor authority after canonical state becomes invalid", async () => {
-    const { env, stateDir } = useStateDir();
-    seedCanonical(env, normalizedSwift());
-    const sourcePath = await writeLegacy({ stateDir, value: nodeIdentity() });
-    const detected = detectLegacyDeviceIdentity({
-      stateDir,
-      env,
-      doctorOnlyStateMigrations: true,
-    });
-    expect(detected).toMatchObject({ hasLegacy: true, hasInvalidCanonical: false });
-    const db = database(env);
-    executeSqliteQuerySync(
-      db,
-      getNodeSqliteKysely<MigrationDatabase>(db)
-        .updateTable("device_identities")
-        .set({ device_id: "0".repeat(64) })
-        .where("identity_key", "=", "primary"),
-    );
-
-    const result = await migrateLegacyDeviceIdentity({ detected, env, stateDir });
-
-    expect(result).toEqual({ changes: [], warnings: [] });
-    expect(identityRow(env)?.device_id).toBe("0".repeat(64));
-    expect(fs.existsSync(sourcePath)).toBe(true);
-  });
-
-  it("does not generate an identity from a stale legacy-only detection", async () => {
-    const { env, stateDir } = useStateDir();
-    const sourcePath = await writeLegacy({ stateDir, value: nodeIdentity() });
-    const detected = detectLegacyDeviceIdentity({
-      stateDir,
-      env,
-      doctorOnlyStateMigrations: true,
-    });
-    expect(detected).toMatchObject({ hasLegacy: true, hasInvalidCanonical: false });
-    await fsp.unlink(sourcePath);
-
-    const result = await migrateLegacyDeviceIdentity({
-      detected,
-      env,
-      stateDir,
-      doctorOnlyStateMigrations: true,
-    });
-
-    expect(result).toEqual({ changes: [], warnings: [] });
-    expect(identityRow(env)).toBeUndefined();
-  });
-
-  it("repairs an invalid canonical update timestamp before retiring JSON", async () => {
-    const { env, stateDir } = useStateDir();
-    const expected = normalizedSwift();
-    seedCanonical(env, expected);
-    const db = database(env);
-    executeSqliteQuerySync(
-      db,
-      getNodeSqliteKysely<MigrationDatabase>(db)
-        .updateTable("device_identities")
-        .set({ updated_at_ms: -1 })
-        .where("identity_key", "=", "primary"),
-    );
-    const sourcePath = await writeLegacy({ stateDir, value: nodeIdentity() });
-
-    const result = await migrate(stateDir, env);
-
-    expect(result.warnings).toEqual([]);
-    expect(identityRow(env)).toMatchObject({
-      device_id: expected.deviceId,
-      public_key_pem: expected.publicKeyPem,
-      private_key_pem: expected.privateKeyPem,
-      created_at_ms: expected.createdAtMs,
-    });
-    expect(identityRow(env)?.updated_at_ms).toBeGreaterThanOrEqual(expected.createdAtMs);
-    expect(fs.existsSync(sourcePath)).toBe(false);
-    expect(JSON.parse(receipt(env)?.report_json ?? "null")).toMatchObject({
-      repairedSqliteRecordCount: 1,
-    });
-  });
-
-  it("blocks a different canonical identity and restores the source", async () => {
-    const { env, stateDir } = useStateDir();
-    const winner = anotherIdentity();
-    seedCanonical(env, winner);
-    const sourcePath = await writeLegacy({ stateDir });
-    const before = await fsp.readFile(sourcePath);
-
-    const result = await migrate(stateDir, env);
-
-    expect(result.warnings.join("\n")).toContain("canonical SQLite device identity differs");
-    expect(identityRow(env)?.device_id).toBe(winner.deviceId);
-    await expect(fsp.readFile(sourcePath)).resolves.toEqual(before);
-    expect(fs.existsSync(`${sourcePath}.doctor-importing`)).toBe(false);
-    expect(receipt(env)).toBeUndefined();
-  });
-
-  it("restores a source changed before Doctor can claim it", async () => {
-    const { env, stateDir } = useStateDir();
-    const sourcePath = await writeLegacy({ stateDir });
-
-    const result = await migrate(stateDir, env, {
-      beforeClaim: (candidate) => fs.appendFileSync(candidate, " "),
-    });
-
-    expect(result.warnings.join("\n")).toContain("changed before Doctor could claim it");
-    expect(fs.existsSync(sourcePath)).toBe(true);
-    expect(fs.existsSync(`${sourcePath}.doctor-importing`)).toBe(false);
-    expect(identityRow(env)).toBeUndefined();
-    expect(receipt(env)).toBeUndefined();
-  });
-
-  it("imports an interrupted claim", async () => {
-    const { env, stateDir } = useStateDir();
-    const sourcePath = await writeLegacy({ stateDir });
-    const claimPath = `${sourcePath}.doctor-importing`;
-    await fsp.rename(sourcePath, claimPath);
-
-    const result = await migrate(stateDir, env);
-
-    expect(result.warnings).toEqual([]);
-    expect(identityRow(env)?.device_id).toBe(SWIFT_RAW_DEVICE_ID);
-    expect(fs.existsSync(sourcePath)).toBe(false);
-    expect(fs.existsSync(claimPath)).toBe(false);
-  });
-
-  it("preserves an interrupted native claim for native startup", async () => {
-    const { env, stateDir } = useStateDir();
-    const sourcePath = await writeLegacy({ stateDir });
-    const nativeClaimPath = `${sourcePath}.native-importing`;
-    await fsp.rename(sourcePath, nativeClaimPath);
-
-    const result = await migrate(stateDir, env);
-
-    expect(result.warnings.join("\n")).toContain("Native device identity import is pending");
-    expect(fs.existsSync(sourcePath)).toBe(false);
-    expect(fs.existsSync(nativeClaimPath)).toBe(true);
-    expect(identityRow(env)).toBeUndefined();
-    expect(receipt(env)).toBeUndefined();
-  });
-
-  it("refuses source and interrupted claim together", async () => {
-    const { env, stateDir } = useStateDir();
-    const sourcePath = await writeLegacy({ stateDir });
-    await fsp.copyFile(sourcePath, `${sourcePath}.doctor-importing`);
-
-    const result = await migrate(stateDir, env);
-
-    expect(result.warnings.join("\n")).toContain("source and interrupted claim both exist");
-    expect(identityRow(env)).toBeUndefined();
-    expect(receipt(env)).toBeUndefined();
-  });
-
-  it("rechecks the canonical row before deleting the claimed source", async () => {
-    const { env, stateDir } = useStateDir();
-    const sourcePath = await writeLegacy({ stateDir });
-    const replacement = anotherIdentity();
-
-    const result = await migrate(stateDir, env, {
-      beforeCleanup: () => {
-        const db = database(env);
-        executeSqliteQuerySync(
-          db,
-          getNodeSqliteKysely<MigrationDatabase>(db)
-            .updateTable("device_identities")
-            .set({
-              device_id: replacement.deviceId,
-              public_key_pem: replacement.publicKeyPem,
-              private_key_pem: replacement.privateKeyPem,
-              created_at_ms: replacement.createdAtMs,
-              updated_at_ms: replacement.createdAtMs,
-            })
-            .where("identity_key", "=", "primary"),
-        );
-      },
-    });
-
-    expect(result.warnings.join("\n")).toContain("legacy cleanup failed");
-    expect(fs.existsSync(`${sourcePath}.doctor-importing`)).toBe(true);
-    expect(identityRow(env)?.device_id).toBe(replacement.deviceId);
-    expect(receipt(env)).toMatchObject({ removed_source: 0 });
-  });
-
-  it("resumes an interrupted claim and cleanup receipt", async () => {
-    const { env, stateDir } = useStateDir();
-    const sourcePath = await writeLegacy({ stateDir });
-    const first = await migrate(stateDir, env, {
-      removeSource: () => {
-        throw new Error("simulated unlink failure");
-      },
-    });
-    expect(first.warnings.join("\n")).toContain("legacy cleanup failed");
-    expect(fs.existsSync(`${sourcePath}.doctor-importing`)).toBe(true);
-    expect(receipt(env)).toMatchObject({ removed_source: 0 });
-
-    closeOpenClawStateDatabaseForTest();
-    const retry = await migrate(stateDir, env);
-
-    expect(retry.warnings).toEqual([]);
-    expect(retry.changes).toEqual([
-      "Removed retired device identity JSON covered by its SQLite receipt.",
-    ]);
-    expect(fs.existsSync(`${sourcePath}.doctor-importing`)).toBe(false);
-    expect(receipt(env)).toMatchObject({ removed_source: 1 });
-  });
-
-  it("does not discard recreated bytes that differ from the receipt", async () => {
-    const { env, stateDir } = useStateDir();
-    const sourcePath = await writeLegacy({ stateDir });
-    await migrate(stateDir, env, {
-      removeSource: () => {
-        throw new Error("simulated unlink failure");
-      },
-    });
-    const replacement = `${JSON.stringify({ ...nodeIdentity(), createdAtMs: CREATED_AT_MS + 1 })}\n`;
-    await fsp.writeFile(sourcePath, replacement, "utf8");
-
-    closeOpenClawStateDatabaseForTest();
-    const retry = await migrate(stateDir, env);
-
-    expect(retry.warnings.join("\n")).toContain("bytes differ from the migration receipt");
-    await expect(fsp.readFile(sourcePath, "utf8")).resolves.toBe(replacement);
-    expect(identityRow(env)?.created_at_ms).toBe(CREATED_AT_MS);
-  });
-
-  it("rejects symlinked, hardlinked, oversized, non-UTF-8, and invalid sources", async () => {
-    const cases: Array<{ env: NodeJS.ProcessEnv; sourcePath: string; stateDir: string }> = [];
-
-    const symlink = useStateDir();
-    const symlinkTarget = path.join(symlink.stateDir, "outside.json");
-    await fsp.writeFile(symlinkTarget, JSON.stringify(nodeIdentity()), "utf8");
-    const symlinkPath = path.join(symlink.stateDir, "identity", "device.json");
-    await fsp.mkdir(path.dirname(symlinkPath), { recursive: true });
-    await fsp.symlink(symlinkTarget, symlinkPath);
-    cases.push({ ...symlink, sourcePath: symlinkPath });
-
-    const hardlink = useStateDir();
-    const hardlinkTarget = path.join(hardlink.stateDir, "outside.json");
-    await fsp.writeFile(hardlinkTarget, JSON.stringify(nodeIdentity()), "utf8");
-    const hardlinkPath = path.join(hardlink.stateDir, "identity", "device.json");
-    await fsp.mkdir(path.dirname(hardlinkPath), { recursive: true });
-    await fsp.link(hardlinkTarget, hardlinkPath);
-    cases.push({ ...hardlink, sourcePath: hardlinkPath });
-
-    const oversized = useStateDir();
-    const oversizedPath = await writeLegacy({
-      stateDir: oversized.stateDir,
-      bytes: Buffer.alloc(128 * 1024 + 1, 0x20),
-    });
-    cases.push({ ...oversized, sourcePath: oversizedPath });
-
-    const nonUtf8 = useStateDir();
-    const nonUtf8Path = await writeLegacy({
-      stateDir: nonUtf8.stateDir,
-      bytes: Buffer.from([0xff, 0xfe]),
-    });
-    cases.push({ ...nonUtf8, sourcePath: nonUtf8Path });
-
-    const invalid = useStateDir();
-    const invalidPath = await writeLegacy({
-      stateDir: invalid.stateDir,
-      value: { version: 1, deviceId: "broken" },
-    });
-    cases.push({ ...invalid, sourcePath: invalidPath });
-
-    for (const testCase of cases) {
-      closeOpenClawStateDatabaseForTest();
-      const result = await migrate(testCase.stateDir, testCase.env);
-      expect(result.warnings.join("\n")).toContain("Failed reading legacy device identity");
-      expect(fs.existsSync(testCase.sourcePath)).toBe(true);
-      expect(identityRow(testCase.env)).toBeUndefined();
-      expect(receipt(testCase.env)).toBeUndefined();
-    }
-  });
-
-  it("requires exclusive state ownership", async () => {
-    const { env, stateDir } = useStateDir();
-    const sourcePath = await writeLegacy({ stateDir });
-    const gatewayLock = await acquireGatewayLock({
-      allowInTests: true,
-      env,
-      pollIntervalMs: 10,
-      port: 18_790,
-      timeoutMs: 100,
-    });
-    if (!gatewayLock) {
-      throw new Error("expected test Gateway lock");
-    }
-    let result: Awaited<ReturnType<typeof migrateLegacyDeviceIdentity>>;
-    try {
-      result = await migrate(stateDir, env);
-    } finally {
-      await gatewayLock.release();
-    }
-
-    expect(result.warnings.join("\n")).toContain("Gateway or another SQLite maintenance command");
-    expect(fs.existsSync(sourcePath)).toBe(true);
-  });
-
-  it("records the digest of the exact imported bytes", async () => {
-    const { env, stateDir } = useStateDir();
-    const bytes = Buffer.from(`${JSON.stringify(nodeIdentity())}\n`, "utf8");
-    await writeLegacy({ stateDir, bytes });
-
-    await migrate(stateDir, env);
-
-    expect(receipt(env)).toMatchObject({
-      source_sha256: createHash("sha256").update(bytes).digest("hex"),
-    });
-  });
 });
-} // PQC_LEGACY_DEVICE_IDENTITY_TESTS_DISABLED
+
+it("retires a valid Ed25519 identity without transferring authorization", async () => {
+  const { env, provider, stateDir } = fixture();
+  const legacy = legacyNodeIdentity();
+  const source = writeLegacy(stateDir, legacy.value);
+  const result = await migrate(stateDir, env);
+
+  const stored = readStoredDeviceIdentity({
+    env,
+    identityKey: "primary",
+    wrappingKeyProvider: provider,
+  });
+  const archivePath = `${source.path}.migrated`;
+  expect(result.warnings).toEqual([]);
+  expect(result.notices).toContain(
+    "The retired Ed25519 device authorization was not transferred; approve the new ML-DSA device identity.",
+  );
+  expect(stored?.deviceId).toMatch(/^[a-f0-9]{64}$/);
+  expect(stored?.deviceId).not.toBe(legacy.deviceId);
+  expect(fs.existsSync(source.path)).toBe(false);
+  expect(fs.readFileSync(archivePath)).toEqual(source.bytes);
+  expect(fs.statSync(archivePath).mode & 0o777).toBe(0o600);
+});
+
+it("does nothing without explicit migration authority", async () => {
+  const { env, provider, stateDir } = fixture();
+  const source = writeLegacy(stateDir, legacyNodeIdentity().value);
+
+  const result = await migrateLegacyDeviceIdentity({
+    detected: detectLegacyDeviceIdentity({ stateDir, env }),
+    stateDir,
+    env,
+  });
+
+  expect(result).toEqual({ changes: [], warnings: [] });
+  expect(fs.existsSync(source.path)).toBe(true);
+  expect(
+    readStoredDeviceIdentity({ env, identityKey: "primary", wrappingKeyProvider: provider }),
+  ).toBeNull();
+});
+
+it("rejects a mixed Ed25519 keypair and preserves the source", async () => {
+  const { env, provider, stateDir } = fixture();
+  const publicIdentity = legacyNodeIdentity();
+  const privateIdentity = legacyNodeIdentity();
+  const source = writeLegacy(stateDir, {
+    ...publicIdentity.value,
+    privateKeyPem: privateIdentity.value.privateKeyPem,
+  });
+
+  const result = await migrate(stateDir, env);
+
+  expect(result.warnings.join("\n")).toContain("invalid or unsupported");
+  expect(fs.readFileSync(source.path)).toEqual(source.bytes);
+  expect(fs.existsSync(`${source.path}.migrated`)).toBe(false);
+  expect(
+    readStoredDeviceIdentity({ env, identityKey: "primary", wrappingKeyProvider: provider }),
+  ).toBeNull();
+});
+
+it("rejects an object that mixes Node and Swift legacy identity fields", async () => {
+  const { env, provider, stateDir } = fixture();
+  const legacy = legacyNodeIdentity();
+  const source = writeLegacy(stateDir, {
+    ...legacy.value,
+    publicKey: Buffer.alloc(32, 1).toString("base64url"),
+    privateKey: Buffer.alloc(32, 2).toString("base64url"),
+  });
+
+  const result = await migrate(stateDir, env);
+
+  expect(result.warnings.join("\n")).toContain("invalid or unsupported");
+  expect(fs.readFileSync(source.path)).toEqual(source.bytes);
+  expect(
+    readStoredDeviceIdentity({ env, identityKey: "primary", wrappingKeyProvider: provider }),
+  ).toBeNull();
+});
+
+it("preserves an existing valid ML-DSA identity while retiring stale Ed25519 state", async () => {
+  const { env, provider, stateDir } = fixture();
+  const existing = insertStoredDeviceIdentityIfAbsent(
+    generateStoredDeviceIdentity(1_700_000_000_001, provider),
+    { env, identityKey: "primary", wrappingKeyProvider: provider },
+  );
+  const source = writeLegacy(stateDir, legacyNodeIdentity().value);
+
+  const result = await migrate(stateDir, env);
+  const stored = readStoredDeviceIdentity({
+    env,
+    identityKey: "primary",
+    wrappingKeyProvider: provider,
+  });
+
+  expect(result.warnings).toEqual([]);
+  expect(result.changes).toContain("Preserved the existing ML-DSA primary device identity.");
+  expect(stored?.deviceId).toBe(existing.deviceId);
+  expect(fs.readFileSync(`${source.path}.migrated`)).toEqual(source.bytes);
+});
+
+it("rewraps an existing plaintext ML-DSA identity before retiring Ed25519 state", async () => {
+  const { env, provider, stateDir } = fixture();
+  const existing = insertStoredDeviceIdentityIfAbsent(
+    generateStoredDeviceIdentity(1_700_000_000_003, undefined, {
+      allowPlaintextPrivateKey: true,
+    }),
+    { env, identityKey: "primary" },
+  );
+  writeLegacy(stateDir, legacyNodeIdentity().value);
+
+  const result = await migrate(stateDir, env);
+
+  expect(result.warnings).toEqual([]);
+  expect(
+    readStoredDeviceIdentity({ env, identityKey: "primary", wrappingKeyProvider: provider })
+      ?.deviceId,
+  ).toBe(existing.deviceId);
+  closeOpenClawStateDatabaseForTest();
+  const { DatabaseSync } = requireNodeSqlite();
+  const database = new DatabaseSync(path.join(stateDir, "state", "openclaw.sqlite"));
+  try {
+    const row = database
+      .prepare(
+        "SELECT private_key_pem, mldsa_private_key_pem, mldsa_private_key_wrapped FROM device_identities WHERE identity_key = 'primary'",
+      )
+      .get() as {
+      private_key_pem: string;
+      mldsa_private_key_pem: string | null;
+      mldsa_private_key_wrapped: Uint8Array | null;
+    };
+    expect(row.private_key_pem).toBe("");
+    expect(row.mldsa_private_key_pem).toBeNull();
+    expect(row.mldsa_private_key_wrapped).not.toBeNull();
+  } finally {
+    database.close();
+  }
+});
+
+it("leaves legacy authorization on the retired id and gives the new id no token", async () => {
+  const { env, provider, stateDir } = fixture();
+  const legacy = legacyNodeIdentity();
+  storeDeviceAuthToken({
+    deviceId: legacy.deviceId,
+    role: "operator",
+    token: "legacy-token",
+    scopes: ["operator.read"],
+    env,
+  });
+  writeLegacy(stateDir, legacy.value);
+
+  const result = await migrate(stateDir, env);
+  const stored = readStoredDeviceIdentity({
+    env,
+    identityKey: "primary",
+    wrappingKeyProvider: provider,
+  });
+
+  expect(result.warnings).toEqual([]);
+  expect(loadDeviceAuthToken({ deviceId: legacy.deviceId, role: "operator", env })?.token).toBe(
+    "legacy-token",
+  );
+  expect(loadDeviceAuthToken({ deviceId: stored!.deviceId, role: "operator", env })).toBeNull();
+});
+
+it("allocates a numbered archive when a different archive already exists", async () => {
+  const { env, stateDir } = fixture();
+  const prior = writeLegacy(stateDir, legacyNodeIdentity().value);
+  const priorArchivePath = `${prior.path}.migrated`;
+  fs.renameSync(prior.path, priorArchivePath);
+  const current = writeLegacy(stateDir, legacyNodeIdentity().value);
+
+  const result = await migrate(stateDir, env);
+
+  expect(result.warnings).toEqual([]);
+  expect(fs.readFileSync(priorArchivePath)).toEqual(prior.bytes);
+  expect(fs.readFileSync(`${current.path}.migrated.2`)).toEqual(current.bytes);
+  expect(fs.statSync(priorArchivePath).mode & 0o777).toBe(0o600);
+  expect(fs.statSync(`${current.path}.migrated.2`).mode & 0o777).toBe(0o600);
+});
+
+it("skips a malformed occupied archive and allocates the next path", async () => {
+  const { env, stateDir } = fixture();
+  const source = writeLegacy(stateDir, legacyNodeIdentity().value);
+  fs.writeFileSync(`${source.path}.migrated`, "not-json", { mode: 0o644 });
+
+  const result = await migrate(stateDir, env);
+
+  expect(result.warnings).toEqual([]);
+  expect(fs.readFileSync(`${source.path}.migrated`, "utf8")).toBe("not-json");
+  expect(fs.readFileSync(`${source.path}.migrated.2`)).toEqual(source.bytes);
+});
+
+it("removes an identical active duplicate when its archive already exists", async () => {
+  const { env, stateDir } = fixture();
+  const source = writeLegacy(stateDir, legacyNodeIdentity().value);
+  fs.copyFileSync(source.path, `${source.path}.migrated`);
+
+  const result = await migrate(stateDir, env);
+
+  expect(result.warnings).toEqual([]);
+  expect(result.changes.join("\n")).toContain("Removed duplicate retired Ed25519 source");
+  expect(fs.existsSync(source.path)).toBe(false);
+  expect(fs.readFileSync(`${source.path}.migrated`)).toEqual(source.bytes);
+  expect(fs.existsSync(`${source.path}.migrated.2`)).toBe(false);
+});
+
+it("resumes an interrupted claim and archives it", async () => {
+  const { env, stateDir } = fixture();
+  const source = writeLegacy(stateDir, legacyNodeIdentity().value);
+  const claimPath = `${source.path}.doctor-importing`;
+  fs.renameSync(source.path, claimPath);
+
+  const result = await migrate(stateDir, env);
+
+  expect(result.warnings).toEqual([]);
+  expect(fs.existsSync(claimPath)).toBe(false);
+  expect(fs.readFileSync(`${source.path}.migrated`)).toEqual(source.bytes);
+});
+
+it("restores and safely retries when interrupted after the receipt is marked", async () => {
+  const { env, stateDir } = fixture();
+  const source = writeLegacy(stateDir, legacyNodeIdentity().value);
+  const detected = detectLegacyDeviceIdentity({
+    stateDir,
+    env,
+    doctorOnlyStateMigrations: true,
+  });
+
+  const interrupted = await migrateLegacyDeviceIdentity({
+    detected,
+    stateDir,
+    env,
+    doctorOnlyStateMigrations: true,
+    afterReceiptMarked: () => {
+      throw new Error("simulated interruption");
+    },
+  });
+  expect(interrupted.warnings.join("\n")).toContain("simulated interruption");
+  expect(fs.readFileSync(source.path)).toEqual(source.bytes);
+
+  const retried = await migrate(stateDir, env);
+  expect(retried.warnings).toEqual([]);
+  expect(fs.existsSync(source.path)).toBe(false);
+  expect(fs.readFileSync(`${source.path}.migrated`)).toEqual(source.bytes);
+});
+
+it("restores the legacy source when the existing wrapping key cannot be opened", async () => {
+  const { env, provider, stateDir } = fixture();
+  const existing = insertStoredDeviceIdentityIfAbsent(
+    generateStoredDeviceIdentity(1_700_000_000_002, provider),
+    { env, identityKey: "primary", wrappingKeyProvider: provider },
+  );
+  const source = writeLegacy(stateDir, legacyNodeIdentity().value);
+  const wrongKeyPath = path.join(stateDir, "wrong-wrap-key.b64");
+  fs.writeFileSync(wrongKeyPath, Buffer.alloc(32, 99).toString("base64url"), { mode: 0o600 });
+  const wrongEnv = {
+    ...env,
+    OPENCLAW_WRAP_KEY_FILE: wrongKeyPath,
+    OPENCLAW_WRAP_KEY_ID: "wrong-key",
+  };
+
+  const result = await migrate(stateDir, wrongEnv);
+
+  expect(result.warnings.join("\n")).toContain("Restore its wrapping key");
+  expect(fs.readFileSync(source.path)).toEqual(source.bytes);
+  expect(fs.existsSync(`${source.path}.migrated`)).toBe(false);
+  expect(
+    readStoredDeviceIdentity({ env, identityKey: "primary", wrappingKeyProvider: provider })
+      ?.deviceId,
+  ).toBe(existing.deviceId);
+});

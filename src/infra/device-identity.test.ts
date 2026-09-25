@@ -330,11 +330,15 @@ describe("device identity SQLite store", () => {
   });
 });
 
-describe.skip("legacy device identity normalization (PQC: Ed25519 removed by M2 — whitepaper 2.1)", () => {
+describe("legacy Ed25519 identity retirement input normalization", () => {
   it("normalizes valid Node PEM material and derives its canonical device id", () => {
     const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
     const publicKeyPem = publicKey.export({ type: "spki", format: "pem" });
     const privateKeyPem = privateKey.export({ type: "pkcs8", format: "pem" });
+    const expectedLegacyDeviceId = crypto
+      .createHash("sha256")
+      .update(publicKey.export({ type: "spki", format: "der" }).subarray(-32))
+      .digest("hex");
     const normalized = normalizeLegacyDeviceIdentity({
       version: 1,
       deviceId: "stale-device-id",
@@ -344,7 +348,7 @@ describe.skip("legacy device identity normalization (PQC: Ed25519 removed by M2 
     });
 
     expect(normalized).toMatchObject({
-      deviceId: deriveDeviceIdFromPublicKey(publicKeyPem),
+      deviceId: expectedLegacyDeviceId,
       publicKeyPem,
       privateKeyPem,
       createdAtMs: 1_700_000_000_000,

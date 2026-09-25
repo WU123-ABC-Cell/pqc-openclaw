@@ -1,10 +1,6 @@
 // Canonicalizes retired Node and Swift identity payloads for Doctor import.
-import { createHash } from "node:crypto";
+import { createHash, createPublicKey } from "node:crypto";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
-import {
-  validateStoredDeviceIdentity,
-  type StoredDeviceIdentity,
-} from "./device-identity-store.js";
 import {
   decodeCanonicalBase64OrBase64Url,
   deriveEd25519PrivateKeyRaw,
@@ -13,7 +9,12 @@ import {
   ed25519PublicKeyPemFromRaw,
 } from "./ed25519-signature.js";
 
-export type NormalizedLegacyDeviceIdentity = StoredDeviceIdentity;
+export type NormalizedLegacyDeviceIdentity = {
+  deviceId: string;
+  publicKeyPem: string;
+  privateKeyPem: string;
+  createdAtMs: number;
+};
 
 function fingerprintPublicKey(publicKeyPem: string): string {
   return createHash("sha256").update(deriveEd25519PublicKeyRaw(publicKeyPem)).digest("hex");
@@ -39,6 +40,13 @@ function normalizeLegacyKeyPair(params: {
     const privateKeyRaw = deriveEd25519PrivateKeyRaw(params.privateKeyPem);
     const publicKeyPem = ed25519PublicKeyPemFromRaw(publicKeyRaw);
     const privateKeyPem = ed25519PrivateKeyPemFromRaw(privateKeyRaw);
+    const derivedPublicKeyPem = createPublicKey(privateKeyPem).export({
+      type: "spki",
+      format: "pem",
+    });
+    if (!deriveEd25519PublicKeyRaw(derivedPublicKeyPem).equals(publicKeyRaw)) {
+      return null;
+    }
     // Legacy deviceId was derived metadata. Preserve the authoritative key bytes and
     // recompute the fingerprint so stale metadata never rotates a shipped identity.
     const normalized: NormalizedLegacyDeviceIdentity = {
@@ -46,17 +54,7 @@ function normalizeLegacyKeyPair(params: {
       publicKeyPem,
       privateKeyPem,
       createdAtMs: params.createdAtMs,
-      // Ed25519 legacy payloads do not carry ML-DSA-65 / wrap material;
-      // mark the new-shape fields as null so the StoredDeviceIdentity
-      // contract still type-checks. The legacy migration path itself is
-      // gated by whitepaper 2.1 (Ed25519 removed), so this branch only
-      // fires when Doctor is reconstructing a canonical row from a
-      // legacy JSON for read-only inspection.
-      mldsaPrivateKeyPem: null,
-      mldsaPrivateKeyWrapped: null,
-      mldsaPrivateKeyWrapKeyId: null,
     };
-    validateStoredDeviceIdentity(normalized);
     return normalized;
   } catch {
     return null;
@@ -70,6 +68,12 @@ export function normalizeLegacyDeviceIdentity(
   if (
     isRecord(value) &&
     value.version === 1 &&
+    !("publicKey" in value) &&
+    !("privateKey" in value) &&
+    !("mldsaPublicKeyPem" in value) &&
+    !("mldsaPrivateKeyPem" in value) &&
+    !("mldsaPrivateKeyWrapped" in value) &&
+    !("mldsaPrivateKeyWrapKeyId" in value) &&
     typeof value.deviceId === "string" &&
     typeof value.publicKeyPem === "string" &&
     typeof value.privateKeyPem === "string"
@@ -83,6 +87,12 @@ export function normalizeLegacyDeviceIdentity(
   if (
     isRecord(value) &&
     !("version" in value) &&
+    !("publicKeyPem" in value) &&
+    !("privateKeyPem" in value) &&
+    !("mldsaPublicKeyPem" in value) &&
+    !("mldsaPrivateKeyPem" in value) &&
+    !("mldsaPrivateKeyWrapped" in value) &&
+    !("mldsaPrivateKeyWrapKeyId" in value) &&
     typeof value.deviceId === "string" &&
     typeof value.publicKey === "string" &&
     typeof value.privateKey === "string"

@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
@@ -74,6 +75,23 @@ describe("node-host startup state migrations", () => {
     return { deviceId: identity.deviceId, sourcePath };
   }
 
+  async function writeLegacyEd25519Identity(stateDir: string): Promise<string> {
+    const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
+    const sourcePath = path.join(stateDir, "identity", "device.json");
+    await fsp.mkdir(path.dirname(sourcePath), { recursive: true });
+    await fsp.writeFile(
+      sourcePath,
+      JSON.stringify({
+        version: 1,
+        deviceId: "stale-id",
+        publicKeyPem: publicKey.export({ type: "spki", format: "pem" }),
+        privateKeyPem: privateKey.export({ type: "pkcs8", format: "pem" }),
+        createdAtMs: 1_700_000_000_000,
+      }),
+    );
+    return sourcePath;
+  }
+
   async function writeExecApprovals(env: NodeJS.ProcessEnv): Promise<string> {
     const sourcePath = resolveExecApprovalsPath(env);
     await fsp.writeFile(
@@ -131,6 +149,20 @@ describe("node-host startup state migrations", () => {
     expect(log.warn).toHaveBeenCalledWith(
       expect.stringContaining("legacy device identity is invalid or unsupported"),
     );
+  });
+
+  it("reports that authorization was not transferred after retiring Ed25519", async () => {
+    const { env, stateDir } = useStateDir();
+    const sourcePath = await writeLegacyEd25519Identity(stateDir);
+
+    await runStartupMigrations({ env, log });
+
+    expect(fs.existsSync(sourcePath)).toBe(false);
+    expect(fs.existsSync(`${sourcePath}.migrated`)).toBe(true);
+    expect(log.info).toHaveBeenCalledWith(
+      "The retired Ed25519 device authorization was not transferred; approve the new ML-DSA device identity.",
+    );
+    expect(log.warn).not.toHaveBeenCalled();
   });
 
   it("preserves a pending native device identity claim and continues", async () => {

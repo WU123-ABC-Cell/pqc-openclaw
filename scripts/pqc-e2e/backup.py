@@ -37,6 +37,7 @@ import argparse
 import datetime
 import glob
 import hashlib
+import json
 import os
 import shutil
 import sqlite3
@@ -71,6 +72,11 @@ def make_state_dir():
     os.makedirs(os.path.join(state, "keys"), exist_ok=True)
     with open(os.path.join(state, "keys", "current.key"), "w") as f:
         f.write("Y3VzdG9tLWtleS1tdXN0LXN0YXktb3V0LW9mLWJhY2t1cHM=")
+    os.link(os.path.join(state, "wrap-key.b64"), os.path.join(state, "innocent-default.txt"))
+    os.link(os.path.join(state, "keys", "current.key"), os.path.join(state, "innocent-custom.txt"))
+    with open(os.path.join(state, "ordinary.b64"), "w") as f:
+        f.write("ordinary-data")
+    os.link(os.path.join(state, "ordinary.b64"), os.path.join(state, "ordinary-hardlink"))
     with open(os.path.join(state, "openclaw.env"), "w") as f:
         f.write("OPENCLAW_GATEWAY_TOKEN=must-not-enter-backup\n")
     with open(os.path.join(state, "pqc-audit.log"), "w") as f:
@@ -78,9 +84,175 @@ def make_state_dir():
     return state
 
 
-def run(script, *args):
-    r = subprocess.run(["bash", script, *args], capture_output=True, text=True)
+def run(script, *args, env=None):
+    isolated_env = os.environ.copy()
+    isolated_env.pop("OPENCLAW_WRAP_KEY_FILE", None)
+    if env:
+        isolated_env.update(env)
+    r = subprocess.run(["bash", script, *args], capture_output=True, text=True, env=isolated_env)
     return r
+
+
+def check_key_boundaries(script):
+    for mode in ("final-symlink", "parent-symlink", "state-symlink", "external-hardlink", "env-and-cli", "special-names", "selector-aba", "json"):
+        with tempfile.TemporaryDirectory(prefix="pqc-key-boundary-") as root:
+            state = make_state_dir()
+            try:
+                backup = os.path.join(root, "backups")
+                selected = os.path.join(state, "keys", "current.key")
+                env = {}
+                state_input = state
+                excluded = ["wrap-key.b64", "innocent-default.txt", "keys/current.key", "innocent-custom.txt"]
+                if mode == "final-symlink":
+                    link = os.path.join(root, "selected-link")
+                    os.symlink(selected, link)
+                    selected = link
+                elif mode == "parent-symlink":
+                    os.symlink(os.path.join(state, "keys"), os.path.join(root, "key-directory"))
+                    selected = os.path.join(root, "key-directory", "current.key")
+                elif mode == "state-symlink":
+                    state_input = os.path.join(root, "state-link")
+                    os.symlink(state, state_input)
+                elif mode == "external-hardlink":
+                    external = os.path.join(root, "external-key")
+                    os.rename(selected, external)
+                    selected = external
+                elif mode == "env-and-cli":
+                    daemon_key = os.path.join(state, "daemon.key")
+                    with open(daemon_key, "w") as f:
+                        f.write("daemon-key")
+                    os.link(daemon_key, os.path.join(state, "daemon-alias"))
+                    env["OPENCLAW_WRAP_KEY_FILE"] = daemon_key
+                    excluded += ["daemon.key", "daemon-alias"]
+                elif mode == "special-names":
+                    special = os.path.join(state, "keys", "-key[abc]*\ntrailing\n")
+                    os.rename(selected, special)
+                    selected = special
+                    excluded += ["keys/-key[abc]*\ntrailing\n"]
+                elif mode == "selector-aba":
+                    selector = os.path.join(root, "selector")
+                    os.symlink(selected, selector)
+                    other = os.path.join(root, "other-key")
+                    with open(other, "w") as f:
+                        f.write("other-key")
+                    shim = os.path.join(root, "bin")
+                    os.mkdir(shim)
+                    with open(os.path.join(shim, "find"), "w") as f:
+                        f.write('#!/usr/bin/env bash\n"$REAL_FIND" "$@" || exit $?\nln -sfn "$OTHER_KEY" "$KEY_SELECTOR"\n')
+                    with open(os.path.join(shim, "tar"), "w") as f:
+                        f.write('#!/usr/bin/env bash\nln -sfn "$INITIAL_KEY" "$KEY_SELECTOR"\nexec "$REAL_TAR" "$@"\n')
+                    for tool in ("find", "tar"):
+                        os.chmod(os.path.join(shim, tool), 0o700)
+                    env = {"PATH": shim + os.pathsep + os.environ["PATH"],
+                           "REAL_FIND": shutil.which("find"), "REAL_TAR": shutil.which("tar"),
+                           "OTHER_KEY": other, "INITIAL_KEY": selected, "KEY_SELECTOR": selector}
+                    selected = selector
+                controls = ["ordinary.b64", "ordinary-hardlink", "--checkpoint-action=exec=not-a-command", "space name", "newline\nfile", "literal[abc]*"]
+                for name in controls[2:]:
+                    with open(os.path.join(state, name), "w") as f:
+                        f.write("ordinary-data")
+                os.symlink("./ordinary.b64", os.path.join(state, "ordinary-symlink"))
+                options = ["--state-dir", state_input, "--backup-dir", backup,
+                           "--wrap-key-file", selected, "--skip-healthcheck", "--skip-s3"]
+                if mode == "json":
+                    options += ["--json"]
+                r = run(script, *options, env=env)
+                if r.returncode not in (0, 2):
+                    fail(f"key boundary {mode}: {r.returncode}: {r.stdout} {r.stderr}")
+                archives = glob.glob(os.path.join(backup, "*.tar.gz"))
+                if len(archives) != 1:
+                    fail(f"key boundary {mode}: expected one published archive")
+                with tarfile.open(archives[0]) as tf:
+                    members = tf.getnames()
+                    if any("pqc-openclaw-state/" + name in members for name in excluded):
+                        fail(f"key boundary {mode}: secret path or alias was included")
+                    if not all("pqc-openclaw-state/" + name in members for name in controls):
+                        fail(f"key boundary {mode}: legitimate special-name files were lost")
+                    link = tf.getmember("pqc-openclaw-state/ordinary-symlink")
+                    if not link.issym() or link.linkname != "./ordinary.b64":
+                        fail(f"key boundary {mode}: ordinary symlink target was rewritten")
+                    secrets = [b"dGVzdC1rZXktMzItYnl0ZXMtZm9yLXRlc3RpbmcxMjM0NQ==",
+                               b"Y3VzdG9tLWtleS1tdXN0LXN0YXktb3V0LW9mLWJhY2t1cHM="]
+                    if any(any(secret in tf.extractfile(member).read() for secret in secrets)
+                           for member in tf.getmembers() if member.isfile()):
+                        fail(f"key boundary {mode}: raw key content survived")
+                if mode == "json" and json.loads(r.stdout.splitlines()[-1])["event"] != "backup-complete":
+                    fail("JSON mode did not report a complete backup")
+                log(f"  key boundary {mode}: OK")
+            finally:
+                shutil.rmtree(state, ignore_errors=True)
+
+    with tempfile.TemporaryDirectory(prefix="pqc-key-faults-") as root:
+        state = make_state_dir()
+        try:
+            backup = os.path.join(root, "backups")
+            dry_backup = os.path.join(root, "dry-backup")
+            r = run(script, "--state-dir", os.path.join(root, "missing"), "--backup-dir", dry_backup, "--dry-run")
+            if r.returncode != 0 or os.path.exists(dry_backup):
+                fail("dry-run changed the filesystem or failed for missing state")
+            for selected in ("relative-key", os.path.join(state, "keys"), os.path.join(root, "absent-parent", "key")):
+                r = run(script, "--state-dir", state, "--backup-dir", backup,
+                        "--wrap-key-file", selected, "--skip-healthcheck", "--skip-s3")
+                if r.returncode != 1 or glob.glob(os.path.join(backup, "*.tar.gz")) or os.path.exists(os.path.join(backup, ".backup.lock")):
+                    fail("invalid/uncertain key metadata did not fail cleanly before publication")
+            log("  invalid metadata and dry-run: OK")
+
+            dangling = os.path.join(root, "dangling-key")
+            os.symlink(os.path.join(root, "absent-key"), dangling)
+            r = run(script, "--state-dir", state, "--backup-dir", backup,
+                    "--wrap-key-file", dangling, "--skip-healthcheck", "--skip-s3")
+            if r.returncode != 1 or glob.glob(os.path.join(backup, "*.tar.gz")):
+                fail("dangling key did not fail closed")
+
+            # Fault injection occurs at the real tar boundary, not the filter.
+            shim = os.path.join(root, "bin")
+            os.mkdir(shim)
+            scratch = os.path.join(root, "scratch")
+            os.mkdir(scratch)
+            real_tar = shutil.which("tar")
+            # Both GNU/BSD stat branches must fail; no plaintext fallback.
+            with open(os.path.join(shim, "stat"), "w") as f:
+                f.write('#!/usr/bin/env bash\nexit 1\n')
+            os.chmod(os.path.join(shim, "stat"), 0o700)
+            r = run(script, "--state-dir", state, "--backup-dir", backup,
+                    "--skip-healthcheck", "--skip-s3",
+                    env={"PATH": shim + os.pathsep + os.environ["PATH"], "TMPDIR": scratch})
+            if r.returncode != 1 or "cannot inspect wrapping key or archive source metadata" not in r.stderr or os.listdir(scratch):
+                fail("metadata failure was silently accepted or left scratch state")
+            os.unlink(os.path.join(shim, "stat"))
+            key = os.path.join(state, "wrap-key.b64")
+            with open(os.path.join(shim, "tar"), "w") as f:
+                f.write('#!/usr/bin/env bash\n"$REAL_TAR" "$@" || exit $?\nif [[ "$1" == "-czf" ]]; then printf changed-key-size > "$TEST_KEY"; fi\n')
+            os.chmod(os.path.join(shim, "tar"), 0o700)
+            marker = os.path.join(root, "uploaded")
+            with open(os.path.join(shim, "aws"), "w") as f:
+                f.write('#!/usr/bin/env bash\ntouch "$UPLOAD_MARKER"\n')
+            os.chmod(os.path.join(shim, "aws"), 0o700)
+            sentinel = os.path.join(backup, "pqc-openclaw-old.tar.gz")
+            with open(sentinel, "w") as f:
+                f.write("previous-backup")
+            r = run(script, "--state-dir", state, "--backup-dir", backup,
+                    "--skip-healthcheck", "--s3-bucket", "test-only",
+                    "--retention-daily", "0", "--retention-weekly", "0",
+                    env={"PATH": shim + os.pathsep + os.environ["PATH"], "REAL_TAR": real_tar,
+                         "TEST_KEY": key, "TMPDIR": scratch, "UPLOAD_MARKER": marker})
+            if r.returncode != 1 or "changed during backup" not in r.stderr:
+                fail(f"changed key was not rejected: {r.stdout} {r.stderr}")
+            if glob.glob(os.path.join(backup, "*.tar.gz")) != [sentinel] or os.listdir(scratch) or os.path.exists(marker):
+                fail("failed key check published, pruned, uploaded or left scratch state")
+            log("  changed key: no publication, pruning, upload or scratch leak: OK")
+
+            # Missing default key is legitimate when a non-file provider owns it.
+            os.unlink(key)
+            os.unlink(os.path.join(state, "innocent-default.txt"))
+            missing_backup = os.path.join(root, "missing-key-backup")
+            r = run(script, "--state-dir", state, "--backup-dir", missing_backup,
+                    "--skip-healthcheck", "--skip-s3")
+            if r.returncode not in (0, 2) or len(glob.glob(os.path.join(missing_backup, "*.tar.gz"))) != 1:
+                fail("absent default key blocked a legitimate backup")
+            log("  missing default key, dangling key and metadata failure: OK")
+        finally:
+            shutil.rmtree(state, ignore_errors=True)
 
 
 def main():
@@ -160,6 +332,12 @@ def main():
             fail("wrapping key was co-located with encrypted state in the backup")
         if "pqc-openclaw-state/keys/current.key" in members:
             fail("custom wrapping key was co-located with encrypted state in the backup")
+        if any("pqc-openclaw-state/" + name in members for name in
+               ("innocent-default.txt", "innocent-custom.txt")):
+            fail("wrapping-key hardlink aliases entered the backup")
+        if not all("pqc-openclaw-state/" + name in members for name in
+                   ("ordinary.b64", "ordinary-hardlink")):
+            fail("ordinary files or their hardlinks were lost")
         if "pqc-openclaw-state/openclaw.env" in members:
             fail("legacy service secrets were included in the backup")
 
@@ -301,6 +479,8 @@ def main():
         if after != 11:
             fail(f"retention kept {after}, expected 11 (=7 daily + 4 weekly)")
 
+        log("9. key aliases, special filenames and failure boundaries")
+        check_key_boundaries(args.script)
         log("ALL CHECKS PASSED")
     finally:
         shutil.rmtree(state, ignore_errors=True)

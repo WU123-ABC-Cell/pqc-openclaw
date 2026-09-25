@@ -88,6 +88,12 @@ Snapshot repositories are local directories. Scheduling, upload, retention, incr
 
 Auth profiles and other per-agent runtime state live in SQLite under the state directory (`agents/<agentId>/agent/openclaw-agent.sqlite`), so they are covered by the state backup entry automatically.
 
+In this PQC fork, built-in archive creation excludes the default state-directory `wrap-key.b64` and the file named by `OPENCLAW_WRAP_KEY_FILE`, including their resolved targets and hardlink aliases across archived assets. The default file remains excluded even when another key provider is configured. A wrapping-key path must not also be an explicitly selected file asset; that overlap fails instead of producing an incomplete archive. Unreadable key metadata or a detected key change during archive creation also fails before publication.
+
+Encrypted device identity rows remain in the backup, but their wrapping keys do not. Keep wrapping-key recovery material separately secured; without the original key, restoring the archive cannot recover the encrypted signing identity. This exclusion cannot identify independent copies of keys at unknown paths and does not encrypt other archive contents.
+
+The separate `scripts/backup-pqc.sh` also excludes its default state-directory key, `OPENCLAW_WRAP_KEY_FILE`, and `--wrap-key-file`, including their targets and hardlink aliases. Its NUL-separated input list is archived without recursive traversal, so directory entries cannot reintroduce excluded keys. Detected key changes or uncertain key metadata abort before publication, retention, and upload. Absent key files with accessible parents are permitted; dangling key symlinks and non-file keys are rejected. The script requires GNU tar and has been verified on Ubuntu, not stock macOS. A scheduled backup service does not inherit the gateway service's custom key environment: configure the backup service's `OPENCLAW_WRAP_KEY_FILE` or pass `--wrap-key-file` explicitly. Other built-in backup guarantees, such as online SQLite snapshots, must not be assumed for this separate script.
+
 `--only-config` skips state, credentials-directory, and workspace discovery and archives only the active config file path.
 
 OpenClaw canonicalizes paths before building the archive: if config, the credentials directory, or a workspace already live inside the state directory, they are not duplicated as separate top-level backup sources. Missing paths are skipped.

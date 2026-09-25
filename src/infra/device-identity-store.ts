@@ -56,6 +56,7 @@ import {
   isMlDsa65SecretKey,
   MLDSA65_PUBLIC_KEY_LENGTH,
   MLDSA65_SECRET_KEY_LENGTH,
+  mlDsa65KeyPairMatches,
 } from "./mldsa65-key-storage.js";
 
 export const PRIMARY_DEVICE_IDENTITY_KEY = "primary";
@@ -103,6 +104,9 @@ export class DeviceIdentityStorageError extends Error {
   }
 }
 
+/** Failure to authenticate/decrypt is not proof that the identity may be replaced. */
+class DeviceIdentityKeyAccessError extends DeviceIdentityStorageError {}
+
 /** Convert the internal `StoredDeviceIdentity` (with the wrap envelope
  *  intact) to the public `DeviceIdentity` shape that callers sign with.
  *  The runtime never sees the wrapped form — only the unwrapped secret PEM. */
@@ -134,6 +138,16 @@ function invalidStoredIdentityError(
   return new DeviceIdentityStorageError(
     `SQLite contains an invalid persisted device identity "${identityKey}". Run "openclaw doctor --fix" before starting the gateway or connecting this client.`,
     cause === undefined ? undefined : { cause },
+  );
+}
+
+function identityKeyAccessError(
+  identityKey: string,
+  cause?: unknown,
+): DeviceIdentityKeyAccessError {
+  return new DeviceIdentityKeyAccessError(
+    `Cannot authenticate or decrypt device identity "${identityKey}". Restore its wrapping key before attempting repair.`,
+    { cause },
   );
 }
 
@@ -201,18 +215,18 @@ export function generateStoredDeviceIdentity(
 }
 
 function keyPairMatches(publicKeyPem: string, privateKeyPem: string): boolean {
+  let privateKeyRaw: Uint8Array | undefined;
   try {
     if (!isMlDsa65PublicKey(publicKeyPem) || !isMlDsa65SecretKey(privateKeyPem)) {
       return false;
     }
     const publicKeyRaw = decodeMlDsa65PublicKey(publicKeyPem);
-    const privateKeyRaw = decodeMlDsa65SecretKey(privateKeyPem);
-    return (
-      publicKeyRaw.length === MLDSA65_PUBLIC_KEY_LENGTH &&
-      privateKeyRaw.length === MLDSA65_SECRET_KEY_LENGTH
-    );
+    privateKeyRaw = decodeMlDsa65SecretKey(privateKeyPem);
+    return mlDsa65KeyPairMatches(publicKeyRaw, privateKeyRaw);
   } catch {
     return false;
+  } finally {
+    privateKeyRaw?.fill(0);
   }
 }
 
@@ -318,7 +332,7 @@ function rowToStoredIdentity(
       // Refuse to silently fall back to plaintext: the operator must
       // configure the keyring or run Doctor, not have the runtime sign
       // with whatever it can find.
-      throw new DeviceIdentityStorageError(
+      throw new DeviceIdentityKeyAccessError(
         `device identity "${expectedIdentityKey}" is wrap-protected but no wrappingKeyProvider was supplied to the store`,
       );
     }
@@ -328,6 +342,12 @@ function rowToStoredIdentity(
       wrapped = deserializeWrappedSecret(serialized);
     } catch (error) {
       throw invalidStoredIdentityError(expectedIdentityKey, error);
+    }
+    if (wrapped.keyId !== wrapKeyId) {
+      throw invalidStoredIdentityError(
+        expectedIdentityKey,
+        new Error("wrapped device identity key id does not match its database metadata"),
+      );
     }
     let rawSecret: Buffer;
     try {
@@ -339,7 +359,7 @@ function rowToStoredIdentity(
         keyId: wrapKeyId,
         detail: "unwrap failed for stored identity",
       });
-      throw invalidStoredIdentityError(expectedIdentityKey, error);
+      throw identityKeyAccessError(expectedIdentityKey, error);
     }
     pqcLog.info(PQC_EVENT.DeviceIdentity, {
       status: "ok",
@@ -347,24 +367,28 @@ function rowToStoredIdentity(
       keyId: wrapKeyId,
       detail: "unwrapped stored identity",
     });
-    if (rawSecret.length !== MLDSA65_SECRET_KEY_LENGTH) {
-      throw invalidStoredIdentityError(
-        expectedIdentityKey,
-        new Error(
-          `unwrapped secret key length ${rawSecret.length} != ${MLDSA65_SECRET_KEY_LENGTH}`,
-        ),
-      );
+    try {
+      if (rawSecret.length !== MLDSA65_SECRET_KEY_LENGTH) {
+        throw invalidStoredIdentityError(
+          expectedIdentityKey,
+          new Error(
+            `unwrapped secret key length ${rawSecret.length} != ${MLDSA65_SECRET_KEY_LENGTH}`,
+          ),
+        );
+      }
+      const privateKeyPem = encodeMlDsa65SecretKey(rawSecret);
+      return {
+        deviceId: row.device_id,
+        publicKeyPem: publicKeyPem ?? "",
+        privateKeyPem,
+        createdAtMs: row.created_at_ms,
+        mldsaPrivateKeyPem: null,
+        mldsaPrivateKeyWrapped: serialized,
+        mldsaPrivateKeyWrapKeyId: wrapKeyId,
+      };
+    } finally {
+      rawSecret.fill(0);
     }
-    const privateKeyPem = encodeMlDsa65SecretKey(new Uint8Array(rawSecret));
-    return {
-      deviceId: row.device_id,
-      publicKeyPem: publicKeyPem ?? "",
-      privateKeyPem,
-      createdAtMs: row.created_at_ms,
-      mldsaPrivateKeyPem: null,
-      mldsaPrivateKeyWrapped: serialized,
-      mldsaPrivateKeyWrapKeyId: wrapKeyId,
-    };
   }
 
   // Plaintext path: prefer the new `mldsa_private_key_pem` (M3+) and fall
@@ -413,10 +437,8 @@ function salvageStoredIdentityRow(
     wrapKeyId.length > 0;
 
   if (hasWrapped) {
-    // Salvage is a same-row re-validation: we just need the public side
-    // and a parseable wrap envelope. The private key is not required at
-    // salvage time because Doctor runs without the keyring and only
-    // fixes timestamps / device_id, not signing material.
+    // Metadata repair preserves keys only after authenticated unwrap and the
+    // same pairing proof used by runtime reads; lengths alone do not prove it.
     const publicKeyPem =
       typeof row.mldsa_public_key_pem === "string" && row.mldsa_public_key_pem.length > 0
         ? row.mldsa_public_key_pem
@@ -437,17 +459,30 @@ function salvageStoredIdentityRow(
     }
     try {
       if (!wrappingKeyProvider) {
-        return null;
+        throw identityKeyAccessError(expectedIdentityKey);
       }
       const serialized = Buffer.from(wrappedBlob).toString("utf8");
       const wrapped = deserializeWrappedSecret(serialized);
       if (wrapped.keyId !== wrapKeyId) {
         return null;
       }
-      if (unwrapSecret(wrapped, wrappingKeyProvider).length !== MLDSA65_SECRET_KEY_LENGTH) {
-        return null;
+      let secret: Buffer;
+      try {
+        secret = unwrapSecret(wrapped, wrappingKeyProvider);
+      } catch (error) {
+        throw identityKeyAccessError(expectedIdentityKey, error);
       }
-    } catch {
+      try {
+        if (!mlDsa65KeyPairMatches(publicKeyRaw, secret)) {
+          return null;
+        }
+      } finally {
+        secret.fill(0);
+      }
+    } catch (error) {
+      if (error instanceof DeviceIdentityKeyAccessError) {
+        throw error;
+      }
       return null;
     }
     const createdAtMs =
@@ -461,9 +496,6 @@ function salvageStoredIdentityRow(
       mldsaPrivateKeyWrapped: Buffer.from(wrappedBlob).toString("utf8"),
       mldsaPrivateKeyWrapKeyId: wrapKeyId,
     };
-    // Validation is permissive here: we don't have the plaintext, so we
-    // accept the wrap envelope and let the runtime unwrap later. Doctor
-    // does not sign.
     return salvaged;
   }
 
@@ -687,6 +719,9 @@ export function repairInvalidStoredDeviceIdentity(
           return { identity: existing, repaired, rotated };
         }
       } catch (error) {
+        if (error instanceof DeviceIdentityKeyAccessError) {
+          throw error;
+        }
         if (!(error instanceof DeviceIdentityStorageError)) {
           throw error;
         }
@@ -766,5 +801,92 @@ export function repairInvalidStoredDeviceIdentity(
     },
     { env: options.env, path: resolved.databasePath },
     { operationLabel: "device-identity.doctor-repair" },
+  );
+}
+
+/** Canonicalize a valid ML-DSA identity into wrapped-only at-rest storage. */
+export function ensureStoredDeviceIdentityWrapped(options: DeviceIdentityStoreOptions = {}): {
+  identity: StoredDeviceIdentity;
+  rewrapped: boolean;
+} {
+  const resolved = resolveDeviceIdentityStore(options);
+  const wrappingKeyProvider = options.wrappingKeyProvider;
+  if (!wrappingKeyProvider) {
+    throw new DeviceIdentityStorageError(
+      "A wrapping key provider is required to canonicalize a device identity.",
+    );
+  }
+  return runOpenClawStateWriteTransaction(
+    ({ db }) => {
+      const row = readStoredIdentityRowFromDatabase({ db }, resolved.identityKey);
+      if (!row) {
+        throw new DeviceIdentityStorageError(
+          `SQLite device identity "${resolved.identityKey}" does not exist.`,
+        );
+      }
+      const existing = rowToStoredIdentity(row, resolved.identityKey, wrappingKeyProvider);
+      validateStoredDeviceIdentity(existing, resolved.identityKey);
+      const alreadyCanonical =
+        row.mldsa_private_key_wrapped !== null &&
+        row.mldsa_private_key_wrapped !== undefined &&
+        row.mldsa_private_key_wrapped.length > 0 &&
+        typeof row.mldsa_private_key_wrap_key_id === "string" &&
+        row.mldsa_private_key_wrap_key_id.length > 0 &&
+        row.mldsa_private_key_pem === null &&
+        row.private_key_pem === "" &&
+        row.mldsa_public_key_pem === existing.publicKeyPem &&
+        row.public_key_pem === existing.publicKeyPem;
+      if (alreadyCanonical) {
+        return { identity: existing, rewrapped: false };
+      }
+
+      let rawSecret: Uint8Array | undefined;
+      try {
+        rawSecret = decodeMlDsa65SecretKey(existing.privateKeyPem);
+        const wrapped = wrapSecret(Buffer.from(rawSecret), wrappingKeyProvider);
+        const canonical: StoredDeviceIdentity = {
+          ...existing,
+          mldsaPrivateKeyPem: null,
+          mldsaPrivateKeyWrapped: serializeWrappedSecret(wrapped),
+          mldsaPrivateKeyWrapKeyId: wrapped.keyId,
+        };
+        validateStoredDeviceIdentity(canonical, resolved.identityKey);
+        executeSqliteQuerySync(
+          db,
+          getNodeSqliteKysely<DeviceIdentityDatabase>(db)
+            .updateTable("device_identities")
+            .set({
+              device_id: canonical.deviceId,
+              public_key_pem: canonical.publicKeyPem,
+              private_key_pem: "",
+              created_at_ms: canonical.createdAtMs,
+              updated_at_ms: Date.now(),
+              mldsa_public_key_pem: canonical.publicKeyPem,
+              mldsa_private_key_pem: null,
+              mldsa_private_key_wrapped: new TextEncoder().encode(
+                canonical.mldsaPrivateKeyWrapped!,
+              ),
+              mldsa_private_key_wrap_key_id: canonical.mldsaPrivateKeyWrapKeyId,
+            })
+            .where("identity_key", "=", resolved.identityKey),
+        );
+      } finally {
+        rawSecret?.fill(0);
+      }
+      const authoritative = readStoredIdentityFromDatabase(
+        { db },
+        resolved.identityKey,
+        wrappingKeyProvider,
+      );
+      if (!authoritative) {
+        throw new DeviceIdentityStorageError(
+          `SQLite device identity "${resolved.identityKey}" was not durable after wrapping.`,
+        );
+      }
+      validateStoredDeviceIdentity(authoritative, resolved.identityKey);
+      return { identity: authoritative, rewrapped: true };
+    },
+    { env: options.env, path: resolved.databasePath },
+    { operationLabel: "device-identity.doctor-wrap" },
   );
 }
