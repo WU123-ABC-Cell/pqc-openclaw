@@ -96,7 +96,7 @@ enum DeviceIdentitySQLiteStore {
             createIfMissing: false)
         guard try database.schemaObjectExists(type: "table", name: "device_identities") else { return nil }
         try database.ensureCanonicalTable(.deviceIdentities, allowVersionZeroCreation: false)
-        return try self.readIdentity(database, key: profile.rawValue)?.identity
+        return try self.readIdentity(database, key: profile.databaseIdentityKey)?.identity
     }
 
     private static func loadOrCreateOwned(
@@ -163,38 +163,29 @@ enum DeviceIdentitySQLiteStore {
         afterLegacyCommit: (() throws -> Void)?) throws -> DeviceIdentity
     {
         try self.requireConsistentClaims(claims)
-        let generatedMaterial = claims.isEmpty ? DeviceIdentityStore.generateMaterial() : nil
+        // Legacy files are Ed25519. They are claimed only so they can be retired safely;
+        // their authorization must never be transferred to the new ML-DSA identity.
         let writeTimestampMs = Int64(Date().timeIntervalSince1970 * 1000)
 
         let database = try OpenClawNativeStateSQLite(databaseURL: databaseURL)
         let authoritative = try database.withImmediateTransaction {
             try database.ensureCanonicalTable(.deviceIdentities)
-            let existing = try self.readIdentity(database, key: profile.rawValue)
+            let existing = try self.readIdentity(database, key: profile.databaseIdentityKey)
             let selected: DeviceIdentityMaterial
             if let existing {
-                if let migrated = claims.first?.material,
-                   !self.hasSameKeyMaterial(migrated, existing)
-                {
-                    throw DeviceIdentityStore.storageError(
-                        "Legacy device identity conflicts with SQLite identity key " +
-                            "\(profile.rawValue); source preserved")
-                }
                 selected = existing
             } else {
-                guard let candidate = claims.first?.material ?? generatedMaterial else {
-                    throw DeviceIdentityStore.storageError("Device identity candidate is unavailable")
-                }
-                selected = candidate
+                selected = DeviceIdentityStore.generateMaterial()
                 try self.insertIdentity(
                     database,
-                    key: profile.rawValue,
+                    key: profile.databaseIdentityKey,
                     material: selected,
                     updatedAtMs: writeTimestampMs)
             }
 
             // The row reread under the write transaction is authoritative. Never return generated
             // or migrated key material unless SQLite reports the exact canonical receipt.
-            guard let authoritative = try self.readIdentity(database, key: profile.rawValue),
+            guard let authoritative = try self.readIdentity(database, key: profile.databaseIdentityKey),
                   authoritative == selected
             else {
                 throw DeviceIdentityStore.storageError("SQLite did not preserve the authoritative device identity")
@@ -207,17 +198,14 @@ enum DeviceIdentitySQLiteStore {
             try afterLegacyCommit?()
             // The committed reread is the destructive-cleanup receipt. Doctor cannot alter the
             // row while the native claim remains visible to every Node identity entry point.
-            guard let committedIdentity = try self.readIdentity(database, key: profile.rawValue),
+            guard let committedIdentity = try self.readIdentity(database, key: profile.databaseIdentityKey),
                   committedIdentity == authoritative
             else {
                 throw DeviceIdentityStore.storageError(
                     "Committed SQLite identity changed before legacy cleanup; native claim preserved")
             }
-            try self.relocateLegacyAuthIfNeeded(
-                claims: claims,
-                destinationStateDirURL: destinationStateDirURL,
-                profile: profile,
-                deviceId: authoritative.identity.deviceId)
+            // Deliberately leave legacy auth bound to the retired Ed25519 device id.
+            // The new ML-DSA identity must be paired and authorized as a new device.
             try self.removeClaimedLegacyIdentities(claims)
         }
         return authoritative.identity

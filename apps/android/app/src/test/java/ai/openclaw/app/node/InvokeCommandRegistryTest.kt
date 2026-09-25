@@ -80,7 +80,7 @@ class InvokeCommandRegistryTest {
       OpenClawMobileUiCommand.Act.rawValue,
     )
 
-  private val debugCommands = setOf("debug.logs", "debug.ed25519")
+  private val debugCommands = setOf("debug.logs", "debug.mldsa65")
 
   @Test
   fun advertisedCapabilities_respectsFeatureAvailability() {

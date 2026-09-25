@@ -9,6 +9,12 @@ public enum GatewayDeviceIdentityProfile: String, Sendable {
     case node
     case shareExtension
 
+    /// Apple CryptoKit persists ML-DSA private keys as a 32-byte seed. Keep these
+    /// rows separate from Node's expanded ML-DSA private-key representation.
+    var databaseIdentityKey: String {
+        "apple-mldsa65-\(self.rawValue)"
+    }
+
     var identityFileName: String {
         switch self {
         case .primary:
@@ -184,6 +190,11 @@ struct DeviceIdentityMaterial: Equatable {
 }
 
 public enum DeviceIdentityStore {
+    static let mlDsa65PublicKeyBytes = 1952
+    static let mlDsa65SeedBytes = 32
+    static let mlDsa65SignatureBytes = 3309
+    private static let mlDsa65PublicKeyPrefix = "MLDSA65-PUBLIC-KEY:"
+    private static let mlDsa65SeedPrefix = "MLDSA65-SEED:"
     static let ed25519SPKIPrefix = Data([
         0x30, 0x2A, 0x30, 0x05, 0x06, 0x03, 0x2B, 0x65,
         0x70, 0x03, 0x21, 0x00,
@@ -246,10 +257,17 @@ public enum DeviceIdentityStore {
     }
 
     public static func signPayload(_ payload: String, identity: DeviceIdentity) -> String? {
-        guard let privateKeyData = Data(base64Encoded: identity.privateKey) else { return nil }
+        guard let publicKeyData = Data(base64Encoded: identity.publicKey),
+              let seedData = Data(base64Encoded: identity.privateKey),
+              publicKeyData.count == self.mlDsa65PublicKeyBytes,
+              seedData.count == self.mlDsa65SeedBytes,
+              self.deviceId(publicKeyData: publicKeyData) == identity.deviceId
+        else { return nil }
         do {
-            let privateKey = try Curve25519.Signing.PrivateKey(rawRepresentation: privateKeyData)
+            let publicKey = try MLDSA65.PublicKey(rawRepresentation: publicKeyData)
+            let privateKey = try MLDSA65.PrivateKey(seedRepresentation: seedData, publicKey: publicKey)
             let signature = try privateKey.signature(for: Data(payload.utf8))
+            guard signature.count == self.mlDsa65SignatureBytes else { return nil }
             return self.base64UrlEncode(signature)
         } catch {
             return nil
@@ -257,10 +275,12 @@ public enum DeviceIdentityStore {
     }
 
     static func generateMaterial() -> DeviceIdentityMaterial {
-        let privateKey = Curve25519.Signing.PrivateKey()
+        let privateKey = try! MLDSA65.PrivateKey()
         let publicKey = privateKey.publicKey
         let publicKeyData = publicKey.rawRepresentation
-        let privateKeyData = privateKey.rawRepresentation
+        let privateKeyData = privateKey.seedRepresentation
+        precondition(publicKeyData.count == self.mlDsa65PublicKeyBytes)
+        precondition(privateKeyData.count == self.mlDsa65SeedBytes)
         let deviceId = self.deviceId(publicKeyData: publicKeyData)
         let identity = DeviceIdentity(
             deviceId: deviceId,
@@ -269,8 +289,8 @@ public enum DeviceIdentityStore {
             createdAtMs: Int64(Date().timeIntervalSince1970 * 1000))
         return DeviceIdentityMaterial(
             identity: identity,
-            publicKeyPEM: self.pem(label: "PUBLIC KEY", der: self.ed25519SPKIPrefix + publicKeyData),
-            privateKeyPEM: self.pem(label: "PRIVATE KEY", der: self.ed25519PKCS8PrivatePrefix + privateKeyData))
+            publicKeyPEM: self.mlDsa65PublicKeyPrefix + publicKeyData.base64EncodedString(),
+            privateKeyPEM: self.mlDsa65SeedPrefix + privateKeyData.base64EncodedString())
     }
 
     private static func base64UrlEncode(_ data: Data) -> String {
@@ -333,16 +353,36 @@ public enum DeviceIdentityStore {
         createdAtMs: Int64) throws -> DeviceIdentityMaterial
     {
         guard createdAtMs >= 0,
-              let publicKeyData = rawPublicKey(fromPEM: publicKeyPEM),
-              let privateKeyData = rawPrivateKey(fromPEM: privateKeyPEM),
-              keyPairMatches(publicKeyData: publicKeyData, privateKeyData: privateKeyData)
+              let publicKeyData = self.taggedKeyData(
+                  publicKeyPEM,
+                  prefix: self.mlDsa65PublicKeyPrefix,
+                  expectedBytes: self.mlDsa65PublicKeyBytes),
+              let seedData = self.taggedKeyData(
+                  privateKeyPEM,
+                  prefix: self.mlDsa65SeedPrefix,
+                  expectedBytes: self.mlDsa65SeedBytes)
         else {
             throw DeviceIdentityStore.storageError("SQLite device identity has invalid key material")
         }
-        let canonical = self.material(
-            publicKeyData: publicKeyData,
-            privateKeyData: privateKeyData,
-            createdAtMs: createdAtMs)
+        do {
+            let publicKey = try MLDSA65.PublicKey(rawRepresentation: publicKeyData)
+            let privateKey = try MLDSA65.PrivateKey(seedRepresentation: seedData, publicKey: publicKey)
+            guard privateKey.publicKey.rawRepresentation == publicKeyData else {
+                throw DeviceIdentityStore.storageError("SQLite device identity keypair does not match")
+            }
+        } catch let error as NSError where error.domain == "ai.openclaw.device-identity-store" {
+            throw error
+        } catch {
+            throw DeviceIdentityStore.storageError("SQLite device identity has invalid ML-DSA-65 key material")
+        }
+        let canonical = DeviceIdentityMaterial(
+            identity: DeviceIdentity(
+                deviceId: self.deviceId(publicKeyData: publicKeyData),
+                publicKey: publicKeyData.base64EncodedString(),
+                privateKey: seedData.base64EncodedString(),
+                createdAtMs: createdAtMs),
+            publicKeyPEM: self.mlDsa65PublicKeyPrefix + publicKeyData.base64EncodedString(),
+            privateKeyPEM: self.mlDsa65SeedPrefix + seedData.base64EncodedString())
         guard canonical.identity.deviceId == deviceId else {
             throw DeviceIdentityStore.storageError("SQLite device identity deviceId does not match its public key")
         }
@@ -350,6 +390,19 @@ public enum DeviceIdentityStore {
             throw DeviceIdentityStore.storageError("SQLite device identity PEM is not canonical")
         }
         return canonical
+    }
+
+    private static func taggedKeyData(
+        _ value: String,
+        prefix: String,
+        expectedBytes: Int) -> Data?
+    {
+        guard value.hasPrefix(prefix), !value.dropFirst(prefix.count).isEmpty,
+              let data = Data(base64Encoded: String(value.dropFirst(prefix.count))),
+              data.count == expectedBytes,
+              value == prefix + data.base64EncodedString()
+        else { return nil }
+        return data
     }
 
     private static func normalizedRawIdentity(_ rawIdentity: DeviceIdentity) -> DeviceIdentity? {

@@ -301,7 +301,7 @@ class InvokeDispatcher(
       OpenClawMobileUiCommand.Act.rawValue -> mobileUiHandler.handleAct(paramsJson)
 
       // Debug commands
-      "debug.ed25519" -> debugHandler.handleEd25519()
+      "debug.mldsa65" -> debugHandler.handleMlDsa65()
       "debug.logs" -> debugHandler.handleLogs()
       else -> GatewaySession.InvokeResult.error(code = "INVALID_REQUEST", message = "INVALID_REQUEST: unknown command")
     }

@@ -5,9 +5,9 @@ import PackageDescription
 let package = Package(
     name: "OpenClawKit",
     platforms: [
-        .iOS(.v18),
-        .macOS(.v15),
-        .watchOS(.v11),
+        .iOS(.v26),
+        .macOS(.v26),
+        .watchOS(.v26),
     ],
     products: [
         .library(name: "OpenClawProtocol", targets: ["OpenClawProtocol"]),

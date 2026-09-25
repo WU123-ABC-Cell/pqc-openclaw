@@ -18,20 +18,20 @@ class DebugHandler(
   private val identityStore: DeviceIdentityStore,
 ) {
   /**
-   * Runs an Ed25519 self-test and returns redacted diagnostics for debug builds.
+   * Runs an ML-DSA-65 self-test and returns redacted diagnostics for debug builds.
    */
-  fun handleEd25519(): GatewaySession.InvokeResult {
+  fun handleMlDsa65(): GatewaySession.InvokeResult {
     if (!BuildConfig.DEBUG) {
       return GatewaySession.InvokeResult.error(code = "UNAVAILABLE", message = "debug commands are disabled in release builds")
     }
-    // Self-test Ed25519 signing without returning full private/public key material.
+    // Self-test ML-DSA-65 signing without returning full private/public key material.
     try {
       val identity = identityStore.loadOrCreate()
       val testPayload = "test|${identity.deviceId}|${System.currentTimeMillis()}"
       val results = mutableListOf<String>()
       results.add("deviceId: ${identity.deviceId}")
       results.add("publicKeyRawBase64: ${identity.publicKeyRawBase64.take(20)}...")
-      results.add("privateKeyPkcs8Base64: ${identity.privateKeyPkcs8Base64.take(20)}...")
+      results.add("privateKeyRawBase64: ${identity.privateKeyRawBase64.take(20)}...")
 
       // Public-key URL encoding must match the gateway device-auth payload contract.
       val pubKeyUrl = identityStore.publicKeyBase64Url(identity)
@@ -46,36 +46,13 @@ class DebugHandler(
         results.add("verifySelfSignature: $verifyOk")
       }
 
-      // Check available providers
-      val providers = java.security.Security.getProviders()
-      val ed25519Providers =
-        providers.filter { p ->
-          p.services.any { s -> s.algorithm.contains("Ed25519", ignoreCase = true) }
-        }
-      results.add("Ed25519 providers: ${ed25519Providers.map { "${it.name} v${it.version}" }}")
-      results.add("Provider order: ${providers.take(5).map { it.name }}")
-
-      // Test KeyFactory directly
-      try {
-        val kf = java.security.KeyFactory.getInstance("Ed25519")
-        results.add("KeyFactory.Ed25519: ${kf.provider.name} (OK)")
-      } catch (e: Throwable) {
-        results.add("KeyFactory.Ed25519: FAILED - ${e.javaClass.simpleName}: ${e.message}")
-      }
-
-      // Test Signature directly
-      try {
-        val sig = java.security.Signature.getInstance("Ed25519")
-        results.add("Signature.Ed25519: ${sig.provider.name} (OK)")
-      } catch (e: Throwable) {
-        results.add("Signature.Ed25519: FAILED - ${e.javaClass.simpleName}: ${e.message}")
-      }
+      results.add("implementation: Bouncy Castle lightweight MLDSA65")
 
       val diagnostics = results.joinToString("\n")
       return GatewaySession.InvokeResult.ok("""{"diagnostics":${JsonPrimitive(diagnostics)}}""")
     } catch (e: Throwable) {
       return GatewaySession.InvokeResult.error(
-        code = "ED25519_TEST_FAILED",
+        code = "MLDSA65_TEST_FAILED",
         message = "${e.javaClass.simpleName}: ${e.message}\n${e.stackTraceToString().takeUtf16Safe(500)}",
       )
     }

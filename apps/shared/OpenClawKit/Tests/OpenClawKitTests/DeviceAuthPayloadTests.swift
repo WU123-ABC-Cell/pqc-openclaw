@@ -77,11 +77,13 @@ struct DeviceAuthPayloadTests {
         let signaturePadding = String(repeating: "=", count: (4 - signatureBase64.count % 4) % 4)
         let signatureData = try #require(Data(base64Encoded: signatureBase64 + signaturePadding))
         let publicKeyData = try #require(Data(base64Encoded: identity.publicKey))
-        let publicKey = try Curve25519.Signing.PublicKey(rawRepresentation: publicKeyData)
+        let publicKey = try MLDSA65.PublicKey(rawRepresentation: publicKeyData)
         let data = try JSONEncoder().encode(device)
         let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
 
         #expect(publicKey.isValidSignature(signatureData, for: Data(payload.utf8)))
+        #expect(publicKeyData.count == DeviceIdentityStore.mlDsa65PublicKeyBytes)
+        #expect(signatureData.count == DeviceIdentityStore.mlDsa65SignatureBytes)
         #expect((object["signedAt"] as? NSNumber)?.int64Value == signedAtMs)
     }
 

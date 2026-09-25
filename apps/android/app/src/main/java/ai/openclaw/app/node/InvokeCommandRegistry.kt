@@ -263,7 +263,7 @@ object InvokeCommandRegistry {
         availability = InvokeCommandAvailability.DebugBuild,
       ),
       InvokeCommandSpec(
-        name = "debug.ed25519",
+        name = "debug.mldsa65",
         availability = InvokeCommandAvailability.DebugBuild,
       ),
     )

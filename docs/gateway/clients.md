@@ -64,7 +64,9 @@ the Gateway's shared bootstrap authentication with `openclaw configure --section
 gateway` or the `openclaw onboard --gateway-auth ...` options, then let device
 pairing mint the client token:
 
-1. Persist an Ed25519 device identity in the client.
+1. Persist an ML-DSA-65 device identity in the client. Send the raw 1952-byte
+   public key and raw 3309-byte signature as unpadded base64url. The gateway
+   does not negotiate or accept an Ed25519 fallback.
 2. Wait for `connect.challenge`, use its `ts` as the device proof's `signedAt`,
    sign the challenge-bound device payload, and send `connect` with the requested
    operator role, scopes, and the shared Gateway token or password for bootstrap
