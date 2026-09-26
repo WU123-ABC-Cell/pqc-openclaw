@@ -82,6 +82,12 @@ def main():
         os.makedirs(state, exist_ok=True)
         os.makedirs(install, exist_ok=True)
         os.makedirs(backup, exist_ok=True)
+        # Git records healthcheck-pqc.sh as 100644. A fresh CI checkout is not
+        # executable, while the deployed wrapper is. Recreate that deployed
+        # contract rather than depending on the developer worktree's mode.
+        deployed_healthcheck = os.path.join(tmp, "healthcheck-pqc.sh")
+        shutil.copyfile(healthcheck, deployed_healthcheck)
+        os.chmod(deployed_healthcheck, 0o755)
         # Drop a fake tarball
         tarball = os.path.join(backup, "pqc-openclaw-2026-09-02T150000Z.tar.gz")
         with open(tarball, "wb") as f:
@@ -89,7 +95,7 @@ def main():
         r = subprocess.run([
             "bash", script,
             "--textfile-dir", tf_dir,
-            "--healthcheck-bin", healthcheck,
+            "--healthcheck-bin", deployed_healthcheck,
             "--healthcheck-state-dir", state,
             "--healthcheck-install-root", install,
             "--backup-dir", backup,

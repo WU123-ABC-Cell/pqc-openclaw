@@ -318,6 +318,33 @@ describe("Nostr PQC two-Gateway public lifecycle", () => {
         scopes: ["operator.admin", "operator.read", "operator.write"],
       });
       try {
+        const configRevision = async (client: typeof aliceClient) =>
+          await client.request<{
+            configRevisionHash: string;
+            appliedConfigHash: string | null;
+          }>("config.get", {});
+        const waitForConfigApplied = async (client: typeof aliceClient, beforeHash: string) => {
+          await vi.waitFor(
+            async () => {
+              const config = await configRevision(client);
+              expect(config.configRevisionHash).not.toBe(beforeHash);
+              expect(config.appliedConfigHash).toBe(config.configRevisionHash);
+            },
+            { timeout: 30_000 },
+          );
+        };
+        // Gateway WebSocket readiness precedes channel startup. A signed key
+        // announcement proves each Nostr bus is installed and relay-connected.
+        await vi.waitFor(
+          () => {
+            for (const pubkey of [alice.nostrPublic, bob.nostrPublic]) {
+              expect(
+                relay?.events.some((event) => event.kind === 30078 && event.pubkey === pubkey),
+              ).toBe(true);
+            }
+          },
+          { timeout: 30_000 },
+        );
         const send = async (message: string) =>
           await aliceClient.request("send", {
             channel: "nostr",
@@ -326,7 +353,9 @@ describe("Nostr PQC two-Gateway public lifecycle", () => {
             message,
             idempotencyKey: randomUUID(),
           });
-        await expect(send("must not leave Alice without a pin")).rejects.toThrow();
+        await expect(send("must not leave Alice without a pin")).rejects.toThrow(
+          "No pinned ML-KEM-768 public key",
+        );
         expect(relay.events.filter((event) => event.kind === 4444)).toHaveLength(0);
 
         const alicePath = `/api/channels/nostr/default/pqc-keys/${bob.nostrPublic}`;
@@ -337,6 +366,8 @@ describe("Nostr PQC two-Gateway public lifecycle", () => {
         expect(bobDiscovery.status, bobGateway.logs()).toBe(200);
         expect(aliceDiscovery.body.trustState).toBe("untrusted-first-key");
         expect(bobDiscovery.body.trustState).toBe("untrusted-first-key");
+        const aliceBeforePin = await configRevision(aliceClient);
+        const bobBeforePin = await configRevision(bobClient);
         const bobAnnouncement = aliceDiscovery.body.announcement as { fingerprint: string };
         const aliceAnnouncement = bobDiscovery.body.announcement as { fingerprint: string };
         const alicePin = await requestPqc(aliceGateway, alicePath, "PUT", {
@@ -355,6 +386,12 @@ describe("Nostr PQC two-Gateway public lifecycle", () => {
           status: 200,
           body: { ok: true, updated: true },
         });
+        // PIN writes trigger an asynchronous channel restart. HTTP 200 only
+        // confirms persistence, so wait until each Gateway applies its revision.
+        await Promise.all([
+          waitForConfigApplied(aliceClient, aliceBeforePin.configRevisionHash),
+          waitForConfigApplied(bobClient, bobBeforePin.configRevisionHash),
+        ]);
 
         await send("PQC_GATEWAY_REQUEST");
         await vi.waitFor(
@@ -454,6 +491,7 @@ describe("Nostr PQC two-Gateway public lifecycle", () => {
           relay.events.filter((event) => event.kind === 4444 && event.pubkey === bob.nostrPublic),
         ).toHaveLength(initialBobReplies);
 
+        const aliceBeforeRotationPin = await configRevision(aliceClient);
         const confirmedRotation = await requestPqc(aliceGateway, alicePath, "PUT", {
           fingerprint: rotatedAnnouncement.fingerprint,
           expectedCurrentFingerprint: bobAnnouncement.fingerprint,
@@ -462,6 +500,7 @@ describe("Nostr PQC two-Gateway public lifecycle", () => {
           status: 200,
           body: { ok: true, updated: true },
         });
+        await waitForConfigApplied(aliceClient, aliceBeforeRotationPin.configRevisionHash);
         await send("PQC_ROTATED_KEY_REQUEST");
         await vi.waitFor(
           () => {
