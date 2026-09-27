@@ -31,7 +31,11 @@ import {
 import { clearPluginMetadataLifecycleCaches } from "../plugins/plugin-metadata-lifecycle.js";
 import { bumpSkillsSnapshotVersion } from "../skills/runtime/refresh-state.js";
 import { createConfigAppliedRevisionTracker } from "./config-applied-revision.js";
-import { diffConfigPaths, diffGatewayReloadPaths } from "./config-diff.js";
+import {
+  diffConfigPaths,
+  diffGatewayReloadPaths,
+  expandChangedPathsForAppliedLeaves,
+} from "./config-diff.js";
 import {
   buildGatewayReloadPlan,
   isNoopGatewayReloadPlan,
@@ -687,8 +691,19 @@ export function startGatewayConfigReloader(opts: {
       await commitReloadBaseline({ runtimeApplied: false });
       return;
     }
-    const plan = buildGatewayReloadPlan(changedPaths, {
-      noopPaths: pluginInstallTimestampNoopPaths,
+    const inPlaceAppliedPaths =
+      followUp.mode === "auto" ? (followUp.inPlaceAppliedPaths ?? []) : [];
+    const plannedPaths = expandChangedPathsForAppliedLeaves(
+      currentCompareConfig,
+      nextCompareConfig,
+      changedPaths,
+      inPlaceAppliedPaths,
+    );
+    const plan = buildGatewayReloadPlan(plannedPaths, {
+      noopPaths: [
+        ...pluginInstallTimestampNoopPaths,
+        ...plannedPaths.filter((path) => inPlaceAppliedPaths.includes(path)),
+      ],
       forceChangedPaths: pluginInstallWholeRecordPaths,
       candidateConfig: nextConfig,
     });

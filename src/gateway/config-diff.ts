@@ -54,3 +54,40 @@ export function diffGatewayReloadPaths(
     ),
   ];
 }
+
+/** Expand an added object only as far as needed to distinguish writer-applied leaves. */
+export function expandChangedPathsForAppliedLeaves(
+  previous: OpenClawConfig,
+  next: OpenClawConfig,
+  changedPaths: string[],
+  appliedPaths: readonly string[],
+): string[] {
+  if (appliedPaths.length === 0) {
+    return changedPaths;
+  }
+  const valueAt = (config: unknown, path: string): unknown =>
+    path
+      .split(".")
+      .reduce<unknown>((value, key) => (isPlainObject(value) ? value[key] : undefined), config);
+  const expand = (path: string, before: unknown, after: unknown): string[] => {
+    if (!appliedPaths.some((applied) => applied.startsWith(`${path}.`))) {
+      return [path];
+    }
+    if (!isPlainObject(before) && !isPlainObject(after)) {
+      return [path];
+    }
+    const beforeRecord = isPlainObject(before) ? before : {};
+    const afterRecord = isPlainObject(after) ? after : {};
+    return [...new Set([...Object.keys(beforeRecord), ...Object.keys(afterRecord)])].flatMap(
+      (key) => {
+        const childPath = `${path}.${key}`;
+        const beforeValue = beforeRecord[key];
+        const afterValue = afterRecord[key];
+        return diffConfigPaths(beforeValue, afterValue, childPath).length > 0
+          ? expand(childPath, beforeValue, afterValue)
+          : [];
+      },
+    );
+  };
+  return changedPaths.flatMap((path) => expand(path, valueAt(previous, path), valueAt(next, path)));
+}

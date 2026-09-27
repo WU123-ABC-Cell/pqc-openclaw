@@ -106,7 +106,12 @@ export default defineBundledChannelEntry({
         const runtime = getNostrRuntime();
         let updated = false;
         await runtime.config.mutateConfigFile({
-          afterWrite: { mode: "auto" },
+          // This exact pin is applied to the active bus below. Other Nostr
+          // config edits must retain their normal channel-restart behavior.
+          afterWrite: {
+            mode: "auto",
+            inPlaceAppliedPaths: [`channels.nostr.mlKemPeerPublicKeys.${peerPubkey}`],
+          },
           mutate: (draft) => {
             const channels = (draft.channels ?? {}) as Record<string, unknown>;
             const nostrConfig = (channels.nostr ?? {}) as Record<string, unknown>;

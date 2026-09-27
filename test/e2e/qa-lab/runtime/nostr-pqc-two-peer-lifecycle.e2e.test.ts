@@ -386,14 +386,15 @@ describe("Nostr PQC two-Gateway public lifecycle", () => {
           status: 200,
           body: { ok: true, updated: true },
         });
-        // PIN writes trigger an asynchronous channel restart. HTTP 200 only
-        // confirms persistence, so wait until each Gateway applies its revision.
+        // A confirmed pin is applied to the running buses before HTTP 200.
+        // Sending immediately must not encounter a channel restart gap.
+        await send("PQC_GATEWAY_REQUEST");
         await Promise.all([
           waitForConfigApplied(aliceClient, aliceBeforePin.configRevisionHash),
           waitForConfigApplied(bobClient, bobBeforePin.configRevisionHash),
         ]);
-
-        await send("PQC_GATEWAY_REQUEST");
+        expect(aliceGateway.logs()).not.toContain("[default] Nostr provider stopped");
+        expect(bobGateway.logs()).not.toContain("[default] Nostr provider stopped");
         await vi.waitFor(
           () => {
             expect(
@@ -500,8 +501,9 @@ describe("Nostr PQC two-Gateway public lifecycle", () => {
           status: 200,
           body: { ok: true, updated: true },
         });
-        await waitForConfigApplied(aliceClient, aliceBeforeRotationPin.configRevisionHash);
         await send("PQC_ROTATED_KEY_REQUEST");
+        await waitForConfigApplied(aliceClient, aliceBeforeRotationPin.configRevisionHash);
+        expect(aliceGateway.logs()).not.toContain("[default] Nostr provider stopped");
         await vi.waitFor(
           () => {
             expect(providerRequests.some((body) => body.includes("PQC_ROTATED_KEY_REQUEST"))).toBe(

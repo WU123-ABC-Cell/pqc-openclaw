@@ -18,7 +18,7 @@ export type RuntimeConfigSnapshotRefreshParams = RuntimeConfigSnapshotRefreshOpt
 type MaybePromise<T> = T | Promise<T>;
 
 export type ConfigWriteAfterWrite =
-  | { mode: "auto" }
+  | { mode: "auto"; inPlaceAppliedPaths?: string[] }
   | { mode: "restart"; reason: string }
   | { mode: "none"; reason: string };
 
@@ -26,6 +26,7 @@ export type ConfigWriteFollowUp =
   | {
       mode: "auto";
       requiresRestart: false;
+      inPlaceAppliedPaths?: string[];
     }
   | {
       mode: "none";
@@ -65,6 +66,7 @@ export function resolveConfigWriteFollowUp(
   return {
     mode: "auto",
     requiresRestart: false,
+    ...(resolved.inPlaceAppliedPaths ? { inPlaceAppliedPaths: resolved.inPlaceAppliedPaths } : {}),
   };
 }
 

@@ -27,7 +27,11 @@ import {
   resetSkillsRefreshStateForTest,
 } from "../skills/runtime/refresh-state.js";
 import { createTestRegistry } from "../test-utils/channel-plugins.js";
-import { diffConfigPaths, diffGatewayReloadPaths } from "./config-diff.js";
+import {
+  diffConfigPaths,
+  diffGatewayReloadPaths,
+  expandChangedPathsForAppliedLeaves,
+} from "./config-diff.js";
 import {
   buildGatewayReloadPlan,
   type ChannelKind,
@@ -180,6 +184,26 @@ describe("diffConfigPaths", () => {
     const changedPaths = diffGatewayReloadPaths(prev, next);
     expect(changedPaths).toEqual(["mcp", "mcp.apps"]);
     expect(buildGatewayReloadPlan(changedPaths).restartReasons).toContain("mcp.apps");
+  });
+
+  it("expands a newly added map without hiding a concurrent sibling change", () => {
+    const previous = { channels: { nostr: { enabled: true } } };
+    const next = {
+      channels: {
+        nostr: {
+          enabled: true,
+          mlKemPeerPublicKeys: { alice: "applied", bob: "external" },
+        },
+      },
+    };
+    expect(
+      expandChangedPathsForAppliedLeaves(previous, next, diffConfigPaths(previous, next), [
+        "channels.nostr.mlKemPeerPublicKeys.alice",
+      ]),
+    ).toEqual([
+      "channels.nostr.mlKemPeerPublicKeys.alice",
+      "channels.nostr.mlKemPeerPublicKeys.bob",
+    ]);
   });
 });
 
@@ -3171,6 +3195,75 @@ describe("startGatewayConfigReloader", () => {
     expect(promotionReason).toBe("in-process-write");
 
     await harness.reloader.stop();
+  });
+
+  it("commits an in-place pin write without suppressing external Nostr edits", async () => {
+    const peer = "a".repeat(64);
+    const initialConfig = {
+      gateway: { reload: {} },
+      channels: { nostr: { enabled: true } },
+    } as OpenClawConfig;
+    const pinnedConfig = {
+      gateway: { reload: {} },
+      channels: { nostr: { enabled: true, mlKemPeerPublicKeys: { [peer]: "first" } } },
+    } as OpenClawConfig;
+    const externallyEditedConfig = {
+      gateway: { reload: {} },
+      channels: { nostr: { enabled: true, mlKemPeerPublicKeys: { [peer]: "second" } } },
+    } as OpenClawConfig;
+    const readSnapshot = vi
+      .fn<() => Promise<ConfigFileSnapshot>>()
+      .mockResolvedValueOnce(makeSnapshot({ config: pinnedConfig, hash: "pin-write" }))
+      .mockResolvedValueOnce(makeSnapshot({ config: externallyEditedConfig, hash: "external" }));
+    const harness = createReloaderHarness(readSnapshot, { initialConfig });
+    const registry = createTestRegistry([
+      {
+        pluginId: "nostr",
+        plugin: {
+          id: "nostr",
+          meta: {
+            id: "nostr",
+            label: "Nostr",
+            selectionLabel: "Nostr",
+            docsPath: "/channels/nostr",
+            blurb: "test",
+          },
+          capabilities: { chatTypes: ["direct"] },
+          config: { listAccountIds: () => ["default"], resolveAccount: () => ({}) },
+          reload: { configPrefixes: ["channels.nostr"] },
+        } satisfies ChannelPlugin,
+        source: "test",
+      },
+    ]);
+    setActivePluginRegistry(registry);
+    try {
+      harness.emitWrite({
+        configPath: "/tmp/openclaw.json",
+        sourceConfig: pinnedConfig,
+        runtimeConfig: pinnedConfig,
+        persistedHash: "pin-write",
+        revision: 1,
+        fingerprint: "pin-write",
+        sourceFingerprint: "pin-write",
+        writtenAtMs: Date.now(),
+        afterWrite: {
+          mode: "auto",
+          inPlaceAppliedPaths: [`channels.nostr.mlKemPeerPublicKeys.${peer}`],
+        },
+      });
+      await vi.runOnlyPendingTimersAsync();
+      expect(harness.onNoopConfigCommit).toHaveBeenCalledOnce();
+      expect(harness.onConfigApplied).toHaveBeenCalledOnce();
+      expect(harness.onHotReload).not.toHaveBeenCalled();
+
+      harness.watcher.emit("change");
+      await vi.runOnlyPendingTimersAsync();
+      const [externalPlan] = getOnlyHotReloadCall(harness);
+      expect(externalPlan.restartChannels).toContain("nostr");
+    } finally {
+      resetPluginRuntimeStateForTest();
+      await harness.reloader.stop();
+    }
   });
 
   it.each([
