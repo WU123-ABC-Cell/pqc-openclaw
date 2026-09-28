@@ -45,7 +45,7 @@ The trusted operator API exposes these routes under `/api/channels/nostr/:accoun
 - `GET /pqc-keys/:peerPubkey` discovers the latest signature-valid candidate and reports `pinned`, `untrusted-first-key`, `untrusted-rotation`, or `rotation-chain-mismatch`.
 - `PUT /pqc-keys/:peerPubkey` pins a candidate. The JSON body must contain the separately confirmed `fingerprint` and `expectedCurrentFingerprint` (`null` for first use).
 
-A successful PUT returns `200` when the running Nostr channel has applied the pin, so an immediate GET reports the active pinned fingerprint. If the pin was saved but no channel was running to accept it, PUT returns `202` with `runtimeApplied: false`; wait for the channel to start or reload before treating the key as active. Check the gateway reload setting and channel status if it stays pending.
+A successful PUT returns `200` when the running Nostr channel has applied the pin, so an immediate GET reports the active pinned fingerprint. Discovery requires a running channel; GET and PUT return `503` without one, and PUT does not save a pin. Start the channel and retry discovery. If the channel stops after discovery but the pin is saved, PUT returns `202` with `runtimeApplied: false`; wait for the channel to start or reload before treating the key as active.
 
 Mutation routes require a loopback request and the `operator.admin` gateway scope. They refetch the announcement before writing and use compare-and-set config updates. A rotation is accepted only when the new signed announcement's `previousFingerprint` equals the current pin. A discontinuous or emergency rotation must be handled out of band by editing the pinned config after independent verification.
 

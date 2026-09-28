@@ -69,6 +69,8 @@ interface NostrProfileHttpContext {
 const RATE_LIMIT_WINDOW_MS = 60_000; // 1 minute
 const RATE_LIMIT_MAX_REQUESTS = 5; // 5 requests per minute
 const RATE_LIMIT_MAX_TRACKED_KEYS = 2_048;
+const PQC_DISCOVERY_UNAVAILABLE_ERROR =
+  "Nostr channel is not running; start it and retry key discovery";
 const profileRateLimiter = createFixedWindowRateLimiter({
   windowMs: RATE_LIMIT_WINDOW_MS,
   maxRequests: RATE_LIMIT_MAX_REQUESTS,
@@ -416,6 +418,10 @@ async function handleDiscoverPqcKey(
   res: ServerResponse,
 ): Promise<true> {
   const result = await discoverNostrPeerPqcKey(accountId, peerPubkey);
+  if (!result) {
+    sendJson(res, 503, { ok: false, error: PQC_DISCOVERY_UNAVAILABLE_ERROR });
+    return true;
+  }
   const pinnedKey = ctx.getPinnedPqcKey(accountId, peerPubkey);
   const pinnedFingerprint = pinnedKey ? fingerprintMlKemPublicKey(pinnedKey) : null;
   const candidate = result.announcement;
@@ -478,6 +484,9 @@ async function handlePinPqcKey(
       return { status: 409, error: "Pinned key changed; discover and confirm again" } as const;
     }
     const discovery = await discoverNostrPeerPqcKey(accountId, peerPubkey);
+    if (!discovery) {
+      return { status: 503, error: PQC_DISCOVERY_UNAVAILABLE_ERROR } as const;
+    }
     const candidate = discovery.announcement;
     if (!candidate) {
       return { status: 404, error: "No valid signed PQC key announcement found" } as const;

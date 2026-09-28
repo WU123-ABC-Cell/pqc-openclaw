@@ -221,6 +221,132 @@ describe("Nostr PQC two-Gateway public lifecycle", () => {
   });
 
   it(
+    "rejects a pin while the channel is stopped, then pins after restart",
+    { timeout: 120_000 },
+    async () => {
+      relay = await LocalRelay.start();
+      const alice = createIdentity();
+      const bob = createIdentity();
+      identities.push(alice, bob);
+
+      for (const [name, local] of [
+        ["alice", alice],
+        ["bob", bob],
+      ] as const) {
+        const instance = await createOpenClawTestInstance({
+          name: `nostr-pqc-restart-${name}`,
+          env: {
+            OPENCLAW_SKIP_CHANNELS: undefined,
+            OPENCLAW_SKIP_PROVIDERS: undefined,
+            OPENCLAW_TEST_MINIMAL_GATEWAY: undefined,
+          },
+          config: {
+            plugins: { entries: { nostr: { enabled: true } } },
+            agents: { defaults: { skipBootstrap: true } },
+            channels: {
+              nostr: {
+                enabled: true,
+                privateKey: local.nostrPrivate,
+                mlKemSecretKey: local.encodedMlKemSecret,
+                relays: [relay.url],
+                dmPolicy: "disabled",
+              },
+            },
+          },
+        });
+        instances.push(instance);
+        await instance.startGateway();
+      }
+      const [aliceGateway, bobGateway] = instances;
+      if (!aliceGateway || !bobGateway) {
+        throw new Error("both isolated Gateways must have started");
+      }
+      const client = await connectGatewayClient({
+        url: aliceGateway.url,
+        token: aliceGateway.gatewayToken,
+        role: "operator",
+        scopes: ["operator.admin", "operator.read", "operator.write"],
+      });
+      try {
+        await vi.waitFor(
+          () => {
+            expect(
+              relay?.events.some(
+                (event) => event.kind === 30078 && event.pubkey === bob.nostrPublic,
+              ),
+            ).toBe(true);
+          },
+          { timeout: 30_000 },
+        );
+        const alicePath = `/api/channels/nostr/default/pqc-keys/${bob.nostrPublic}`;
+        const discovery = await requestPqc(aliceGateway, alicePath);
+        expect(discovery.status).toBe(200);
+        const fingerprint = (discovery.body.announcement as { fingerprint: string }).fingerprint;
+
+        await client.request("channels.stop", { channel: "nostr", accountId: "default" });
+        const before = await client.request<{ configRevisionHash: string }>("config.get", {});
+        const stoppedDiscovery = await requestPqc(aliceGateway, alicePath);
+        expect(stoppedDiscovery, aliceGateway.logs()).toMatchObject({
+          status: 503,
+          body: { ok: false },
+        });
+        const rejectedPin = await requestPqc(aliceGateway, alicePath, "PUT", {
+          fingerprint,
+          expectedCurrentFingerprint: null,
+        });
+        expect(rejectedPin, aliceGateway.logs()).toMatchObject({
+          status: 503,
+          body: { ok: false },
+        });
+        const after = await client.request<{ configRevisionHash: string }>("config.get", {});
+        expect(after.configRevisionHash).toBe(before.configRevisionHash);
+
+        await client.request("channels.start", { channel: "nostr", accountId: "default" });
+        await vi.waitFor(
+          async () => {
+            expect((await requestPqc(aliceGateway, alicePath)).status).toBe(200);
+          },
+          { timeout: 30_000 },
+        );
+        const confirmedPin = await requestPqc(aliceGateway, alicePath, "PUT", {
+          fingerprint,
+          expectedCurrentFingerprint: null,
+        });
+        expect(confirmedPin, aliceGateway.logs()).toMatchObject({
+          status: 200,
+          body: { ok: true, updated: true },
+        });
+        expect((await requestPqc(aliceGateway, alicePath)).body).toMatchObject({
+          pinnedFingerprint: fingerprint,
+          trustState: "pinned",
+        });
+        await client.request("send", {
+          channel: "nostr",
+          accountId: "default",
+          to: bob.nostrPublic,
+          message: "PQC_AFTER_CHANNEL_RESTART",
+          idempotencyKey: randomUUID(),
+        });
+        await vi.waitFor(
+          () => {
+            expect(
+              relay?.events.some(
+                (event) =>
+                  event.kind === 4444 &&
+                  event.pubkey === alice.nostrPublic &&
+                  event.content.startsWith("ocpqc1:"),
+              ),
+            ).toBe(true);
+          },
+          { timeout: 30_000 },
+        );
+      } finally {
+        await disconnectGatewayClient(client);
+      }
+    },
+  );
+
+  it(
     "requires confirmed pins, rejects stale keys, and resumes after a chained rotation",
     { timeout: 180_000 },
     async () => {

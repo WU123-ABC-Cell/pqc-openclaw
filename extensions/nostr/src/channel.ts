@@ -264,10 +264,10 @@ export async function discoverNostrPeerPqcKey(
   announcement: NostrPqcKeyAnnouncement | null;
   relaysQueried: string[];
   sourceRelays: string[];
-}> {
+} | null> {
   const bus = getActiveNostrBuses().get(accountId);
   if (!bus) {
-    throw new Error(`Nostr bus not running for account ${accountId}`);
+    return null;
   }
   return await bus.discoverPeerPqcKey(normalizePubkey(pubkey));
 }

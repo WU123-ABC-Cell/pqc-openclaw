@@ -352,6 +352,22 @@ describe("nostr-profile-http", () => {
       expect(data.announcement.fingerprint).toBe(fingerprint);
     });
 
+    it("reports an unavailable channel without claiming discovery succeeded", async () => {
+      vi.mocked(discoverNostrPeerPqcKey).mockResolvedValue(null);
+      const { res, run } = createProfileHttpHarness(
+        "GET",
+        `/api/channels/nostr/default/pqc-keys/${TEST_HEX_PUBLIC_KEY}`,
+      );
+
+      await run();
+
+      expect(res["_getStatusCode"]()).toBe(503);
+      expect(JSON.parse(res["_getData"]())).toMatchObject({
+        ok: false,
+        error: expect.stringContaining("start it and retry"),
+      });
+    });
+
     it("pins a confirmed first key with compare-and-set semantics", async () => {
       mockDiscovery();
       const { ctx, res, run } = createProfileHttpHarness(
@@ -370,6 +386,20 @@ describe("nostr-profile-http", () => {
         TEST_ML_KEM_PUBLIC_KEY,
         null,
       );
+    });
+
+    it("does not write a pin when no channel can discover its announcement", async () => {
+      vi.mocked(discoverNostrPeerPqcKey).mockResolvedValue(null);
+      const { ctx, res, run } = createProfileHttpHarness(
+        "PUT",
+        `/api/channels/nostr/default/pqc-keys/${TEST_HEX_PUBLIC_KEY}`,
+        { body: { fingerprint, expectedCurrentFingerprint: null } },
+      );
+
+      await run();
+
+      expect(res["_getStatusCode"]()).toBe(503);
+      expect(ctx.updatePinnedPqcKey).not.toHaveBeenCalled();
     });
 
     it("reports a persisted pin as pending when no running bus accepted it", async () => {
