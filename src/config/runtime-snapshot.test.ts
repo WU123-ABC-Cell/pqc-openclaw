@@ -1,6 +1,7 @@
 // Verifies runtime config snapshots preserve normalized public settings.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  createRuntimeConfigWriteNotification,
   finalizeRuntimeSnapshotWrite,
   getRuntimeConfigAppliedHash,
   hashRuntimeConfigValue,
@@ -109,6 +110,24 @@ describe("runtime snapshot state", () => {
 
     resetConfigRuntimeState();
     expect(getRuntimeConfigAppliedHash()).toBeNull();
+  });
+
+  it("records only paths actually applied by a committed writer", () => {
+    const applyInPlace = vi.fn(() => ["channels.nostr.mlKemPeerPublicKeys.peer"]);
+    const config = { channels: { nostr: { enabled: true } } } as OpenClawConfig;
+    const event = createRuntimeConfigWriteNotification({
+      configPath: "/tmp/openclaw.json",
+      sourceConfig: config,
+      runtimeConfig: config,
+      persistedHash: "committed",
+      afterWrite: { mode: "auto", applyInPlace },
+    });
+
+    expect(applyInPlace).toHaveBeenCalledOnce();
+    expect(event.afterWrite).toEqual({
+      mode: "auto",
+      inPlaceAppliedPaths: ["channels.nostr.mlKemPeerPublicKeys.peer"],
+    });
   });
 
   it("hashes resolved source content independently from root-file revision metadata", () => {

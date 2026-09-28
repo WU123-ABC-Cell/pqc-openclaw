@@ -18,7 +18,7 @@ export type RuntimeConfigSnapshotRefreshParams = RuntimeConfigSnapshotRefreshOpt
 type MaybePromise<T> = T | Promise<T>;
 
 export type ConfigWriteAfterWrite =
-  | { mode: "auto"; inPlaceAppliedPaths?: string[] }
+  | { mode: "auto"; inPlaceAppliedPaths?: string[]; applyInPlace?: () => string[] }
   | { mode: "restart"; reason: string }
   | { mode: "none"; reason: string };
 
@@ -252,6 +252,13 @@ export function createRuntimeConfigWriteNotification(params: {
   preparedCandidate?: RuntimeConfigWritePreparedCandidate;
   preparedCandidatesByOwner?: ReadonlyMap<symbol, RuntimeConfigWritePreparedCandidate>;
 }): RuntimeConfigWriteNotification {
+  const afterWrite =
+    params.afterWrite?.mode === "auto" && params.afterWrite.applyInPlace
+      ? {
+          mode: "auto" as const,
+          inPlaceAppliedPaths: params.afterWrite.applyInPlace(),
+        }
+      : params.afterWrite;
   const metadata =
     params.runtimeConfig === runtimeConfigSnapshot && runtimeConfigSnapshotMetadata
       ? runtimeConfigSnapshotMetadata
@@ -270,7 +277,7 @@ export function createRuntimeConfigWriteNotification(params: {
     fingerprint: metadata.fingerprint,
     sourceFingerprint: metadata.sourceFingerprint,
     writtenAtMs: params.writtenAtMs ?? Date.now(),
-    afterWrite: params.afterWrite,
+    afterWrite,
     ...(params.runtimeRefresh ? { runtimeRefresh: params.runtimeRefresh } : {}),
     ...(params.preparedCandidate ? { preparedCandidate: params.preparedCandidate } : {}),
     ...(params.preparedCandidatesByOwner

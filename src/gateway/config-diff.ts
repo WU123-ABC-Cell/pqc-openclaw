@@ -55,6 +55,12 @@ export function diffGatewayReloadPaths(
   ];
 }
 
+export function configValueAtPath(config: unknown, path: string): unknown {
+  return path
+    .split(".")
+    .reduce<unknown>((value, key) => (isPlainObject(value) ? value[key] : undefined), config);
+}
+
 /** Expand an added object only as far as needed to distinguish writer-applied leaves. */
 export function expandChangedPathsForAppliedLeaves(
   previous: OpenClawConfig,
@@ -65,10 +71,6 @@ export function expandChangedPathsForAppliedLeaves(
   if (appliedPaths.length === 0) {
     return changedPaths;
   }
-  const valueAt = (config: unknown, path: string): unknown =>
-    path
-      .split(".")
-      .reduce<unknown>((value, key) => (isPlainObject(value) ? value[key] : undefined), config);
   const expand = (path: string, before: unknown, after: unknown): string[] => {
     if (!appliedPaths.some((applied) => applied.startsWith(`${path}.`))) {
       return [path];
@@ -89,5 +91,7 @@ export function expandChangedPathsForAppliedLeaves(
       },
     );
   };
-  return changedPaths.flatMap((path) => expand(path, valueAt(previous, path), valueAt(next, path)));
+  return changedPaths.flatMap((path) =>
+    expand(path, configValueAtPath(previous, path), configValueAtPath(next, path)),
+  );
 }

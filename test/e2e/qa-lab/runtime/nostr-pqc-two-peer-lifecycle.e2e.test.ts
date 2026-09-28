@@ -374,6 +374,20 @@ describe("Nostr PQC two-Gateway public lifecycle", () => {
           fingerprint: bobAnnouncement.fingerprint,
           expectedCurrentFingerprint: null,
         });
+        const aliceImmediatelyAfterPin = await requestPqc(aliceGateway, alicePath);
+        expect(aliceImmediatelyAfterPin.status).toBe(200);
+        expect(aliceImmediatelyAfterPin.body).toMatchObject({
+          pinnedFingerprint: bobAnnouncement.fingerprint,
+          trustState: "pinned",
+        });
+        const duplicateAlicePin = await requestPqc(aliceGateway, alicePath, "PUT", {
+          fingerprint: bobAnnouncement.fingerprint,
+          expectedCurrentFingerprint: bobAnnouncement.fingerprint,
+        });
+        expect(duplicateAlicePin, aliceGateway.logs()).toMatchObject({
+          status: 200,
+          body: { ok: true, updated: false },
+        });
         const bobPin = await requestPqc(bobGateway, bobPath, "PUT", {
           fingerprint: aliceAnnouncement.fingerprint,
           expectedCurrentFingerprint: null,
@@ -500,6 +514,10 @@ describe("Nostr PQC two-Gateway public lifecycle", () => {
         expect(confirmedRotation, aliceGateway.logs()).toMatchObject({
           status: 200,
           body: { ok: true, updated: true },
+        });
+        expect((await requestPqc(aliceGateway, alicePath)).body).toMatchObject({
+          pinnedFingerprint: rotatedAnnouncement.fingerprint,
+          trustState: "pinned",
         });
         await send("PQC_ROTATED_KEY_REQUEST");
         await waitForConfigApplied(aliceClient, aliceBeforeRotationPin.configRevisionHash);

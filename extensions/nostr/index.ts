@@ -30,6 +30,15 @@ function updateActiveNostrPeerPqcKey() {
   });
 }
 
+function readActiveNostrPeerPqcKey() {
+  return loadBundledEntryExportSync<
+    (accountId: string, peerPubkey: string) => { active: boolean; publicKey?: string }
+  >(import.meta.url, {
+    specifier: "./api.js",
+    exportName: "readActiveNostrPeerPqcKey",
+  });
+}
+
 function resolveNostrAccount(params: { cfg: unknown; accountId: string }) {
   return loadBundledEntryExportSync<
     (params: { cfg: unknown; accountId: string }) => ResolvedNostrAccount
@@ -92,6 +101,10 @@ export default defineBundledChannelEntry({
         };
       },
       getPinnedPqcKey: (accountId: string, peerPubkey: string) => {
+        const activePin = readActiveNostrPeerPqcKey()(accountId, peerPubkey);
+        if (activePin.active) {
+          return activePin.publicKey;
+        }
         const runtime = getNostrRuntime();
         const cfg = runtime.config.current() as OpenClawConfig;
         const account = resolveNostrAccount({ cfg, accountId });
@@ -105,12 +118,19 @@ export default defineBundledChannelEntry({
       ) => {
         const runtime = getNostrRuntime();
         let updated = false;
+        let appliedToBus = false;
         await runtime.config.mutateConfigFile({
-          // This exact pin is applied to the active bus below. Other Nostr
-          // config edits must retain their normal channel-restart behavior.
+          // Apply only after persistence succeeds. If no bus accepted the key,
+          // keep normal Nostr reload behavior instead of claiming a no-op.
           afterWrite: {
             mode: "auto",
-            inPlaceAppliedPaths: [`channels.nostr.mlKemPeerPublicKeys.${peerPubkey}`],
+            applyInPlace: () => {
+              if (!updated) {
+                return [];
+              }
+              appliedToBus = updateActiveNostrPeerPqcKey()(accountId, peerPubkey, publicKey);
+              return appliedToBus ? [`channels.nostr.mlKemPeerPublicKeys.${peerPubkey}`] : [];
+            },
           },
           mutate: (draft) => {
             const channels = (draft.channels ?? {}) as Record<string, unknown>;
@@ -132,10 +152,7 @@ export default defineBundledChannelEntry({
             updated = true;
           },
         });
-        if (updated) {
-          updateActiveNostrPeerPqcKey()(accountId, peerPubkey, publicKey);
-        }
-        return updated;
+        return updated ? (appliedToBus ? true : "pending") : false;
       },
       log: api.logger,
     });

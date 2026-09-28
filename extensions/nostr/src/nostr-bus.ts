@@ -149,6 +149,8 @@ export interface NostrBusHandle {
   }>;
   /** Apply a config-committed peer key to the running bus without a reload race. */
   updatePinnedPeerPqcKey: (pubkey: string, publicKey: string) => void;
+  /** Read the key currently used for outbound messages. */
+  getPinnedPeerPqcKey: (pubkey: string) => string | undefined;
 }
 
 // ============================================================================
@@ -830,6 +832,10 @@ export async function startNostrBus(options: NostrBusOptions): Promise<NostrBusH
     peerMlKemPublicKeys.set(pubkey, nextKey);
     previousKey?.fill(0);
   };
+  const getPinnedPeerPqcKey = (pubkey: string): string | undefined => {
+    const key = peerMlKemPublicKeys.get(pubkey);
+    return key ? encodeMlKemKey(key) : undefined;
+  };
 
   let closePromise: Promise<void> | undefined;
   const close = (): Promise<void> => {
@@ -858,6 +864,7 @@ export async function startNostrBus(options: NostrBusOptions): Promise<NostrBusH
     publishPqcKeyAnnouncement,
     discoverPeerPqcKey,
     updatePinnedPeerPqcKey,
+    getPinnedPeerPqcKey,
   };
 }
 

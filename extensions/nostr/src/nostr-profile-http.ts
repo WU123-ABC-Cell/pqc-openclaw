@@ -53,7 +53,7 @@ interface NostrProfileHttpContext {
     peerPubkey: string,
     publicKey: string,
     expectedCurrentKey: string | null,
-  ) => Promise<boolean>;
+  ) => Promise<boolean | "pending">;
   /** Logger */
   log?: {
     info: (msg: string) => void;
@@ -507,6 +507,9 @@ async function handlePinPqcKey(
       candidate.publicKey,
       currentKey,
     );
+    if (updated === "pending") {
+      return { status: 202, candidate, updated: true, runtimeApplied: false } as const;
+    }
     return updated
       ? ({ status: 200, candidate, updated: true } as const)
       : ({ status: 409, error: "Pinned key changed during update" } as const);
@@ -518,6 +521,7 @@ async function handlePinPqcKey(
     sendJson(res, outcome.status, {
       ok: true,
       updated: outcome.updated,
+      ...("runtimeApplied" in outcome ? { runtimeApplied: outcome.runtimeApplied } : {}),
       announcement: outcome.candidate,
     });
   }

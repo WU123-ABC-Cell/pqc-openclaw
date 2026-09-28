@@ -372,6 +372,27 @@ describe("nostr-profile-http", () => {
       );
     });
 
+    it("reports a persisted pin as pending when no running bus accepted it", async () => {
+      mockDiscovery();
+      const { res, run } = createProfileHttpHarness(
+        "PUT",
+        `/api/channels/nostr/default/pqc-keys/${TEST_HEX_PUBLIC_KEY}`,
+        {
+          body: { fingerprint, expectedCurrentFingerprint: null },
+          ctx: { updatePinnedPqcKey: vi.fn().mockResolvedValue("pending") },
+        },
+      );
+
+      await run();
+
+      expect(res["_getStatusCode"]()).toBe(202);
+      expect(JSON.parse(res["_getData"]())).toMatchObject({
+        ok: true,
+        updated: true,
+        runtimeApplied: false,
+      });
+    });
+
     it("rejects a well-formed fingerprint that does not match the relay candidate", async () => {
       mockDiscovery();
       const { ctx, res, run } = createProfileHttpHarness(

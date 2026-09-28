@@ -411,3 +411,11 @@ export function updateActiveNostrPeerPqcKey(
   bus.updatePinnedPeerPqcKey(peerPubkey, publicKey);
   return true;
 }
+
+export function readActiveNostrPeerPqcKey(
+  accountId: string,
+  peerPubkey: string,
+): { active: boolean; publicKey?: string } {
+  const bus = activeBuses.get(accountId);
+  return bus ? { active: true, publicKey: bus.getPinnedPeerPqcKey(peerPubkey) } : { active: false };
+}

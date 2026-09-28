@@ -3197,23 +3197,32 @@ describe("startGatewayConfigReloader", () => {
     await harness.reloader.stop();
   });
 
-  it("commits an in-place pin write without suppressing external Nostr edits", async () => {
-    const peer = "a".repeat(64);
+  it("coalesces two in-place pins without suppressing external Nostr edits", async () => {
+    const peerA = "a".repeat(64);
+    const peerB = "b".repeat(64);
     const initialConfig = {
       gateway: { reload: {} },
       channels: { nostr: { enabled: true } },
     } as OpenClawConfig;
     const pinnedConfig = {
       gateway: { reload: {} },
-      channels: { nostr: { enabled: true, mlKemPeerPublicKeys: { [peer]: "first" } } },
+      channels: { nostr: { enabled: true, mlKemPeerPublicKeys: { [peerA]: "first" } } },
+    } as OpenClawConfig;
+    const twoPinsConfig = {
+      gateway: { reload: {} },
+      channels: {
+        nostr: { enabled: true, mlKemPeerPublicKeys: { [peerA]: "first", [peerB]: "also-first" } },
+      },
     } as OpenClawConfig;
     const externallyEditedConfig = {
       gateway: { reload: {} },
-      channels: { nostr: { enabled: true, mlKemPeerPublicKeys: { [peer]: "second" } } },
+      channels: {
+        nostr: { enabled: true, mlKemPeerPublicKeys: { [peerA]: "second", [peerB]: "also-first" } },
+      },
     } as OpenClawConfig;
     const readSnapshot = vi
       .fn<() => Promise<ConfigFileSnapshot>>()
-      .mockResolvedValueOnce(makeSnapshot({ config: pinnedConfig, hash: "pin-write" }))
+      .mockResolvedValueOnce(makeSnapshot({ config: twoPinsConfig, hash: "two-pin-write" }))
       .mockResolvedValueOnce(makeSnapshot({ config: externallyEditedConfig, hash: "external" }));
     const harness = createReloaderHarness(readSnapshot, { initialConfig });
     const registry = createTestRegistry([
@@ -3248,7 +3257,21 @@ describe("startGatewayConfigReloader", () => {
         writtenAtMs: Date.now(),
         afterWrite: {
           mode: "auto",
-          inPlaceAppliedPaths: [`channels.nostr.mlKemPeerPublicKeys.${peer}`],
+          inPlaceAppliedPaths: [`channels.nostr.mlKemPeerPublicKeys.${peerA}`],
+        },
+      });
+      harness.emitWrite({
+        configPath: "/tmp/openclaw.json",
+        sourceConfig: twoPinsConfig,
+        runtimeConfig: twoPinsConfig,
+        persistedHash: "two-pin-write",
+        revision: 2,
+        fingerprint: "two-pin-write",
+        sourceFingerprint: "two-pin-write",
+        writtenAtMs: Date.now(),
+        afterWrite: {
+          mode: "auto",
+          inPlaceAppliedPaths: [`channels.nostr.mlKemPeerPublicKeys.${peerB}`],
         },
       });
       await vi.runOnlyPendingTimersAsync();

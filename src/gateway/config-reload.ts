@@ -32,6 +32,7 @@ import { clearPluginMetadataLifecycleCaches } from "../plugins/plugin-metadata-l
 import { bumpSkillsSnapshotVersion } from "../skills/runtime/refresh-state.js";
 import { createConfigAppliedRevisionTracker } from "./config-applied-revision.js";
 import {
+  configValueAtPath,
   diffConfigPaths,
   diffGatewayReloadPaths,
   expandChangedPathsForAppliedLeaves,
@@ -1117,15 +1118,39 @@ export function startGatewayConfigReloader(opts: {
               watcherIntentCandidate?.afterWrite?.mode === "restart"
             ? watcherIntentCandidate.afterWrite
             : undefined;
+      const earlierAppliedPaths = [
+        pendingInProcessConfig,
+        watcherIntentCameFromPendingWrite ? watcherIntentCandidate : null,
+      ].flatMap((candidate) =>
+        candidate?.afterWrite?.mode === "auto"
+          ? (candidate.afterWrite.inPlaceAppliedPaths ?? []).filter(
+              (path) =>
+                diffConfigPaths(
+                  configValueAtPath(candidate.compareConfig, path),
+                  configValueAtPath(event.sourceConfig, path),
+                ).length === 0,
+            )
+          : [],
+      );
       watcherIntentCandidate = null;
       watcherIntentCameFromPendingWrite = false;
       // Pending writes coalesce to the latest config, but a newer non-restart intent
       // must not erase a restart already required by an unapplied committed write,
       // including one moved into watcher ownership by its filesystem echo.
-      const afterWrite =
+      const afterWrite: ConfigWriteNotification["afterWrite"] =
         pendingRestartIntent && event.afterWrite?.mode !== "restart"
           ? pendingRestartIntent
-          : event.afterWrite;
+          : event.afterWrite?.mode === "auto"
+            ? {
+                mode: "auto",
+                inPlaceAppliedPaths: [
+                  ...new Set([
+                    ...earlierAppliedPaths,
+                    ...(event.afterWrite.inPlaceAppliedPaths ?? []),
+                  ]),
+                ],
+              }
+            : event.afterWrite;
       pendingInProcessConfig = {
         config: event.runtimeConfig,
         compareConfig: event.sourceConfig,

@@ -9,6 +9,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   getActiveNostrBuses,
+  readActiveNostrPeerPqcKey,
   startNostrGatewayAccount,
   updateActiveNostrPeerPqcKey,
 } from "./gateway.js";
@@ -36,6 +37,7 @@ function createMockBus() {
       failures: [],
     })),
     updatePinnedPeerPqcKey: vi.fn(),
+    getPinnedPeerPqcKey: vi.fn(() => "encoded-key"),
   };
 }
 
@@ -103,9 +105,14 @@ describe("nostr gateway lifecycle", () => {
 
     expect(updated).toBe(true);
     expect(bus.updatePinnedPeerPqcKey).toHaveBeenCalledWith("a".repeat(64), "encoded-key");
+    expect(readActiveNostrPeerPqcKey("default", "a".repeat(64))).toEqual({
+      active: true,
+      publicKey: "encoded-key",
+    });
 
     abort.abort();
     await task;
+    expect(readActiveNostrPeerPqcKey("default", "a".repeat(64))).toEqual({ active: false });
   });
 
   it("stops immediately when startAccount receives an already-aborted signal", async () => {
