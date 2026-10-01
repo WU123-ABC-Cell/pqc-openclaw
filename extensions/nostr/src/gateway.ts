@@ -11,14 +11,11 @@ import { createChannelPairingController } from "openclaw/plugin-sdk/channel-pair
 import { attachChannelToResult } from "openclaw/plugin-sdk/channel-send-result";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { channelReadyPatch } from "openclaw/plugin-sdk/gateway-runtime";
-import {
-  chunkTextForOutbound,
-  sanitizeAssistantVisibleText,
-  stripMarkdown,
-} from "openclaw/plugin-sdk/text-chunking";
+import { sanitizeAssistantVisibleText, stripMarkdown } from "openclaw/plugin-sdk/text-chunking";
 import type { ChannelOutboundAdapter, ChannelPlugin } from "./channel-api.js";
 import type { MetricEvent, MetricsSnapshot } from "./metrics.js";
 import { startNostrBus, type NostrBusHandle } from "./nostr-bus.js";
+import { chunkNostrOutboundText, NOSTR_OUTBOUND_TEXT_CHUNK_LIMIT } from "./nostr-dm-size.js";
 import { normalizePubkey } from "./nostr-key-utils.js";
 import { getNostrRuntime } from "./runtime.js";
 import { resolveDefaultNostrAccountId, type ResolvedNostrAccount } from "./types.js";
@@ -131,7 +128,7 @@ export const startNostrGatewayAccount: NostrGatewayStart = async (ctx) => {
 
   const authorizeSender = async (input: {
     senderId: string;
-    reply: (text: string) => Promise<void>;
+    replyPairingChallenge: (text: string) => Promise<void>;
   }): Promise<"allow" | "block" | "pairing"> => {
     const resolved = await resolveInboundAccess(input.senderId, "");
     if (resolved.senderAccess.decision === "allow") {
@@ -141,7 +138,8 @@ export const startNostrGatewayAccount: NostrGatewayStart = async (ctx) => {
       await pairing.issueChallenge({
         senderId: input.senderId,
         senderIdLine: `Your Nostr pubkey: ${input.senderId}`,
-        sendPairingReply: input.reply,
+        sendPairingReply: input.replyPairingChallenge,
+        resendExisting: true,
         onCreated: () => {
           ctx.log?.debug?.(`[${account.accountId}] nostr pairing request sender=${input.senderId}`);
         },
@@ -170,8 +168,8 @@ export const startNostrGatewayAccount: NostrGatewayStart = async (ctx) => {
         mlKemSecretKey: account.mlKemSecretKey,
         mlKemPeerPublicKeys: account.mlKemPeerPublicKeys,
         relays: account.relays,
-        authorizeSender: async ({ senderPubkey, reply }) =>
-          await authorizeSender({ senderId: senderPubkey, reply }),
+        authorizeSender: async ({ senderPubkey, replyPairingChallenge }) =>
+          await authorizeSender({ senderId: senderPubkey, replyPairingChallenge }),
         onMessage: async (senderPubkey, text, reply, meta, lifecycle) => {
           const resolvedAccess = await resolveInboundAccess(senderPubkey, text);
           if (resolvedAccess.senderAccess.decision !== "allow") {
@@ -359,10 +357,10 @@ export const nostrPairingTextAdapter = {
 
 export const nostrOutboundAdapter: NostrOutboundAdapter = {
   deliveryMode: "direct",
-  textChunkLimit: 4000,
+  textChunkLimit: NOSTR_OUTBOUND_TEXT_CHUNK_LIMIT,
   // The outbound planner ignores textChunkLimit unless the adapter also
   // supplies its chunker, causing oversized encrypted events to be rejected.
-  chunker: chunkTextForOutbound,
+  chunker: chunkNostrOutboundText,
   sanitizeText: ({ text }) => sanitizeAssistantVisibleText(text),
   deliveryCapabilities: {
     durableFinal: {
@@ -387,7 +385,13 @@ export const nostrOutboundAdapter: NostrOutboundAdapter = {
       throw new Error("Nostr send requires non-empty text after markdown stripping.");
     }
     const normalizedTo = normalizePubkey(to);
-    const eventId = await bus.sendDm(normalizedTo, message);
+    let eventId: string | undefined;
+    for (const chunk of chunkNostrOutboundText(message)) {
+      eventId = await bus.sendDm(normalizedTo, chunk);
+    }
+    if (!eventId) {
+      throw new Error("Nostr send produced no non-empty text chunks.");
+    }
     return attachChannelToResult("nostr", {
       to: normalizedTo,
       messageId: eventId,

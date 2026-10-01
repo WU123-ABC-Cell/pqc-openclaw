@@ -233,9 +233,9 @@ sudo bash /usr/local/bin/healthcheck-pqc.sh --json --skip-keyring
 curl -fsS http://127.0.0.1:18789/healthz
 # → 200 OK
 
-# 4. Verify the audit log is writing
-sudo tail -f /var/lib/pqc-openclaw/pqc-audit.log
-# Expect: PQC events on first wrap of a new key
+# 4. Inspect ordinary gateway logs for PQC warnings
+sudo journalctl -u pqc-openclaw --since "10 minutes ago" --no-pager | grep '\[PQC\]' || true
+# No separate pqc-audit.log is written; absence of an event is not a security check.
 
 # 5. Take a baseline backup
 sudo bash /usr/local/bin/backup-pqc.sh --label post-migration

@@ -19,6 +19,10 @@ import {
   generateWrappingKey,
   getDefaultKeyringFromEnv,
 } from "../security/keyring-provider.js";
+import {
+  assertPrivateWindowsWrapKeyDirectory,
+  assertPrivateWindowsWrapKeyFile,
+} from "../security/windows-wrap-key-acl.js";
 import { acquireDeviceIdentityCoordinator } from "./device-identity-coordinator.js";
 import {
   generateStoredDeviceIdentity,
@@ -148,6 +152,7 @@ function createFallbackFileKeyring(options: DeviceIdentityStoreOptions): FileKey
   const stateDir = resolveLegacyStateDir(options);
   const keyPath = path.join(stateDir, "wrap-key.b64");
   fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  assertPrivateWindowsWrapKeyDirectory(stateDir);
   try {
     fs.writeFileSync(keyPath, encodeBase64UrlKey(generateWrappingKey()), {
       encoding: "utf8",
@@ -166,6 +171,7 @@ function createFallbackFileKeyring(options: DeviceIdentityStoreOptions): FileKey
   if (process.platform !== "win32" && (keyStat.mode & 0o077) !== 0) {
     throw new Error(`Refusing device identity wrapping key with unsafe permissions: ${keyPath}`);
   }
+  assertPrivateWindowsWrapKeyFile(keyPath);
   return new FileKeyring(
     keyPath,
     options.env?.OPENCLAW_WRAP_KEY_ID ?? process.env.OPENCLAW_WRAP_KEY_ID ?? "file-keyring",

@@ -27,6 +27,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { munlockKey, protectKey } from "./mlock-helper.js";
 import { OsKeyring } from "./os-keyring.js";
+import { assertPrivateWindowsWrapKeyFile } from "./windows-wrap-key-acl.js";
 
 /** Stable id of a keyring entry. The wrap envelope records this id so
  *  a rotation can re-encrypt the payload with the new active key
@@ -124,6 +125,7 @@ export class FileKeyring implements KeyringProvider {
   }
 
   private readKey(): Buffer {
+    assertPrivateWindowsWrapKeyFile(this.keyPath);
     if (this.cachedKey) {
       // The cache exists so repeated wrap / unwrap calls in one
       // process lifetime don't re-read the file. Operators who want

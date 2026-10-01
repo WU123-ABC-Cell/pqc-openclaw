@@ -557,6 +557,114 @@ describe("Nostr PQC two-peer relay E2E", () => {
     }
   }, 45_000);
 
+  it("delivers a one-time pairing challenge using the sender's signed key without pinning it", async () => {
+    const aliceMessages: string[] = [];
+    const bobMessages: string[] = [];
+    const aliceBus = await startNostrBus({
+      accountId: "alice",
+      privateKey: alice.privateKey,
+      mlKemSecretKey: alice.encodedMlKemSecretKey,
+      mlKemPeerPublicKeys: { [bob.publicKey]: bob.encodedMlKemPublicKey },
+      relays: [relay.url],
+      onMessage: async (_pubkey, text) => {
+        aliceMessages.push(text);
+      },
+    });
+    handles.push(aliceBus);
+
+    const bobBus = await startNostrBus({
+      accountId: "bob",
+      privateKey: bob.privateKey,
+      mlKemSecretKey: bob.encodedMlKemSecretKey,
+      mlKemPeerPublicKeys: {},
+      relays: [relay.url],
+      authorizeSender: async ({ replyPairingChallenge }) => {
+        await replyPairingChallenge("pairing code: ABCD");
+        return "pairing";
+      },
+      onMessage: async (_pubkey, text) => {
+        bobMessages.push(text);
+      },
+    });
+    handles.push(bobBus);
+    await vi.waitFor(() => expect(relay.subscriptionCount()).toBe(2));
+
+    await aliceBus.sendDm(bob.publicKey, "hello, please pair");
+    await vi.waitFor(() => expect(aliceMessages).toEqual(["pairing code: ABCD"]));
+    expect(bobMessages).toEqual([]);
+    expect(bobBus.getPinnedPeerPqcKey(alice.publicKey)).toBeUndefined();
+    await expect(bobBus.sendDm(alice.publicKey, "ordinary reply remains blocked")).rejects.toThrow(
+      `No pinned ML-KEM-768 public key for Nostr peer ${alice.publicKey}`,
+    );
+
+    const dmEvents = relay.events.filter((event) => event.kind === 4444);
+    expect(dmEvents).toHaveLength(2);
+    expect(dmEvents.every((event) => verifyEvent(event))).toBe(true);
+    expect(dmEvents[0]?.tags).toContainEqual(["ocpqc-pk", alice.encodedMlKemPublicKey]);
+    expect(dmEvents[1]?.tags).toContainEqual(["ocpqc-pk", bob.encodedMlKemPublicKey]);
+    expect(dmEvents.every((event) => event.content.startsWith("ocpqc1:"))).toBe(true);
+  }, 30_000);
+
+  it("delivers a long Chinese reply in byte-bounded PQC events and rejects an oversized direct send", async () => {
+    const aliceMessages: string[] = [];
+    const bobMessages: string[] = [];
+    const longReply = "汉".repeat(4_000);
+    const aliceBus = await startNostrBus({
+      accountId: "alice",
+      privateKey: alice.privateKey,
+      mlKemSecretKey: alice.encodedMlKemSecretKey,
+      mlKemPeerPublicKeys: { [bob.publicKey]: bob.encodedMlKemPublicKey },
+      relays: [relay.url],
+      onMessage: async (_pubkey, text) => {
+        aliceMessages.push(text);
+      },
+    });
+    handles.push(aliceBus);
+    const bobBus = await startNostrBus({
+      accountId: "bob",
+      privateKey: bob.privateKey,
+      mlKemSecretKey: bob.encodedMlKemSecretKey,
+      mlKemPeerPublicKeys: { [alice.publicKey]: alice.encodedMlKemPublicKey },
+      relays: [relay.url],
+      onMessage: async (_pubkey, text, reply) => {
+        bobMessages.push(text);
+        await reply(longReply);
+      },
+    });
+    handles.push(bobBus);
+    await vi.waitFor(() => expect(relay.subscriptionCount()).toBe(2));
+
+    await aliceBus.sendDm(bob.publicKey, "reply in Chinese");
+    await vi.waitFor(() => expect(aliceMessages.join("")).toBe(longReply));
+    expect(bobMessages).toEqual(["reply in Chinese"]);
+    expect(aliceMessages.length).toBeGreaterThan(1);
+    const eventCount = relay.events.length;
+    await expect(aliceBus.sendDm(bob.publicKey, longReply)).rejects.toThrow(
+      /plaintext.*exceeding.*receive limit/u,
+    );
+    expect(relay.events).toHaveLength(eventCount);
+    for (const event of relay.events.filter((candidate) => candidate.kind === 4444)) {
+      expect(Buffer.byteLength(event.content, "utf8")).toBeLessThanOrEqual(16 * 1024);
+    }
+  }, 30_000);
+
+  it("rejects ciphertext exceeding the configured receive budget before relay publication", async () => {
+    const aliceBus = await startNostrBus({
+      accountId: "alice",
+      privateKey: alice.privateKey,
+      mlKemSecretKey: alice.encodedMlKemSecretKey,
+      mlKemPeerPublicKeys: { [bob.publicKey]: bob.encodedMlKemPublicKey },
+      relays: [relay.url],
+      guardPolicy: { maxCiphertextBytes: 100 },
+      onMessage: async () => {},
+    });
+    handles.push(aliceBus);
+    await expect(aliceBus.sendDm(bob.publicKey, "hello")).rejects.toThrow(
+      /ciphertext.*exceeding.*receive limit/u,
+    );
+    expect(relay.events.filter((event) => event.kind === 4444)).toHaveLength(0);
+  }, 30_000);
+
   it("fails closed when the recipient starts with the wrong ML-KEM secret key", async () => {
     const wrongBob = createTestIdentity();
     const bobMessages: string[] = [];

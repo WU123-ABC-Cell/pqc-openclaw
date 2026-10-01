@@ -49,7 +49,7 @@ function installOutboundRuntime(convertMarkdownTables = vi.fn((text: string) => 
 }
 
 async function startOutboundAccount(accountId?: string) {
-  const sendDm = vi.fn(async () => "a".repeat(64));
+  const sendDm = vi.fn(async (_to: string, _text: string) => "a".repeat(64));
   const bus = {
     sendDm,
     close: vi.fn(async () => {}),
@@ -174,6 +174,29 @@ describe("nostr outbound cfg threading", () => {
     expect(chunks).toHaveLength(expectedChunkCount);
     expect(chunks.every((chunk) => chunk.length <= textChunkLimit)).toBe(true);
     expect(chunks.join(joinWith)).toBe(text);
+  });
+
+  it("chunks long Chinese text by UTF-8 bytes after the character split", async () => {
+    installOutboundRuntime();
+    const { cleanup, sendDm } = await startOutboundAccount();
+    const text = "汉".repeat(4_000);
+    const chunks = nostrPlugin.outbound?.chunker?.(text, 4_000);
+    expect(chunks).toBeDefined();
+    expect(chunks?.length).toBeGreaterThan(1);
+    expect(chunks?.join("")).toBe(text);
+    expect(chunks?.every((chunk) => Buffer.byteLength(chunk, "utf8") <= 8 * 1024)).toBe(true);
+
+    await nostrOutboundAdapter.sendText({
+      cfg: createCfg() as OpenClawConfig,
+      to: "NPUB123",
+      text,
+      accountId: "default",
+    });
+    const sent = sendDm.mock.calls.map(([, part]) => part);
+    expect(sent.length).toBeGreaterThan(1);
+    expect(sent.join("")).toBe(text);
+    expect(sent.every((part) => Buffer.byteLength(part, "utf8") <= 8 * 1024)).toBe(true);
+    await cleanup.stop();
   });
 
   it("converts tables before projecting markdown to Nostr plain text", async () => {

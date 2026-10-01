@@ -559,10 +559,16 @@ describe("startNostrBus inbound guards", () => {
   it("links authorization replies to the inbound PQC event", async () => {
     const inboundEventId = "c".repeat(64);
     const senderPubkey = "a".repeat(64);
-    const authorizeSender = vi.fn(async ({ reply }: { reply: (text: string) => Promise<void> }) => {
-      await reply("pairing reply");
-      return "pairing" as const;
-    });
+    const authorizeSender = vi.fn(
+      async ({
+        replyPairingChallenge,
+      }: {
+        replyPairingChallenge: (text: string) => Promise<void>;
+      }) => {
+        await replyPairingChallenge("pairing reply");
+        return "pairing" as const;
+      },
+    );
     const bus = await startTestNostrBus({
       privateKey: TEST_HEX_PRIVATE_KEY,
       relays: ["wss://relay.example"],
@@ -577,6 +583,7 @@ describe("startNostrBus inbound guards", () => {
       expect.objectContaining({
         tags: [
           ["p", senderPubkey],
+          ["ocpqc-pk", TEST_ML_KEM_PUBLIC_KEY],
           ["e", inboundEventId],
         ],
       }),

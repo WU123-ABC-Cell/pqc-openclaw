@@ -35,7 +35,9 @@ openclaw channels add --channel nostr --private-key "$NOSTR_PRIVATE_KEY" --relay
 
 Use `--use-env` to keep `NOSTR_PRIVATE_KEY` in the environment instead of storing the key in config (default account only).
 
-Setup generates a local ML-KEM-768 keypair automatically. At startup the gateway publishes its public key in a signed NIP-78 addressable event (`kind:30078`, `d=openclaw-pqc-dm-key-v1`). Relay discovery never grants trust: confirm the displayed SHA-256 fingerprint with the peer over an authenticated channel, then explicitly pin it before sending messages. Missing peer keys fail closed; there is no automatic NIP-04 downgrade.
+Setup generates a local ML-KEM-768 keypair automatically. At startup the gateway publishes its public key in a signed NIP-78 addressable event (`kind:30078`, `d=openclaw-pqc-dm-key-v1`). Relay discovery never grants trust: confirm the displayed SHA-256 fingerprint with the peer over an authenticated channel, then explicitly pin it before ordinary outbound messages. Missing peer keys fail closed; there is no automatic NIP-04 downgrade.
+
+For first contact under the default `pairing` policy, a compatible sender must first pin the gateway's key to send a PQC DM. Each outgoing kind-4444 DM includes the sender's ML-KEM-768 public key in the signed `ocpqc-pk` tag. The gateway may use that event-bound key **only** to encrypt the one-time pairing-code reply. This does not pin or trust the sender's key for ordinary messages or later approval notifications: an operator must still verify the sender's fingerprint out of band and pin the key. Older peers that omit the tag cannot receive an unpinned pairing reply. If a pairing reply fails, a later inbound DM can retry delivery of the same pending code; the pending request is not duplicated.
 
 ### PQC key discovery, pinning, and rotation
 
@@ -132,7 +134,7 @@ Notes:
 
 ### DM policies
 
-- **pairing** (default): unknown senders get a pairing code.
+- **pairing** (default): compatible unknown senders who include a signed `ocpqc-pk` tag can receive a one-time pairing code; ordinary replies still require a verified pin.
 - **allowlist**: only pubkeys in `allowFrom` can DM.
 - **open**: public inbound DMs (requires `allowFrom: ["*"]`).
 - **disabled**: ignore inbound DMs.
@@ -141,7 +143,7 @@ Enforcement notes:
 
 - Inbound event signatures are verified before sender policy and PQC-envelope decryption, so forged events are rejected early.
 - Pairing replies are sent without decrypting or processing the original DM body.
-- Inbound DMs are rate-limited (globally and per sender) and oversized payloads are dropped before decrypt.
+- Inbound DMs are rate-limited (globally and per sender). The default receive budget is 8 KiB of UTF-8 plaintext and 16 KiB of encrypted content. Outbound text and direct replies are split into UTF-8-byte-bounded events, and the bus rejects any oversized direct send before publishing it. Chunks arrive as separate DMs; the protocol does not reassemble them into a single event. Peers configured with stricter receive limits can still reject otherwise valid chunks.
 
 ### Allowlist example
 

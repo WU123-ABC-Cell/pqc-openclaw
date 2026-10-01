@@ -22,6 +22,7 @@ import {
   encodeMlDsa65PublicKey,
   fingerprintMlDsa65PublicKey,
 } from "../infra/mldsa65-key-storage.js";
+import { requireNodeSqlite } from "../infra/node-sqlite.js";
 import { closeOpenClawStateDatabaseForTest } from "../state/openclaw-state-db.js";
 import { FileKeyring } from "./keyring-provider.js";
 import {
@@ -126,6 +127,98 @@ describe("wrapKeyHealthCheck (whitepaper 2.2.7)", () => {
     expect(status.activeKeyId).toBe("wrap-key-2026-08");
     expect(status.provider).toBe("InMemoryKeyring");
     expect(status.pbkdf2Iterations).toBe(WRAP_KEY_BACKUP_CONSTANTS.PBKDF2_ITERATIONS);
+  });
+
+  it("does not report healthy when a requested identity is missing", async () => {
+    const keyring = new InMemoryKeyring("active");
+    keyring.addKey("active", newKey());
+    const status = await wrapKeyHealthCheck({
+      options: makeStoreOptions(keyring),
+      identityKeys: [PRIMARY_DEVICE_IDENTITY_KEY],
+    });
+    expect(status.ok).toBe(false);
+    expect(status.rows[0]?.state).toBe("malformed-envelope");
+  });
+
+  it("does not report healthy when a stored wrap envelope is malformed", async () => {
+    const keyring = new InMemoryKeyring("active");
+    keyring.addKey("active", newKey());
+    const options = makeStoreOptions(keyring);
+    insertStoredDeviceIdentityIfAbsent(
+      generateStoredDeviceIdentity(1_700_000_000_000, keyring),
+      options,
+    );
+    closeOpenClawStateDatabaseForTest();
+    const { DatabaseSync } = requireNodeSqlite();
+    const db = new DatabaseSync(path.join(options.stateDir, "state", "openclaw.sqlite"));
+    try {
+      db.prepare(
+        "UPDATE device_identities SET mldsa_private_key_wrapped = ? WHERE identity_key = ?",
+      ).run(Buffer.from("invalid envelope"), PRIMARY_DEVICE_IDENTITY_KEY);
+    } finally {
+      db.close();
+    }
+    const status = await wrapKeyHealthCheck({
+      options,
+      identityKeys: [PRIMARY_DEVICE_IDENTITY_KEY],
+    });
+    expect(status.ok).toBe(false);
+    expect(status.rows[0]?.state).toBe("malformed-envelope");
+  });
+
+  it("does not treat partial wrap metadata as a healthy plaintext identity", async () => {
+    const keyring = new InMemoryKeyring("active");
+    keyring.addKey("active", newKey());
+    const options = makeStoreOptions(keyring);
+    const plaintext = generateStoredDeviceIdentity(1_700_000_000_000, undefined, {
+      allowPlaintextPrivateKey: true,
+    });
+    insertStoredDeviceIdentityIfAbsent(plaintext, options);
+    closeOpenClawStateDatabaseForTest();
+    const { DatabaseSync } = requireNodeSqlite();
+    const db = new DatabaseSync(path.join(options.stateDir, "state", "openclaw.sqlite"));
+    try {
+      db.prepare(
+        "UPDATE device_identities SET mldsa_private_key_wrapped = ? WHERE identity_key = ?",
+      ).run(Buffer.from("invalid envelope"), PRIMARY_DEVICE_IDENTITY_KEY);
+    } finally {
+      db.close();
+    }
+    expect(() => readStoredDeviceIdentity(options)).toThrow(/invalid persisted device identity/);
+    const status = await wrapKeyHealthCheck({
+      options,
+      identityKeys: [PRIMARY_DEVICE_IDENTITY_KEY],
+    });
+    expect(status.ok).toBe(false);
+    expect(status.rows[0]?.state).toBe("malformed-envelope");
+  });
+
+  it("does not report healthy when the historical key cannot unwrap the identity", async () => {
+    const oldKeyring = new InMemoryKeyring("old");
+    oldKeyring.addKey("old", newKey());
+    const options = makeStoreOptions(oldKeyring);
+    insertStoredDeviceIdentityIfAbsent(
+      generateStoredDeviceIdentity(1_700_000_000_000, oldKeyring),
+      options,
+    );
+    const newKeyring = new InMemoryKeyring("new");
+    newKeyring.addKey("new", newKey());
+    const status = await wrapKeyHealthCheck({
+      options: { ...options, wrappingKeyProvider: newKeyring },
+      identityKeys: [PRIMARY_DEVICE_IDENTITY_KEY],
+    });
+    expect(status.ok).toBe(false);
+    expect(status.rows[0]?.state).toBe("malformed-envelope");
+  });
+
+  it("does not report healthy when the active key has the wrong length", async () => {
+    const keyring = new InMemoryKeyring("active");
+    keyring.addKey("active", Buffer.alloc(16));
+    const status = await wrapKeyHealthCheck({ options: makeStoreOptions(keyring) });
+    expect(status.ok).toBe(false);
+    expect(status.notes).toContain(
+      "active key must be 32 bytes (AES-256), got 16; refusing to sign",
+    );
   });
 
   it("flags a wrapped row sealed under a non-active keyId", async () => {

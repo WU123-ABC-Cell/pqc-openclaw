@@ -144,9 +144,10 @@ only on a nonempty active key ID. Because no production monitoring integration w
 established, neither a false-green deployed monitor nor complete identity health
 can be inferred from this helper alone.
 
-Do not rely on `PQC_LOG_LEVEL`, `PQC_AUDIT_LOG_PATH` or `PQC_REQUIRE_MLOCK` as
-enforced controls. A configured audit-file path is not evidence that events reach
-it. Default stdout output is not the promised separate audit-file integration.
+The evaluation Compose recipe no longer sets `PQC_LOG_LEVEL`,
+`PQC_AUDIT_LOG_PATH` or `PQC_REQUIRE_MLOCK`: the gateway does not implement
+those switches. PQC events use the ordinary gateway log stream, not a separate
+audit-file sink. Memory locking remains best-effort rather than fail-closed.
 
 Secure-memory helpers are platform/build-dependent and best-effort without a
 working native path. Node version alone does not establish memory locking.

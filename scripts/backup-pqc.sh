@@ -2,7 +2,7 @@
 # backup-pqc.sh — production backup for the PQC OpenClaw fork.
 #
 # Snapshots the recoverable PQC fork state (SQLite DB, auth profiles,
-# config, sessions, and pqc-audit.log) into a timestamped tarball while
+# config, sessions, and any pre-existing audit file) into a timestamped tarball while
 # keeping wrapping keys and service secrets in a separate trust domain,
 # writes a sha256 sidecar for integrity verification, rotates old
 # backups, and optionally uploads to S3 for off-host storage.

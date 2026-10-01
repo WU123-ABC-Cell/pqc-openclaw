@@ -39,7 +39,7 @@ on:
         default: ""
         type: string
   push:
-    branches: [main]
+    branches: [main, master]
     paths-ignore:
       - "**/*.md"
       - "docs/**"

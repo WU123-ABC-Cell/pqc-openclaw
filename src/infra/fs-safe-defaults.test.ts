@@ -16,6 +16,7 @@ async function importDefaults() {
 
 describe("fs-safe defaults", () => {
   afterEach(() => {
+    vi.restoreAllMocks();
     configureFsSafeNative.mockReset();
     delete process.env.FS_SAFE_NATIVE_MODE;
     delete process.env.OPENCLAW_FS_SAFE_NATIVE_MODE;
@@ -29,9 +30,16 @@ describe("fs-safe defaults", () => {
   });
 
   it("disables the native helper by default in OpenClaw", async () => {
+    vi.spyOn(process, "platform", "get").mockReturnValue("linux");
     await importDefaults();
 
     expect(configureFsSafeNative).toHaveBeenCalledWith({ mode: "off" });
+  });
+
+  it("enables native ACL inspection by default on Windows", async () => {
+    vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+    await importDefaults();
+    expect(configureFsSafeNative).toHaveBeenCalledWith({ mode: "auto" });
   });
 
   it("lets fs-safe env mode overrides opt back into the helper", async () => {
@@ -68,6 +76,7 @@ describe("fs-safe defaults", () => {
   });
 
   it("does not treat a retired interpreter path as a native mode override", async () => {
+    vi.spyOn(process, "platform", "get").mockReturnValue("linux");
     process.env.OPENCLAW_FS_SAFE_PYTHON = "/usr/bin/python3";
 
     await importDefaults();

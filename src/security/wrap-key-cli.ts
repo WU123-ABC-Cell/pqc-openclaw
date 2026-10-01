@@ -20,9 +20,17 @@
 // posture), and — when a device identity is provided — a
 // per-row wrap-status flag.
 
-import { type DeviceIdentityStoreOptions, readStoredDeviceIdentity } from "../infra/device-identity-store.js";
+import {
+  type DeviceIdentityStoreOptions,
+  readStoredDeviceIdentityReadOnly,
+} from "../infra/device-identity-store.js";
 import { deserializeWrappedSecret, type WrappingKeyProvider } from "./secret-wrapping.js";
-import { WRAP_KEY_BACKUP_CONSTANTS, exportWrapKey, importWrapKey, type WrapKeyBackup } from "./wrap-key-rotation.js";
+import {
+  WRAP_KEY_BACKUP_CONSTANTS,
+  exportWrapKey,
+  importWrapKey,
+  type WrapKeyBackup,
+} from "./wrap-key-rotation.js";
 
 /** Structured status report. JSON-serialisable so the CLI can pretty-
  *  print it without a second pass. */
@@ -72,16 +80,16 @@ export async function checkRows(params: {
 }): Promise<WrapKeyRowHealth[]> {
   const out: WrapKeyRowHealth[] = [];
   for (const identityKey of params.identityKeys) {
-    let row: ReturnType<typeof readStoredDeviceIdentity> = null;
+    let row: ReturnType<typeof readStoredDeviceIdentityReadOnly>;
     try {
-      row = readStoredDeviceIdentity({ ...params.options, identityKey });
+      row = readStoredDeviceIdentityReadOnly({ ...params.options, identityKey });
     } catch (error) {
       out.push({
         identityKey,
         deviceId: "",
         state: "malformed-envelope",
         wrapKeyId: null,
-        detail: `readStoredDeviceIdentity failed: ${(error as Error).message}`,
+        detail: `readStoredDeviceIdentityReadOnly failed: ${(error as Error).message}`,
       });
       continue;
     }
@@ -132,24 +140,19 @@ export async function wrapKeyHealthCheck(params: {
   }
   const notes: string[] = [];
   let activeKeyId = "";
+  let activeKeyLength = 0;
   try {
-    activeKeyId = provider.getActiveKey().keyId;
+    const activeKey = provider.getActiveKey();
+    activeKeyId = activeKey.keyId;
+    activeKeyLength = activeKey.key.length;
   } catch (error) {
     notes.push(`getActiveKey failed: ${(error as Error).message}`);
   }
   // Verify the active key is a 32-byte buffer (the contract the
   // wrap envelope expects). The provider's own getActiveKey already
   // guards this; the health check is the operator-facing surface.
-  let activeKey: Buffer | null = null;
-  try {
-    activeKey = provider.getActiveKey().key;
-  } catch {
-    // already noted above
-  }
-  if (activeKey && activeKey.length !== 32) {
-    notes.push(
-      `active key must be 32 bytes (AES-256), got ${activeKey.length}; refusing to sign`,
-    );
+  if (activeKeyId && activeKeyLength !== 32) {
+    notes.push(`active key must be 32 bytes (AES-256), got ${activeKeyLength}; refusing to sign`);
   }
   const rows = params.identityKeys
     ? await checkRows({ options: params.options, identityKeys: params.identityKeys })
@@ -178,7 +181,10 @@ export async function wrapKeyHealthCheck(params: {
     }
   }
   return {
-    ok: activeKeyId.length > 0,
+    ok:
+      activeKeyId.length > 0 &&
+      activeKeyLength === 32 &&
+      rows.every((row) => row.state === "wrapped" || row.state === "plaintext"),
     provider: describeProvider(provider),
     activeKeyId,
     historicalKeyCount: countHistoricalKeys(provider),
@@ -191,7 +197,9 @@ export async function wrapKeyHealthCheck(params: {
 /** Probe whether a stored row's wrap envelope is parseable without
  *  unwrapping it. Used by the doctor health check to flag malformed
  *  envelopes before the runtime trips on them. */
-export function parseWrapEnvelope(serialized: string): { ok: true } | { ok: false; reason: string } {
+export function parseWrapEnvelope(
+  serialized: string,
+): { ok: true } | { ok: false; reason: string } {
   try {
     deserializeWrappedSecret(serialized);
     return { ok: true };

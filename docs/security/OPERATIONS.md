@@ -45,6 +45,23 @@ remains an explicit operator action because it may require an interactive unlock
 
 ## 1. Day-2 tasks (the ones you will actually do)
 
+### Windows file-backed wrapping keys
+
+Windows x64 file-keyring use requires the bundled fs-safe native ACL inspector.
+The Windows runtime default enables that backend in `auto` mode. An explicit
+`FS_SAFE_NATIVE_MODE=off` (or the OpenClaw-prefixed equivalent), a missing native
+binding, or unverifiable ACLs cause file-keyring operations to fail closed.
+Windows ARM64 has not been validated and the current fs-safe binding is unavailable
+there; do not assume file-keyring support on that platform.
+
+The key file and its immediate directory must allow access only to the current
+account, SYSTEM, and Administrators. Ancestors must not permit other principals
+to delete the directory chain or change its permissions. Symlink paths are rejected.
+Use a private local state directory; a custom AppData path can fail these checks
+when its ancestors grant broader write access. Do not bypass an ACL error by
+disabling the inspector. Have an administrator inspect the named path and select
+a private state directory without weakening permissions on unrelated directories.
+
 ### 1.1 Check whether the fork is up
 
 ```sh
@@ -59,17 +76,16 @@ Linux native addon is the current fallback on supported builds.
 
 If `--json` returns `fail > 0`, jump to §2.
 
-### 1.2 Tail the audit log
+### 1.2 Inspect gateway logs
 
 ```sh
 sudo journalctl -u pqc-openclaw -f
-sudo tail -f /var/lib/pqc-openclaw/pqc-audit.log
 ```
 
-The audit log is JSONL, one event per line. PQC-specific events are
-tagged `[PQC]` and emit on a separate stream so security monitoring
-can ingest them without parsing the full Gateway log. The three PQC
-events are:
+PQC-specific events, when emitted, are tagged `[PQC]` in the ordinary
+gateway log stream. A separate `pqc-audit.log` sink is not implemented;
+do not treat the gateway log as a complete or tamper-resistant audit trail.
+The three secure-memory event names are:
 
 | Event               | When                         | What it tells you                                                                                     |
 | ------------------- | ---------------------------- | ----------------------------------------------------------------------------------------------------- |
@@ -304,7 +320,7 @@ optionally a JSON document. Suggested monitoring patterns:
 | ------------------------------------- | ----------------------------------------------------------------------------------- |
 | `healthcheck-pqc.sh` cron every 5 min | exit code != 0 for >2 consecutive runs                                              |
 | `healthcheck-pqc.sh --json` parsed    | any check with `status=fail`                                                        |
-| `pqc-audit.log` (tailable)            | repeated `mlock-unavailable` means neither locking backend is active                |
+| Gateway `[PQC]` log events            | `mlock-unavailable` means neither locking backend was available in that process     |
 | `backup-pqc.sh --json` daily          | `fail > 0` in the JSON summary; or no tarball created in 25h                        |
 | `journalctl -u pqc-openclaw`          | `[PQC]` event with `status:fail`; or no `[PQC]` events at all in 7d (fork not used) |
 

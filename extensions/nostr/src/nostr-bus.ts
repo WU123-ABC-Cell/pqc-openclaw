@@ -23,6 +23,7 @@ import {
   type MetricEvent,
 } from "./metrics.js";
 import { createNostrCursorStateWriter, createNostrDurableCursor } from "./nostr-cursor.js";
+import { chunkNostrOutboundText, DEFAULT_NOSTR_DM_SIZE_LIMITS } from "./nostr-dm-size.js";
 import { NostrIngressPermanentError } from "./nostr-ingress-state.js";
 import {
   createNostrIngress,
@@ -69,7 +70,8 @@ const STARTUP_LOOKBACK_SEC = 120; // tolerate relay lag / clock skew
 const STATE_PERSIST_DEBOUNCE_MS = 5000; // Debounce state writes
 const NOSTR_INGRESS_ENVELOPE_OVERHEAD_BYTES = 16 * 1024;
 const NOSTR_INGRESS_MAX_PENDING_EVENTS = 1_000;
-const DEFAULT_INBOUND_GUARD_POLICY = createDirectDmPreCryptoGuardPolicy();
+const DEFAULT_INBOUND_GUARD_POLICY = DEFAULT_NOSTR_DM_SIZE_LIMITS;
+const PAIRING_ML_KEM_KEY_TAG = "ocpqc-pk";
 
 // Circuit breaker configuration
 const CIRCUIT_BREAKER_THRESHOLD = 5; // failures before opening
@@ -104,7 +106,8 @@ interface NostrBusOptions {
   /** Called after signature verification and before decrypt to allow sender policy checks (optional) */
   authorizeSender?: (params: {
     senderPubkey: string;
-    reply: (text: string) => Promise<void>;
+    /** One-time challenge reply; never pins the event's signed key. */
+    replyPairingChallenge: (text: string) => Promise<void>;
   }) => Promise<"allow" | "block" | "pairing">;
   /** Override pre-crypto DM guardrails for tests or future channel tuning (optional) */
   guardPolicy?: DirectDmPreCryptoGuardPolicyOverrides;
@@ -479,11 +482,12 @@ export async function startNostrBus(options: NostrBusOptions): Promise<NostrBusH
       return;
     }
 
-    const replyTo = async (text: string): Promise<void> => {
+    const sendReply = async (text: string, pairingRecipientKey?: Uint8Array): Promise<void> => {
       await sendEncryptedDm(
         pool,
         sk,
         pk,
+        localMlKemPublicKey,
         peerMlKemPublicKeys,
         event.pubkey,
         text,
@@ -491,9 +495,20 @@ export async function startNostrBus(options: NostrBusOptions): Promise<NostrBusH
         metrics,
         circuitBreakers,
         healthTracker,
+        guardPolicy,
         onError,
         event.id,
+        pairingRecipientKey,
       );
+    };
+    const replyTo = async (text: string): Promise<void> => {
+      const chunks = chunkNostrOutboundText(text);
+      if (chunks.length === 0) {
+        throw new Error("Nostr reply requires non-empty text.");
+      }
+      for (const chunk of chunks) {
+        await sendReply(chunk);
+      }
     };
 
     if (Buffer.byteLength(event.content, "utf8") > guardPolicy.maxCiphertextBytes) {
@@ -523,7 +538,15 @@ export async function startNostrBus(options: NostrBusOptions): Promise<NostrBusH
     }
 
     if (authorizeSender) {
-      const decision = await authorizeSender({ senderPubkey: event.pubkey, reply: replyTo });
+      const replyPairingChallenge = async (text: string): Promise<void> => {
+        // A verified Nostr event binds this key to the sender. It is usable only
+        // for this one challenge, never as a durable pin for ordinary replies.
+        const unpinnedKey = peerMlKemPublicKeys.has(event.pubkey)
+          ? undefined
+          : decodeSignedPairingPublicKey(event);
+        await sendReply(text, unpinnedKey);
+      };
+      const decision = await authorizeSender({ senderPubkey: event.pubkey, replyPairingChallenge });
       if (decision !== "allow") {
         return;
       }
@@ -745,6 +768,7 @@ export async function startNostrBus(options: NostrBusOptions): Promise<NostrBusH
       pool,
       sk,
       pk,
+      localMlKemPublicKey,
       peerMlKemPublicKeys,
       toPubkey,
       text,
@@ -752,6 +776,7 @@ export async function startNostrBus(options: NostrBusOptions): Promise<NostrBusH
       metrics,
       circuitBreakers,
       healthTracker,
+      guardPolicy,
       onError,
     );
   };
@@ -870,6 +895,15 @@ export async function startNostrBus(options: NostrBusOptions): Promise<NostrBusH
 
 // Send DM with Circuit Breaker + Health Scoring
 
+function decodeSignedPairingPublicKey(event: Event): Uint8Array {
+  const keyTags = event.tags.filter((tag) => tag[0] === PAIRING_ML_KEM_KEY_TAG);
+  const encodedKey = keyTags[0]?.[1];
+  if (keyTags.length !== 1 || keyTags[0]?.length !== 2 || typeof encodedKey !== "string") {
+    throw new Error("Nostr pairing requires exactly one signed ML-KEM public key tag");
+  }
+  return decodeMlKem768PublicKey(encodedKey);
+}
+
 /**
  * Send an encrypted DM to a pubkey
  */
@@ -877,6 +911,7 @@ async function sendEncryptedDm(
   pool: SimplePool,
   sk: Uint8Array,
   fromPubkey: string,
+  senderMlKemPublicKey: string,
   peerMlKemPublicKeys: ReadonlyMap<string, Uint8Array>,
   toPubkey: string,
   text: string,
@@ -884,12 +919,23 @@ async function sendEncryptedDm(
   metrics: NostrMetrics,
   circuitBreakers: Map<string, CircuitBreaker>,
   healthTracker: RelayHealthTracker,
+  sizeLimits: Pick<
+    ReturnType<typeof createDirectDmPreCryptoGuardPolicy>,
+    "maxPlaintextBytes" | "maxCiphertextBytes"
+  >,
   onError?: (error: Error, context: string) => void,
   replyToEventId?: string,
+  pairingRecipientKey?: Uint8Array,
 ): Promise<string> {
-  const recipientMlKemPublicKey = peerMlKemPublicKeys.get(toPubkey);
+  const recipientMlKemPublicKey = peerMlKemPublicKeys.get(toPubkey) ?? pairingRecipientKey;
   if (!recipientMlKemPublicKey) {
     throw new Error(`No pinned ML-KEM-768 public key for Nostr peer ${toPubkey}`);
+  }
+  const plaintextBytes = Buffer.byteLength(text, "utf8");
+  if (plaintextBytes > sizeLimits.maxPlaintextBytes) {
+    throw new Error(
+      `Nostr plaintext is ${plaintextBytes} bytes, exceeding the ${sizeLimits.maxPlaintextBytes}-byte receive limit`,
+    );
   }
   const classicalConversationKey = nip44.v2.utils.getConversationKey(sk, toPubkey);
   let ciphertext: string;
@@ -904,7 +950,16 @@ async function sendEncryptedDm(
   } finally {
     classicalConversationKey.fill(0);
   }
-  const tags = [["p", toPubkey]];
+  const ciphertextBytes = Buffer.byteLength(ciphertext, "utf8");
+  if (ciphertextBytes > sizeLimits.maxCiphertextBytes) {
+    throw new Error(
+      `Nostr ciphertext is ${ciphertextBytes} bytes, exceeding the ${sizeLimits.maxCiphertextBytes}-byte receive limit`,
+    );
+  }
+  const tags = [
+    ["p", toPubkey],
+    [PAIRING_ML_KEM_KEY_TAG, senderMlKemPublicKey],
+  ];
   if (replyToEventId) {
     tags.push(["e", replyToEventId]);
   }

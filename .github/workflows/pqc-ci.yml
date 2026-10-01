@@ -49,6 +49,16 @@ jobs:
           src/security/push-dual-signature.test.ts
           src/security/secret-wrapping.test.ts
           src/security/wrap-key-rotation.test.ts
+          src/security/wrap-key-cli.test.ts
+          src/security/windows-wrap-key-acl.test.ts
+          src/infra/fs-safe-defaults.test.ts
+          src/infra/device-identity.state-dir.test.ts
+          src/pairing/pairing-challenge.test.ts
+          extensions/nostr/src/channel.inbound.test.ts
+          extensions/nostr/src/channel.outbound.test.ts
+          extensions/nostr/src/nostr-bus.inbound.test.ts
+          extensions/nostr/src/nostr-bus.e2e.test.ts
+          test/scripts/pqc-ci-coverage.test.ts
           src/state/openclaw-state-db-schema-additive.test.ts
           src/state/openclaw-state-db.test.ts
 

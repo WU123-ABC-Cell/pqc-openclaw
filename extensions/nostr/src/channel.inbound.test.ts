@@ -155,7 +155,7 @@ describe("nostr inbound gateway path", () => {
     const options = mockCallArg(mocks.startNostrBus) as {
       authorizeSender: (params: {
         senderPubkey: string;
-        reply: (text: string) => Promise<void>;
+        replyPairingChallenge: (text: string) => Promise<void>;
       }) => Promise<string>;
     };
     const sendPairingReply = vi.fn(async (_text: string) => {});
@@ -163,12 +163,49 @@ describe("nostr inbound gateway path", () => {
     await expect(
       options.authorizeSender({
         senderPubkey: "nostr:UNKNOWN-SENDER",
-        reply: sendPairingReply,
+        replyPairingChallenge: sendPairingReply,
       }),
     ).resolves.toBe("pairing");
     expect(sendPairingReply).toHaveBeenCalledTimes(1);
     expect(mockCallArg(sendPairingReply)).toContain("Pairing code:");
 
+    await cleanup.stop();
+  });
+
+  it("retries the same pending pairing code after a failed reply", async () => {
+    const { harness, cleanup } = await startGatewayHarness({
+      account: buildResolvedNostrAccount({
+        config: { dmPolicy: "pairing", allowFrom: [] },
+      }),
+    });
+    const upsert = harness.runtime.channel.pairing.upsertPairingRequest as ReturnType<typeof vi.fn>;
+    upsert.mockResolvedValueOnce({ code: "PAIR1234", created: true });
+    upsert.mockResolvedValueOnce({ code: "PAIR1234", created: false });
+    const options = mockCallArg(mocks.startNostrBus) as {
+      authorizeSender: (params: {
+        senderPubkey: string;
+        replyPairingChallenge: (text: string) => Promise<void>;
+      }) => Promise<string>;
+    };
+    const failedReply = vi.fn(async () => {
+      throw new Error("relay unavailable");
+    });
+    const successfulReply = vi.fn(async (_text: string) => {});
+    await expect(
+      options.authorizeSender({
+        senderPubkey: "nostr:UNKNOWN-SENDER",
+        replyPairingChallenge: failedReply,
+      }),
+    ).resolves.toBe("pairing");
+    await expect(
+      options.authorizeSender({
+        senderPubkey: "nostr:UNKNOWN-SENDER",
+        replyPairingChallenge: successfulReply,
+      }),
+    ).resolves.toBe("pairing");
+    expect(failedReply).toHaveBeenCalledTimes(1);
+    expect(successfulReply).toHaveBeenCalledTimes(1);
+    expect(mockCallArg(successfulReply)).toContain("PAIR1234");
     await cleanup.stop();
   });
 

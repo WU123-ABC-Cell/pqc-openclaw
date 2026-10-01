@@ -326,6 +326,12 @@ function rowToStoredIdentity(
     typeof wrapKeyId === "string" &&
     wrapKeyId.length > 0;
 
+  // A partially populated wrapping envelope is corruption, not a legacy
+  // plaintext row. Never fall back to a stale plaintext copy in that case.
+  if ((wrappedBlob != null || wrapKeyId != null) && !hasWrapped) {
+    throw invalidStoredIdentityError(expectedIdentityKey);
+  }
+
   if (hasWrapped) {
     if (!wrappingKeyProvider) {
       // The row is wrapped but the caller didn't bring a keyring.

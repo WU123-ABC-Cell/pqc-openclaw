@@ -130,12 +130,13 @@ def main():
             "pqc_backup_last_bytes",
             "pqc_backup_last_run_timestamp_seconds",
             "pqc_backup_last_run_success",
-            "pqc_backup_s3_uploaded",
         ]
         for m in required:
             # Match either plain "name value" or "name{labels...} value"
             if not re.search(rf"^{re.escape(m)}(\{{[^}}]*\}})? \d", text, re.MULTILINE):
                 fail(f"required metric missing or malformed: {m}")
+        if "pqc_backup_s3_uploaded" in metric_names:
+            fail("collector must not infer an S3 upload from an unwritten audit file")
         # Value lines: name [labels] integer
         bad_value_lines = [m for m in metrics if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*(\{[^}]*\})? -?\d+(\.\d+)?$", m)]
         if bad_value_lines:

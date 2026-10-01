@@ -8,7 +8,7 @@
 # node_exporter textfile collector watches (default
 # /var/lib/prometheus/node-exporter/pqc.prom).
 #
-# Metrics emitted (9 gauges):
+# Metrics emitted (8 gauges):
 #   pqc_healthcheck_pass_checks_total
 #   pqc_healthcheck_warn_checks_total
 #   pqc_healthcheck_fail_checks_total
@@ -17,7 +17,6 @@
 #   pqc_backup_last_run_timestamp_seconds
 #   pqc_backup_last_run_success
 #   pqc_backup_last_bytes
-#   pqc_backup_s3_uploaded
 # Plus per-check gauges:
 #   pqc_healthcheck_check_status{check="node-version|mlock|fork-process|healthz|state-db|wrap-key-file|os-keyring|pqc-events"} 0|1|2
 #   (0=ok, 1=warn, 2=fail)
@@ -209,7 +208,6 @@ fi
 
 BACKUP_SUCCESS=0
 BACKUP_BYTES=0
-BACKUP_S3_OK=0
 BACKUP_TIMESTAMP=0
 
 # Last backup timestamp from the latest tarball
@@ -219,14 +217,6 @@ if [[ -d "$BACKUP_DIR" ]]; then
   if [[ -n "$LATEST_TARBALL" ]] && [[ -f "$LATEST_TARBALL" ]]; then
     BACKUP_TIMESTAMP=$(stat -c %Y "$LATEST_TARBALL" 2>/dev/null || stat -f %m "$LATEST_TARBALL" 2>/dev/null || echo 0)
     BACKUP_BYTES=$(stat -c %s "$LATEST_TARBALL" 2>/dev/null || stat -f %z "$LATEST_TARBALL" 2>/dev/null || echo 0)
-  fi
-fi
-
-# S3 indicator: check the latest audit log entry for the S3 path
-BACKUP_S3_OK=0
-if [[ -d "$HEALTHCHECK_STATE_DIR" ]] && [[ -f "$HEALTHCHECK_STATE_DIR/pqc-audit.log" ]]; then
-  if grep -q 'event":"s3-uploaded' "$HEALTHCHECK_STATE_DIR/pqc-audit.log" 2>/dev/null; then
-    BACKUP_S3_OK=1
   fi
 fi
 
@@ -277,10 +267,6 @@ NOW=$(date +%s)
   else
     echo "pqc_backup_last_run_success 0"
   fi
-  echo
-  echo "# HELP pqc_backup_s3_uploaded 1 if any backup-pqc.sh run since the last retention pruning reported an S3 upload success, else 0."
-  echo "# TYPE pqc_backup_s3_uploaded gauge"
-  echo "pqc_backup_s3_uploaded $BACKUP_S3_OK"
 } > "$TMP_PATH"
 
 if [[ $JSON_OUTPUT -eq 1 ]]; then

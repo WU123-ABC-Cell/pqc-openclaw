@@ -7,15 +7,12 @@ daemon), but it covers the checks that `docker compose config`
 would fail on at parse time:
 
   1. YAML well-formed (the repository-pinned `yaml` package)
-  2. Top-level keys: services, secrets, volumes, networks
-  3. Each service has image/build, env vars, and a healthcheck
+  2. Top-level keys: services, secrets, networks
+  3. The gateway has image/build, environment, and a healthcheck
   4. PQC secrets (gateway_token, wrap_key) are declared at the
      top level AND referenced by the gateway service (otherwise
      docker compose would warn "secret not used")
-  5. The mlock tmpfs volume is declared AND mounted into the
-     gateway service at $OPENCLAW_STATE_DIR/mlock (otherwise
-     process.mlock(2) inside the container would target a
-     non-tmpfs path and silently swap)
+  5. No inert PQC security switches or fake mlock tmpfs are advertised
   6. Cap_drop list contains NET_RAW, NET_ADMIN, SYS_PTRACE,
      SYS_ADMIN (the documented hardening in the file header)
   7. read_only: true on the gateway (defense-in-depth)
@@ -34,13 +31,10 @@ would fail on at parse time:
      OPENCLAW_WRAP_KEY_FILE) are referenced in the gateway
      environment
 
-Why this exists: the docker-compose.pqc.yml is the entry point
-for production deployment. A typo there (wrong path, wrong
-capability, missing secret) would silently weaken the security
-posture — the container would still start, mlock would silently
-swap, the gateway token would leak into /proc/1/environ. Catching
-this in CI before the compose file is merged saves the operator
-from a very quiet post-mortem.
+Why this exists: docker-compose.pqc.yml is an evaluation recipe.
+Structural checks catch missing secrets and misleading security
+settings, but they do not prove runtime logging, memory locking, or
+production readiness.
 
 Run from the fork repo root:
   python3 scripts/pqc-e2e/compose.py
@@ -102,10 +96,10 @@ process.stdout.write(JSON.stringify(YAML.parse(fs.readFileSync(process.argv[1], 
 
     # 2. top-level keys
     log("2. top-level keys")
-    for k in ("services", "secrets", "volumes", "networks"):
+    for k in ("services", "secrets", "networks"):
         if k not in doc:
             fail(f"missing top-level key: {k}")
-    log(f"  services={list(doc['services'])} secrets={list(doc['secrets'])} volumes={list(doc['volumes'])}")
+    log(f"  services={list(doc['services'])} secrets={list(doc['secrets'])}")
 
     # 3. gateway service
     log("3. openclaw-gateway service shape")
@@ -128,14 +122,23 @@ process.stdout.write(JSON.stringify(YAML.parse(fs.readFileSync(process.argv[1], 
             fail(f"openclaw-gateway does not reference secret: {s}")
     log("  gateway_token + wrap_key: declared + referenced: OK")
 
-    # 5. mlock tmpfs volume declared + mounted
-    log("5. mlock tmpfs volume declared + mounted on gateway")
-    if "mlock_tmpfs" not in doc["volumes"]:
-        fail("mlock_tmpfs volume not declared at top level")
-    vol_mounts = [v for v in gw["volumes"] if "mlock" in v]
-    if not vol_mounts:
-        fail("no mlock volume mounted on openclaw-gateway")
-    log(f"  mlock_tmpfs declared + mounted: {vol_mounts}")
+    # 5. Reject inert security knobs and a volume unrelated to mlock(2).
+    log("5. no inert PQC security switches or fake mlock volume")
+    forbidden = {"PQC_LOG_LEVEL", "PQC_AUDIT_LOG_PATH", "PQC_REQUIRE_MLOCK"}
+    for name, service in doc["services"].items():
+        environment = service.get("environment") or {}
+        configured = set(environment) if isinstance(environment, dict) else {
+            str(entry).split("=", 1)[0] for entry in environment
+        }
+        if configured & forbidden:
+            fail(f"{name} advertises unsupported PQC controls: {sorted(configured & forbidden)}")
+        if "com.pqc-openclaw.security.audit-level" in (service.get("labels") or {}):
+            fail(f"{name} advertises an unverified audit level")
+    if "mlock_tmpfs" in (doc.get("volumes") or {}):
+        fail("mlock_tmpfs is not connected to the secure-memory backend")
+    if any("mlock_tmpfs" in str(mount) for mount in gw["volumes"]):
+        fail("gateway mounts an unused mlock_tmpfs volume")
+    log("  unsupported controls absent: OK")
 
     # 6. cap_drop
     log("6. cap_drop hardening (NET_RAW, NET_ADMIN, SYS_PTRACE, SYS_ADMIN)")

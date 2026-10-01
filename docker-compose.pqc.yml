@@ -4,9 +4,9 @@
 # file (not an `extends:` of upstream `docker-compose.yml`) so that:
 #   1. Upstream `docker-compose.yml` keeps its plain semantics and can
 #      be diffed cleanly against openclaw/openclaw on a merge.
-#   2. Operators deploying the PQC fork run an explicit, audited recipe.
-#   3. The PQC-specific additions (Docker secrets, mlock tmpfs, hardened
-#      healthcheck, read-only rootfs, non-root user) are visible in one
+#   2. Operators evaluating the PQC fork run an explicit recipe.
+#   3. The PQC-specific additions (Docker secrets, healthcheck,
+#      read-only rootfs, non-root user) are visible in one
 #      place instead of being scattered across an `extends:` chain.
 #
 # Prerequisites (see docs/security/PQC-FORK.md §"Production deployment"):
@@ -69,16 +69,9 @@ services:
       OPENCLAW_CONFIG_PATH: /home/node/.openclaw/openclaw.json
       OPENCLAW_CONFIG_DIR: /home/node/.openclaw
       OPENCLAW_WORKSPACE_DIR: /home/node/.openclaw/workspace
-      # PQC-fork specific. The PQC events (mlock / munlock /
-      # mlock-unavailable) are emitted on a separate stream so that
-      # security monitoring can ingest them without parsing the full
-      # Gateway log. See docs/security/MLOCK.md §"Audit log".
-      PQC_LOG_LEVEL: ${PQC_LOG_LEVEL:-info}
-      PQC_AUDIT_LOG_PATH: /home/node/.openclaw/pqc-audit.log
-      # Force the mlock path off until the operator has validated it on
-      # their kernel. Set to "1" only after running the manual test in
-      # docs/security/MLOCK.md §"Manual mlock validation" successfully.
-      PQC_REQUIRE_MLOCK: ${PQC_REQUIRE_MLOCK:-0}
+      # PQC events currently use the ordinary gateway log stream. There
+      # is no separate audit-file sink or fail-closed mlock environment
+      # switch; see docs/security/MLOCK.md before using real keys.
       # Loaded from Docker secrets; the *_FILE form is the canonical
       # pattern for `docker exec` / `docker inspect` exposure containment.
       OPENCLAW_GATEWAY_TOKEN_FILE: /run/secrets/gateway_token
@@ -100,17 +93,10 @@ services:
       CLAUDE_WEB_COOKIE: ${CLAUDE_WEB_COOKIE:-}
       TZ: ${OPENCLAW_TZ:-UTC}
     volumes:
-      # Persistent state (sqlite, keyring cache, pqc-audit.log).
+      # Persistent state (sqlite and keyring cache).
       - "${OPENCLAW_STATE_DIR:-/var/lib/pqc-openclaw}:/home/node/.openclaw"
       - "${OPENCLAW_WORKSPACE_DIR:-/var/lib/pqc-openclaw/workspace}:/home/node/.openclaw/workspace"
       - "${OPENCLAW_AUTH_PROFILE_SECRET_DIR:-/var/lib/pqc-openclaw/auth-profile-secrets}:/home/node/.config/openclaw"
-      # mlock tmpfs: process.mlock(2) requires the pages to be resident.
-      # Backing it with tmpfs (not a bind mount on a real fs) ensures
-      # the pages are always RAM-backed and not swapped to disk under
-      # memory pressure. 64 MiB is a generous cap; the actual wrap key
-      # is 32 bytes, but the OS rounds up to page granularity and we
-      # want headroom for future keys (audit log scratch buffer etc).
-      - mlock_tmpfs:/home/node/.openclaw/mlock
       # Healthcheck script (host-side install-pqc.sh installs this at
       # /usr/local/bin/healthcheck-pqc.sh). We bind it into the
       # container so the in-container healthcheck can run the same
@@ -222,12 +208,11 @@ services:
     # ------------------------------------------------------------------
     labels:
       org.opencontainers.image.title: "pqc-openclaw-gateway"
-      org.opencontainers.image.description: "PQC OpenClaw fork gateway with side-channel validation, mlock wrap key, and OS keyring fallback"
+      org.opencontainers.image.description: "Experimental PQC OpenClaw fork gateway; secure memory is platform dependent"
       org.opencontainers.image.source: "https://github.com/WU123-ABC-Cell/pqc-openclaw"
       org.opencontainers.image.licenses: "Apache-2.0"
       com.pqc-openclaw.role: "gateway"
-      com.pqc-openclaw.security.audit: "docs/security/MLOCK.md,docs/security/constant-time-audit.md"
-      com.pqc-openclaw.security.audit-level: "self-audit (paper-grade); third-party audit pending"
+      com.pqc-openclaw.security.docs: "docs/security/MLOCK.md,docs/security/constant-time-audit.md"
 
   # --------------------------------------------------------------------
   # openclaw-cli — interactive CLI that runs in the gateway's netns
@@ -274,21 +259,6 @@ services:
         condition: service_healthy
     labels:
       com.pqc-openclaw.role: "cli"
-      com.pqc-openclaw.security.audit-level: "self-audit (paper-grade)"
-
-# ----------------------------------------------------------------------
-# Named volumes
-# ----------------------------------------------------------------------
-volumes:
-  mlock_tmpfs:
-    # `driver_opts.size` caps the tmpfs at 64 MiB so a runaway mlock
-    # call cannot exhaust host RAM. The `node` user can write into
-    # this path; everything else is read-only.
-    driver: local
-    driver_opts:
-      type: tmpfs
-      device: tmpfs
-      o: size=64m,uid=1000,gid=1000,mode=0755
 
 # ----------------------------------------------------------------------
 # Networks

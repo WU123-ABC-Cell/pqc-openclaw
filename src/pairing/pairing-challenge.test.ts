@@ -166,6 +166,34 @@ describe("issuePairingChallenge", () => {
     await expectIssuedChallengeCase(setup());
   });
 
+  it("reuses an existing challenge code on opt-in retry without repeating the creation hook", async () => {
+    const sendPairingReply = vi.fn(async (_text: string) => {});
+    const onCreated = vi.fn();
+    const result = await issuePairingChallenge({
+      ...createBaseChallengeParams(),
+      upsertPairingRequest: async () => ({ code: "ABCD", created: false }),
+      sendPairingReply,
+      resendExisting: true,
+      onCreated,
+    });
+    expect(result).toEqual({ created: false });
+    expect(sendPairingReply).toHaveBeenCalledTimes(1);
+    expect(sendPairingReply.mock.calls[0]?.[0]).toContain("ABCD");
+    expect(onCreated).not.toHaveBeenCalled();
+  });
+
+  it("does not send an empty code when the pending-request store is full", async () => {
+    const sendPairingReply = vi.fn(async (_text: string) => {});
+    const result = await issuePairingChallenge({
+      ...createBaseChallengeParams(),
+      upsertPairingRequest: async () => ({ code: "", created: false }),
+      sendPairingReply,
+      resendExisting: true,
+    });
+    expect(result).toEqual({ created: false });
+    expect(sendPairingReply).not.toHaveBeenCalled();
+  });
+
   it("fires channel_pairing_requested only for newly created requests", async () => {
     const handler = vi.fn(async () => {});
     initializeGlobalHookRunner(

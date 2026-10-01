@@ -16,6 +16,8 @@ type PairingChallengeParams = {
     meta?: PairingMeta;
   }) => Promise<{ code: string; created: boolean }>;
   sendPairingReply: (text: string) => Promise<void>;
+  /** Retry delivery of an existing code on a later inbound request (opt-in). */
+  resendExisting?: boolean;
   buildReplyText?: (params: { code: string; senderIdLine: string }) => string;
   onCreated?: (params: { code: string }) => void;
   onReplyError?: (err: unknown) => void;
@@ -59,19 +61,23 @@ export async function issuePairingChallenge(
     id: params.senderId,
     meta: params.meta,
   });
-  if (!created) {
+  if (!created && (!params.resendExisting || !code)) {
     return { created: false };
   }
-  params.onCreated?.({ code });
+  if (created) {
+    params.onCreated?.({ code });
+  }
   const accountId = params.accountId ? normalizeAccountId(params.accountId) : undefined;
   // Notification/audit hooks must not delay the pairing-code reply.
-  void runPairingRequestedHook({
-    channel: params.channel,
-    accountId,
-    senderId: params.senderId,
-    code,
-    meta: params.meta,
-  }).catch(() => undefined);
+  if (created) {
+    void runPairingRequestedHook({
+      channel: params.channel,
+      accountId,
+      senderId: params.senderId,
+      code,
+      meta: params.meta,
+    }).catch(() => undefined);
+  }
   const replyText =
     params.buildReplyText?.({ code, senderIdLine: params.senderIdLine }) ??
     buildPairingReply({
@@ -84,5 +90,5 @@ export async function issuePairingChallenge(
   } catch (err) {
     params.onReplyError?.(err);
   }
-  return { created: true, code };
+  return created ? { created: true, code } : { created: false };
 }
