@@ -81,7 +81,8 @@ REQUIREMENTS
   - Linux (Ubuntu 22.04+), macOS 13+, or WSL2 Ubuntu
   - root for a production install (system user, /opt, /usr/local, systemd)
   - Internet access (for Node + pnpm download)
-  - python3, make, and a C++17 compiler (unless --skip-build)
+  - python3 (required for backups, including with --skip-build)
+  - make and a C++17 compiler (unless --skip-build)
 
 POST-INSTALL
   On Linux the script writes the systemd unit and gateway-token env file.
@@ -131,11 +132,11 @@ esac
 [[ "$NODE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
   || die "--node-version must be an exact stable version such as 24.16.0"
 
-for tool in curl git tar awk; do
+for tool in curl git tar awk python3; do
   command -v "$tool" >/dev/null 2>&1 || die "missing required tool: $tool"
 done
 if [[ $SKIP_BUILD -eq 0 ]]; then
-  for tool in python3 make; do
+  for tool in make; do
     command -v "$tool" >/dev/null 2>&1 || die "missing native-build tool: $tool (required unless --skip-build)"
   done
   command -v c++ >/dev/null 2>&1 || die "missing C++17 compiler: c++ (required unless --skip-build)"

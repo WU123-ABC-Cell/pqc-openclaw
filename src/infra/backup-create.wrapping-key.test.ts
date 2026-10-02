@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import * as tar from "tar";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { backupVerifyCommand } from "../commands/backup-verify.js";
 import { resolveOpenClawStateSqlitePath } from "../state/openclaw-state-db.paths.js";
 import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
@@ -26,6 +26,40 @@ async function listEntries(file: string): Promise<string[]> {
 }
 
 describe("backup wrapping-key exclusion", () => {
+  it("does not publish when a selected regular file becomes a key symlink before read", async () => {
+    await withOpenClawTestState({ env: { OPENCLAW_WRAP_KEY_FILE: undefined } }, async (state) => {
+      const key = state.statePath("wrap-key.b64");
+      const candidate = state.statePath("ordinary.txt");
+      const output = state.path("backup.tar.gz");
+      await fs.writeFile(key, "dummy-wrapping-secret");
+      await fs.writeFile(candidate, "ordinary-data");
+      const keys = await createBackupWrappingKeyFilter(state.stateDir);
+      const originalOpen = fs.open.bind(fs);
+      let attacked = false;
+      const spy = vi.spyOn(fs, "open").mockImplementation(async (file, ...args) => {
+        if (file !== candidate || attacked) {
+          return originalOpen(file, ...args);
+        }
+        attacked = true;
+        await fs.rename(candidate, `${candidate}.old`);
+        await fs.symlink(key, candidate);
+        try {
+          return await originalOpen(file, ...args);
+        } finally {
+          await fs.unlink(candidate);
+          await fs.rename(`${candidate}.old`, candidate);
+        }
+      });
+      try {
+        await expect(createBackupArchive({ output })).rejects.toThrow();
+        expect(attacked).toBe(true);
+        await keys.assertUnchanged();
+        await expect(fs.stat(output)).rejects.toMatchObject({ code: "ENOENT" });
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
   it("rejects a whole-file asset that is also the configured wrapping key", async () => {
     await withOpenClawTestState({ env: { OPENCLAW_WRAP_KEY_FILE: undefined } }, async (state) => {
       await state.writeConfig({});

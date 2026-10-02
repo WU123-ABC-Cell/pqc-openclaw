@@ -93,8 +93,19 @@ def run(script, *args, env=None):
     return r
 
 
+def python_shim(directory, injection):
+    # Inject at the real descriptor/tarfile boundary without a production hook.
+    path = os.path.join(directory, "python3")
+    with open(path, "w") as f:
+        f.write(f"#!{sys.executable}\nimport os, sys, tarfile\n")
+        f.write("sys.argv.pop(1)\nrestore = lambda: None\n")
+        f.write(injection)
+        f.write("\ntry:\n    exec(compile(sys.stdin.read(), '<backup-snapshot>', 'exec'))\nfinally:\n    restore()\n")
+    os.chmod(path, 0o700)
+
+
 def check_key_boundaries(script):
-    for mode in ("final-symlink", "parent-symlink", "state-symlink", "external-hardlink", "env-and-cli", "special-names", "selector-aba", "json"):
+    for mode in ("final-symlink", "parent-symlink", "state-symlink", "external-hardlink", "env-and-cli", "special-names", "selector-aba", "nested-backup", "json"):
         with tempfile.TemporaryDirectory(prefix="pqc-key-boundary-") as root:
             state = make_state_dir()
             try:
@@ -103,7 +114,9 @@ def check_key_boundaries(script):
                 env = {}
                 state_input = state
                 excluded = ["wrap-key.b64", "innocent-default.txt", "keys/current.key", "innocent-custom.txt"]
-                if mode == "final-symlink":
+                if mode == "nested-backup":
+                    backup = os.path.join(state, "backups")
+                elif mode == "final-symlink":
                     link = os.path.join(root, "selected-link")
                     os.symlink(selected, link)
                     selected = link
@@ -137,14 +150,18 @@ def check_key_boundaries(script):
                         f.write("other-key")
                     shim = os.path.join(root, "bin")
                     os.mkdir(shim)
-                    with open(os.path.join(shim, "find"), "w") as f:
-                        f.write('#!/usr/bin/env bash\n"$REAL_FIND" "$@" || exit $?\nln -sfn "$OTHER_KEY" "$KEY_SELECTOR"\n')
-                    with open(os.path.join(shim, "tar"), "w") as f:
-                        f.write('#!/usr/bin/env bash\nln -sfn "$INITIAL_KEY" "$KEY_SELECTOR"\nexec "$REAL_TAR" "$@"\n')
-                    for tool in ("find", "tar"):
-                        os.chmod(os.path.join(shim, tool), 0o700)
+                    python_shim(shim, '''
+real_listdir = os.listdir
+def listdir(fd):
+    os.unlink(os.environ["KEY_SELECTOR"])
+    os.symlink(os.environ["OTHER_KEY"], os.environ["KEY_SELECTOR"])
+    return real_listdir(fd)
+os.listdir = listdir
+def restore():
+    os.unlink(os.environ["KEY_SELECTOR"])
+    os.symlink(os.environ["INITIAL_KEY"], os.environ["KEY_SELECTOR"])
+''')
                     env = {"PATH": shim + os.pathsep + os.environ["PATH"],
-                           "REAL_FIND": shutil.which("find"), "REAL_TAR": shutil.which("tar"),
                            "OTHER_KEY": other, "INITIAL_KEY": selected, "KEY_SELECTOR": selector}
                     selected = selector
                 controls = ["ordinary.b64", "ordinary-hardlink", "--checkpoint-action=exec=not-a-command", "space name", "newline\nfile", "literal[abc]*"]
@@ -152,6 +169,8 @@ def check_key_boundaries(script):
                     with open(os.path.join(state, name), "w") as f:
                         f.write("ordinary-data")
                 os.symlink("./ordinary.b64", os.path.join(state, "ordinary-symlink"))
+                os.symlink("./missing", os.path.join(state, "dangling-symlink"))
+                os.symlink("./cyclic-symlink", os.path.join(state, "cyclic-symlink"))
                 options = ["--state-dir", state_input, "--backup-dir", backup,
                            "--wrap-key-file", selected, "--skip-healthcheck", "--skip-s3"]
                 if mode == "json":
@@ -164,6 +183,8 @@ def check_key_boundaries(script):
                     fail(f"key boundary {mode}: expected one published archive")
                 with tarfile.open(archives[0]) as tf:
                     members = tf.getnames()
+                    if any("/.pqc-backup-" in member for member in members):
+                        fail("private staging was included in the backup")
                     if any("pqc-openclaw-state/" + name in members for name in excluded):
                         fail(f"key boundary {mode}: secret path or alias was included")
                     if not all("pqc-openclaw-state/" + name in members for name in controls):
@@ -171,6 +192,10 @@ def check_key_boundaries(script):
                     link = tf.getmember("pqc-openclaw-state/ordinary-symlink")
                     if not link.issym() or link.linkname != "./ordinary.b64":
                         fail(f"key boundary {mode}: ordinary symlink target was rewritten")
+                    for name, target in (("dangling-symlink", "./missing"), ("cyclic-symlink", "./cyclic-symlink")):
+                        link = tf.getmember("pqc-openclaw-state/" + name)
+                        if not link.issym() or link.linkname != target:
+                            fail(f"key boundary {mode}: unresolved symlink was lost or rewritten")
                     secrets = [b"dGVzdC1rZXktMzItYnl0ZXMtZm9yLXRlc3RpbmcxMjM0NQ==",
                                b"Y3VzdG9tLWtleS1tdXN0LXN0YXktb3V0LW9mLWJhY2t1cHM="]
                     if any(any(secret in tf.extractfile(member).read() for secret in secrets)
@@ -197,6 +222,14 @@ def check_key_boundaries(script):
                     fail("invalid/uncertain key metadata did not fail cleanly before publication")
             log("  invalid metadata and dry-run: OK")
 
+            no_python = os.path.join(root, "no-python")
+            os.mkdir(no_python)
+            os.symlink(shutil.which("bash"), os.path.join(no_python, "bash"))
+            r = run(script, "--state-dir", state, "--backup-dir", backup,
+                    "--skip-healthcheck", "--skip-s3", env={"PATH": no_python})
+            if r.returncode != 1 or "python3 is required" not in r.stderr or os.path.exists(os.path.join(backup, ".backup.lock")):
+                fail("missing python3 did not fail with actionable diagnostics before locking")
+
             dangling = os.path.join(root, "dangling-key")
             os.symlink(os.path.join(root, "absent-key"), dangling)
             r = run(script, "--state-dir", state, "--backup-dir", backup,
@@ -222,7 +255,7 @@ def check_key_boundaries(script):
             os.unlink(os.path.join(shim, "stat"))
             key = os.path.join(state, "wrap-key.b64")
             with open(os.path.join(shim, "tar"), "w") as f:
-                f.write('#!/usr/bin/env bash\n"$REAL_TAR" "$@" || exit $?\nif [[ "$1" == "-czf" ]]; then printf changed-key-size > "$TEST_KEY"; fi\n')
+                f.write('#!/usr/bin/env bash\n"$REAL_TAR" "$@" || exit $?\nif [[ "$1" == "-xzf" ]]; then printf changed-key-size > "$TEST_KEY"; fi\n')
             os.chmod(os.path.join(shim, "tar"), 0o700)
             marker = os.path.join(root, "uploaded")
             with open(os.path.join(shim, "aws"), "w") as f:
@@ -253,6 +286,116 @@ def check_key_boundaries(script):
             log("  missing default key, dangling key and metadata failure: OK")
         finally:
             shutil.rmtree(state, ignore_errors=True)
+
+
+def check_source_swaps(script):
+    for mode in ("candidate", "ancestor", "candidate-fd", "ancestor-fd", "current-key"):
+        with tempfile.TemporaryDirectory(prefix="pqc-source-swap-") as root:
+            state = make_state_dir()
+            try:
+                backup = os.path.join(root, "backups")
+                shim = os.path.join(root, "bin")
+                os.mkdir(shim)
+                victim = os.path.join(state, "victim")
+                secret = os.path.join(root, "secret")
+                saved = os.path.join(root, "saved")
+                if mode.startswith("ancestor"):
+                    os.mkdir(victim)
+                    os.mkdir(secret)
+                    victim = os.path.join(victim, "entry")
+                    secret = os.path.join(secret, "entry")
+                with open(victim, "w") as f:
+                    f.write("ordinary-data")
+                os.link(os.path.join(state, "wrap-key.b64"), secret)
+                victim_swap = os.path.dirname(victim) if mode.startswith("ancestor") else victim
+                secret_swap = os.path.dirname(secret) if mode.startswith("ancestor") else secret
+                marker = os.path.join(root, "injected")
+                with open(os.path.join(shim, "tar"), "w") as f:
+                    f.write('''#!/usr/bin/env bash
+if [[ "$1" == "-czf" ]]; then
+  mv "$VICTIM" "$SAVED"
+  mv "$SECRET" "$VICTIM"
+  "$REAL_TAR" "$@"
+  rc=$?
+  mv "$VICTIM" "$SECRET"
+  mv "$SAVED" "$VICTIM"
+  exit "$rc"
+fi
+exec "$REAL_TAR" "$@"
+''')
+                os.chmod(os.path.join(shim, "tar"), 0o700)
+                if mode.endswith("-fd"):
+                    python_shim(shim, '''
+real_open = os.open
+def open_source(name, flags, *args, **kwargs):
+    if name == "victim" and "dir_fd" in kwargs:
+        os.rename(os.environ["VICTIM"], os.environ["SAVED"])
+        os.rename(os.environ["SECRET"], os.environ["VICTIM"])
+        try:
+            descriptor = real_open(name, flags, *args, **kwargs)
+            with open(os.environ["INJECTION_MARKER"], "w") as f:
+                f.write("injected")
+            return descriptor
+        finally:
+            os.rename(os.environ["VICTIM"], os.environ["SECRET"])
+            os.rename(os.environ["SAVED"], os.environ["VICTIM"])
+    return real_open(name, flags, *args, **kwargs)
+os.open = open_source
+''')
+                elif mode == "current-key":
+                    # The current selector's inode is different from the pinned
+                    # original. Exclude it too, even when the selector is restored.
+                    selector = os.path.join(root, "selector")
+                    os.symlink(os.path.join(state, "wrap-key.b64"), selector)
+                    python_shim(shim, '''
+real_stat = os.stat
+def source_stat(name, *args, **kwargs):
+    if name == "victim" and "dir_fd" in kwargs:
+        os.unlink(os.environ["KEY_SELECTOR"])
+        os.symlink(os.environ["VICTIM"], os.environ["KEY_SELECTOR"])
+        with open(os.environ["INJECTION_MARKER"], "w") as f:
+            f.write("injected")
+    return real_stat(name, *args, **kwargs)
+os.stat = source_stat
+def restore():
+    os.unlink(os.environ["KEY_SELECTOR"])
+    os.symlink(os.environ["INITIAL_KEY"], os.environ["KEY_SELECTOR"])
+''')
+                else:
+                    selector = os.path.join(state, "wrap-key.b64")
+                options = ["--state-dir", state, "--backup-dir", backup,
+                           "--skip-healthcheck", "--skip-s3"]
+                if mode == "current-key":
+                    options += ["--wrap-key-file", selector]
+                r = run(script, *options,
+                        env={"PATH": shim + os.pathsep + os.environ["PATH"],
+                             "REAL_TAR": shutil.which("tar"), "VICTIM": victim_swap,
+                             "SECRET": secret_swap, "SAVED": saved,
+                             "KEY_SELECTOR": selector if mode == "current-key" else "unused",
+                             "INITIAL_KEY": os.path.join(state, "wrap-key.b64"),
+                             "INJECTION_MARKER": marker})
+                if mode == "current-key" and (r.returncode not in (0, 2) or
+                                              len(glob.glob(os.path.join(backup, "*.tar.gz"))) != 1):
+                    fail(f"current-key selector case did not complete: {r.stderr}")
+                if mode.endswith("-fd") and (not os.path.exists(marker) or r.returncode != 1):
+                    fail(f"{mode} did not exercise and reject a swapped descriptor: {r.stderr}")
+                if mode.endswith("-fd") and (glob.glob(os.path.join(backup, "*.tar.gz")) or
+                                             os.path.exists(os.path.join(backup, ".backup.lock")) or
+                                             glob.glob(os.path.join(backup, ".pqc-backup-*"))):
+                    fail(f"{mode} published or left lock/private staging")
+                for archive in glob.glob(os.path.join(backup, "*.tar.gz")):
+                    with tarfile.open(archive) as tf:
+                        if mode == "current-key" and (not os.path.exists(marker) or
+                                                       "pqc-openclaw-state/victim" in tf.getnames()):
+                            fail("current selector inode was not excluded")
+                        if any(b"dGVzdC1rZXktMzItYnl0ZXMtZm9yLXRlc3RpbmcxMjM0NQ==" in tf.extractfile(m).read()
+                               for m in tf.getmembers() if m.isfile()):
+                            fail(f"{mode} swap-and-restore leaked wrapping key bytes")
+                if r.returncode not in (0, 1, 2):
+                    fail(f"{mode} swap unexpected exit: {r.stderr}")
+                log(f"  {mode} swap-and-restore: no key bytes published: OK")
+            finally:
+                shutil.rmtree(state, ignore_errors=True)
 
 
 def main():
@@ -481,6 +624,7 @@ def main():
 
         log("9. key aliases, special filenames and failure boundaries")
         check_key_boundaries(args.script)
+        check_source_swaps(args.script)
         log("ALL CHECKS PASSED")
     finally:
         shutil.rmtree(state, ignore_errors=True)

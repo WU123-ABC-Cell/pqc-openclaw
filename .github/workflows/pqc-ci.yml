@@ -53,6 +53,8 @@ jobs:
           src/security/windows-wrap-key-acl.test.ts
           src/infra/fs-safe-defaults.test.ts
           src/infra/device-identity.state-dir.test.ts
+          src/infra/backup-create.wrapping-key.test.ts
+          src/infra/backup-source-staging.test.ts
           src/pairing/pairing-challenge.test.ts
           extensions/nostr/src/channel.inbound.test.ts
           extensions/nostr/src/channel.outbound.test.ts

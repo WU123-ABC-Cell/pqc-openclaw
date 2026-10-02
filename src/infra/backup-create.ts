@@ -31,12 +31,10 @@ import {
   type BackupArchivePublication,
 } from "./backup-archive-publication.js";
 import { removePreparedBackupArchive, writeArchiveStreamToFile } from "./backup-create-stream.js";
+import { stageBackupSources } from "./backup-source-staging.js";
 import { writeTarArchiveWithRetry } from "./backup-tar-retry.js";
 import { isTransientSqliteBackupPath, isVolatileBackupPath } from "./backup-volatile-filter.js";
-import {
-  createBackupLinkCache,
-  createBackupVolatileStatCache,
-} from "./backup-volatile-stat-cache.js";
+import { createBackupLinkCache } from "./backup-volatile-stat-cache.js";
 import { createBackupWrappingKeyFilter } from "./backup-wrapping-key-filter.js";
 import { formatErrorMessage } from "./errors.js";
 import { sameFileIdentity } from "./fs-safe-advanced.js";
@@ -947,10 +945,6 @@ export async function createBackupArchive(
         unexpectedSqliteSourcePaths.push(entryPath);
         return false;
       }
-      if (isVolatileBackupPath(entryPath, volatilePlan)) {
-        skippedVolatileCount += 1;
-        return false;
-      }
       return true;
     };
     const completedArchive = await writeTarArchiveWithRetry({
@@ -962,6 +956,25 @@ export async function createBackupArchive(
         // cumulative skip counts across attempts instead of the final one.
         skippedVolatileCount = 0;
         unexpectedSqliteSourcePaths.length = 0;
+        const stagingDir = await fs.mkdtemp(path.join(tempDir, "sources-"));
+        const staged = await stageBackupSources({
+          directory: path.join(stagingDir, "entries"),
+          sources: [
+            manifestPath,
+            ...stateSqliteBackup.snapshots.map((snapshot) => snapshot.sourcePath),
+            ...legacyAuditSnapshots.map((snapshot) => snapshot.sourcePath),
+            ...result.assets.map((asset) => asset.sourcePath),
+          ],
+          filter: tarFilter,
+          skipSource: (source) => {
+            if (!isVolatileBackupPath(source, volatilePlan)) {
+              return false;
+            }
+            skippedVolatileCount += 1;
+            return true;
+          },
+          assertSafeRead: wrappingKeys.assertSafeRead,
+        });
         const prepared = await writeArchiveStreamToFile({
           archivePath: attemptTempArchivePath,
           archiveStream: tar.c(
@@ -970,23 +983,16 @@ export async function createBackupArchive(
               portable: true,
               preservePaths: true,
               linkCache: createBackupLinkCache(),
-              statCache: createBackupVolatileStatCache(volatilePlan),
-              filter: tarFilter,
               onWriteEntry: (entry) => {
                 entry.path = remapArchiveEntryPath({
-                  entryPath: entry.path,
+                  entryPath: staged.sourcePaths.get(path.resolve(entry.path)) ?? entry.path,
                   manifestPath,
                   archiveRoot,
                   sourcePathRemaps,
                 });
               },
             },
-            [
-              manifestPath,
-              ...stateSqliteBackup.snapshots.map((snapshot) => snapshot.sourcePath),
-              ...legacyAuditSnapshots.map((snapshot) => snapshot.sourcePath),
-              ...result.assets.map((asset) => asset.sourcePath),
-            ],
+            staged.sources,
           ),
           onPartialArchive: (partialArchive) => {
             publication.pendingCleanupArchives.push(partialArchive);

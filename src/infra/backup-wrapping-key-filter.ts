@@ -38,7 +38,7 @@ export async function createBackupWrappingKeyFilter(stateDir: string) {
   );
   return {
     excludedFiles: snapshots.filter((entry) => entry.identity).map((entry) => entry.file),
-    excludes(file: string, stat?: Stats): boolean {
+    excludes(this: void, file: string, stat?: Stats): boolean {
       const lexical = normalized(file);
       return snapshots.some(
         (entry) =>
@@ -46,6 +46,18 @@ export async function createBackupWrappingKeyFilter(stateDir: string) {
           lexical === entry.identity?.target ||
           Boolean(stat?.isFile() && entry.identity && sameFileIdentity(stat, entry.identity.stat)),
       );
+    },
+    async assertSafeRead(this: void, file: string, stat: Stats): Promise<void> {
+      for (const entry of snapshots) {
+        const current = await inspect(entry.file);
+        if (
+          normalized(file) === entry.lexical ||
+          (entry.identity && sameFileIdentity(stat, entry.identity.stat)) ||
+          (current && sameFileIdentity(stat, current.stat))
+        ) {
+          throw new Error(`Backup source became a wrapping key: ${file}. Retry backup.`);
+        }
+      }
     },
     async assertUnchanged(): Promise<void> {
       for (const entry of snapshots) {

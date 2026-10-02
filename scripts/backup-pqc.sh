@@ -8,7 +8,7 @@
 # backups, and optionally uploads to S3 for off-host storage.
 #
 # Design goals (intentionally conservative):
-#   1. **Atomic**: tarball is built in $TMPDIR first, then moved into
+#   1. **Atomic**: tarball is built in a private backup-directory scratch, then moved into
 #      place with `mv`. A partial / corrupted tarball never appears in
 #      $BACKUP_DIR.
 #   2. **Verifiable**: every backup gets a .sha256 sidecar; a separate
@@ -318,6 +318,10 @@ fi
 # ----------------------------------------------------------------------
 
 if [[ $DRY_RUN -eq 0 ]]; then
+  if ! command -v python3 >/dev/null 2>&1; then
+    fail "snapshot" "python3 is required for descriptor-bound backup reads; install python3 and retry"
+    exit 1
+  fi
   if [[ ! -d "$STATE_DIR" ]]; then
     fail "state-dir" "$STATE_DIR does not exist; nothing to back up"
     exit 1
@@ -413,7 +417,7 @@ else
 fi
 
 # ----------------------------------------------------------------------
-# Build the tarball in $TMPDIR (atomic: write-then-rename)
+# Build beside the destination (same filesystem: write-then-rename)
 # ----------------------------------------------------------------------
 
 TS=$(date -u +%Y-%m-%dT%H%M%SZ)
@@ -428,7 +432,7 @@ if [[ -n "$LABEL" ]]; then
 fi
 BASENAME="pqc-openclaw-${SAFE_TS}${LABEL_PART}.tar.gz"
 FINAL_PATH="$BACKUP_DIR/$BASENAME"
-SCRATCH_DIR=$(mktemp -d -t pqc-backup-XXXXXX)
+SCRATCH_DIR=$(mktemp -d "$BACKUP_DIR/.pqc-backup-XXXXXX")
 SCRATCH_TARBALL="$SCRATCH_DIR/$BASENAME"
 # (The dry-run short-circuit lives above, after the pre-flight checks;
 # we never reach this point under --dry-run.)
@@ -473,39 +477,119 @@ assert_wrapping_keys_unchanged() {
   done
 }
 
-# Tar must not recursively reintroduce excluded children. NUL names also keep
-# newlines, glob characters and leading dashes literal rather than tar options.
-CANDIDATES="$SCRATCH_DIR/candidates.nul"
-ARCHIVE_FILES="$SCRATCH_DIR/archive-files.nul"
-(cd -- "$STATE_ROOT" && find . \
-  \( -path ./mlock -o -path ./openclaw.env -o -name '*.sock' -o -name '*.pid' \) \
-  -prune -o -print0) > "$CANDIDATES"
-while IFS= read -r -d '' entry; do
-  entry_path="$STATE_ROOT/${entry#./}"
-  entry_identity=""
-  if [[ -f "$entry_path" ]]; then
-    entry_state=$(file_metadata "$entry_path")
-    entry_tail="${entry_state#*:}"
-    entry_identity="${entry_state%%:*}:${entry_tail%%:*}"
-  fi
-  exclude=0
-  # Pin the original identities: a selector retarget-and-restore must not make
-  # old key aliases look ordinary during enumeration (even if final stat agrees).
-  for index in "${!WRAP_KEY_FILES[@]}"; do
-    if [[ "$entry_path" == "${WRAP_KEY_FILES[$index]}" ||
-          "$entry_identity" == "${WRAP_KEY_IDENTITIES[$index]}" ]]; then
-      exclude=1
-      break
-    fi
-  done
-  [[ $exclude -eq 1 ]] || printf '%s\0' "$entry"
-done < "$CANDIDATES" > "$ARCHIVE_FILES"
+# A filename manifest cannot bind tar's later reads to the checked inodes.
+# Keep every ancestor open and give tarfile the checked file descriptor itself.
+if ! python3 - "$STATE_ROOT" "$SCRATCH_TARBALL" "${#WRAP_KEY_FILES[@]}" \
+  "${WRAP_KEY_FILES[@]}" "${WRAP_KEY_IDENTITIES[@]}" <<'PY'
+import os
+import stat
+import sys
+import tarfile
 
-# Only manifest entries are archived; keep symbolic-link targets literal.
-tar -czf "$SCRATCH_TARBALL" \
-  -C "$STATE_ROOT" --no-recursion --null \
-  --transform 'flags=rh;s|^\./|pqc-openclaw-state/|' \
-  -T "$ARCHIVE_FILES"
+root, target, count = sys.argv[1:4]
+count = int(count)
+keys = sys.argv[4:4 + count]
+original_keys = {tuple(map(int, value.split(":"))) for value in sys.argv[4 + count:]
+                 if value != "missing:missing"}
+directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+file_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+
+def identity(value):
+    return value.st_dev, value.st_ino
+
+staging_identity = identity(os.stat(os.path.dirname(target)))
+
+def signature(value):
+    return identity(value) + (value.st_mode, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+
+def excluded(value):
+    protected = set(original_keys)
+    for key in keys:
+        try:
+            current = os.stat(key)
+        except FileNotFoundError:
+            if os.path.lexists(key) or not os.path.isdir(os.path.dirname(key)):
+                raise RuntimeError("cannot inspect wrapping key")
+            continue
+        if not stat.S_ISREG(current.st_mode):
+            raise RuntimeError("wrapping key must resolve to a regular file")
+        protected.add(identity(current))
+    return identity(value) in protected
+
+def header(name, value, kind):
+    info = tarfile.TarInfo("pqc-openclaw-state" + ("/" + name if name else ""))
+    info.type = kind
+    info.mode = stat.S_IMODE(value.st_mode)
+    info.uid, info.gid, info.mtime = value.st_uid, value.st_gid, value.st_mtime
+    return info
+
+def visit(archive, directory, prefix=""):
+    archive.addfile(header(prefix, os.fstat(directory), tarfile.DIRTYPE))
+    for name in sorted(os.listdir(directory)):
+        relative = prefix + "/" + name if prefix else name
+        if relative in ("mlock", "openclaw.env", "wrap-key.b64") or name.endswith((".sock", ".pid")):
+            continue
+        value = os.stat(name, dir_fd=directory, follow_symlinks=False)
+        if stat.S_ISDIR(value.st_mode):
+            # --backup-dir may be inside state: never ingest our own output.
+            if identity(value) == staging_identity:
+                continue
+            child = os.open(name, directory_flags, dir_fd=directory)
+            try:
+                if identity(os.fstat(child)) != identity(value):
+                    raise RuntimeError("archive source directory changed during backup")
+                visit(archive, child, relative)
+            finally:
+                os.close(child)
+        elif stat.S_ISREG(value.st_mode):
+            descriptor = os.open(name, file_flags, dir_fd=directory)
+            with os.fdopen(descriptor, "rb") as source:
+                opened = os.fstat(source.fileno())
+                if signature(opened) != signature(value):
+                    raise RuntimeError("archive source changed during backup")
+                if excluded(opened):
+                    continue
+                info = header(relative, opened, tarfile.REGTYPE)
+                info.size = opened.st_size
+                archive.addfile(info, source)
+                if signature(os.fstat(source.fileno())) != signature(opened) or excluded(opened):
+                    raise RuntimeError("archive source or wrapping key changed during backup")
+        elif stat.S_ISLNK(value.st_mode):
+            # Preserve ordinary symlinks literally; key aliases remain excluded.
+            try:
+                linked = os.stat(name, dir_fd=directory)
+            except OSError:
+                linked = None
+            if linked is not None and excluded(linked):
+                continue
+            info = header(relative, value, tarfile.SYMTYPE)
+            info.linkname = os.readlink(name, dir_fd=directory)
+            if signature(os.stat(name, dir_fd=directory, follow_symlinks=False)) != signature(value):
+                raise RuntimeError("archive symlink changed during backup")
+            archive.addfile(info)
+        elif stat.S_ISFIFO(value.st_mode):
+            archive.addfile(header(relative, value, tarfile.FIFOTYPE))
+        elif stat.S_ISCHR(value.st_mode) or stat.S_ISBLK(value.st_mode):
+            kind = tarfile.CHRTYPE if stat.S_ISCHR(value.st_mode) else tarfile.BLKTYPE
+            info = header(relative, value, kind)
+            info.devmajor, info.devminor = os.major(value.st_rdev), os.minor(value.st_rdev)
+            archive.addfile(info)
+
+try:
+    descriptor = os.open(root, directory_flags)
+    try:
+        with tarfile.open(target, "w:gz") as archive:
+            visit(archive, descriptor)
+    finally:
+        os.close(descriptor)
+except (OSError, RuntimeError, tarfile.TarError) as error:
+    print("descriptor-bound snapshot failed: " + str(error), file=sys.stderr)
+    sys.exit(1)
+PY
+then
+  fail "snapshot" "descriptor-bound snapshot failed; no archive published; retry with stable state"
+  exit 1
+fi
 
 TARBALL_BYTES=$(stat -c '%s' "$SCRATCH_TARBALL" 2>/dev/null || stat -f '%z' "$SCRATCH_TARBALL")
 ok "tar" "wrote $SCRATCH_TARBALL ($TARBALL_BYTES bytes)"
@@ -552,7 +636,6 @@ VERIFY_DIR=""
 # ----------------------------------------------------------------------
 
 assert_wrapping_keys_unchanged
-rm -f "$CANDIDATES" "$ARCHIVE_FILES"
 mv "$SCRATCH_TARBALL" "$FINAL_PATH"
 mv "$SCRATCH_SIDE"   "${FINAL_PATH}.sha256"
 rmdir "$SCRATCH_DIR"
