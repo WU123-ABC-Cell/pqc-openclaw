@@ -86,7 +86,7 @@ the wrapping key and protected data are not both available to the attacker.
 | Identity encryption  | `src/infra/device-identity-store.ts`; `src/security/secret-wrapping.ts`                                               | Wrapped identity storage exists, but length checks do not prove keypair correspondence and envelopes lack identity-context AAD                                                                                      |
 | Key selection        | `src/security/keyring-provider.ts`                                                                                    | File, environment, OS and composite providers exist; incomplete configuration, backend failure and global-cache isolation require repair                                                                            |
 | Key lifecycle        | `src/security/wrap-key-cli.ts`; `src/security/wrap-key-rotation.ts`                                                   | Auxiliary APIs exist; operator CLI registration and a verified persistent lifecycle are not established                                                                                                             |
-| Logging              | `src/logging/pqc-log.ts`                                                                                              | Default PQC events can go to stdout; the logger-binding helper has no observed production caller                                                                                                                    |
+| Logging              | `src/logging/pqc-log.ts`                                                                                              | PQC events use the canonical file/diagnostic transports with ordinary level filtering and redaction, not command stdout/stderr; there is no independent audit sink                                                  |
 | Deployment settings  | `docker-compose.pqc.yml`                                                                                              | Audit/level/require-lock variables are declared, but no corresponding production readers were found                                                                                                                 |
 
 Native client owners:
@@ -111,10 +111,24 @@ not protect other credentials in an archive. Keep recovery keys independently
 protected and verify restoration using a disposable state copy. Do not delete,
 overwrite or randomly regenerate a key used by existing ciphertext or backups.
 
-There is no accepted `openclaw wrap-key import/export/rotate/status` CLI in this
-baseline. Do not copy old whitepaper command examples as an operational procedure.
-A usable restore and transactional persistent rotation flow must be implemented
-and verified before claiming lifecycle support.
+The 2026-10-03 diagnostic adds `openclaw wrap-key status [--json]` and
+`--identity-key <key>` (default: `primary`). It checks only that selected identity,
+using the runtime's key-selection and permission policy and a read-only SQLite
+read. It does not create missing state, repair, migrate, or scan all identities.
+Exit `0` means the active key and checked identity are usable; exit `1` means
+missing, invalid or unavailable state. JSON exposes metadata only, not key bytes
+or raw provider/store errors. A `plaintext` row may be usable but is not encrypted.
+Read-only means no identity/key/schema writes, not filesystem immutability:
+[SQLite WAL readers](https://www.sqlite.org/wal.html#read_only_databases) may
+create or update `-wal`/`-shm` coordination sidecars. Do not use this command for
+forensic preservation or delete a live database's sidecars to prepare a query.
+Normal configured logging may create or append log files; identity/key/schema
+read-only guarantees do not imply a write-free logging transport.
+
+`openclaw wrap-key import`, `export` and `rotate` are still unregistered. Do not
+copy old whitepaper command examples as an operational procedure. A usable restore
+and transactional persistent rotation flow, bounded imports and failure cleanup
+must be implemented and verified before claiming lifecycle support.
 
 ### Migration and compatibility
 
@@ -139,15 +153,19 @@ owner-scoped reporting rather than implicit downgrade.
 
 ### Health, audit and memory
 
-The wrapping-key status helper can record damaged rows while setting `ok` based
-only on a nonempty active key ID. Because no production monitoring integration was
-established, neither a false-green deployed monitor nor complete identity health
-can be inferred from this helper alone.
+The status helper now requires a valid active key and valid requested identity
+rows before reporting `ok`. The operator CLI always requests one identity and
+reports failures nonzero; calling the helper without identity keys still checks
+the provider only. Neither entry point is an all-identities scan or an accepted
+production-monitoring integration. Successful availability does not imply that a
+legacy plaintext row is encrypted.
 
 The evaluation Compose recipe no longer sets `PQC_LOG_LEVEL`,
 `PQC_AUDIT_LOG_PATH` or `PQC_REQUIRE_MLOCK`: the gateway does not implement
-those switches. PQC events use the ordinary gateway log stream, not a separate
-audit-file sink. Memory locking remains best-effort rather than fail-closed.
+those switches. PQC events use OpenClaw's ordinary file/diagnostic transports,
+not command stdout/stderr or a separate audit-file sink. They honor
+`logging.level` (including `silent`), `logging.file` and canonical redaction.
+Memory locking remains best-effort rather than fail-closed.
 
 Secure-memory helpers are platform/build-dependent and best-effort without a
 working native path. Node version alone does not establish memory locking.

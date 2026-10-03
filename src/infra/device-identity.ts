@@ -148,20 +148,29 @@ function withDeviceIdentityCoordinator<T>(
   return result;
 }
 
-function createFallbackFileKeyring(options: DeviceIdentityStoreOptions): FileKeyring {
+function resolveFallbackFileKeyring(
+  options: DeviceIdentityStoreOptions,
+  create: boolean,
+): FileKeyring {
   const stateDir = resolveLegacyStateDir(options);
   const keyPath = path.join(stateDir, "wrap-key.b64");
-  fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  if (create) {
+    fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  }
   assertPrivateWindowsWrapKeyDirectory(stateDir);
-  try {
-    fs.writeFileSync(keyPath, encodeBase64UrlKey(generateWrappingKey()), {
-      encoding: "utf8",
-      flag: "wx",
-      mode: 0o600,
-    });
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
-      throw error;
+  // Diagnostics use the same key selection and permission policy as signing,
+  // but must never generate a key or attempt filesystem writes.
+  if (create) {
+    try {
+      fs.writeFileSync(keyPath, encodeBase64UrlKey(generateWrappingKey()), {
+        encoding: "utf8",
+        flag: "wx",
+        mode: 0o600,
+      });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+        throw error;
+      }
     }
   }
   const keyStat = fs.lstatSync(keyPath);
@@ -193,7 +202,7 @@ export function resolveDeviceIdentityWrappingOptions(
   if (!createFallback && !pathMayExist(fallbackPath)) {
     return options;
   }
-  return { ...options, wrappingKeyProvider: createFallbackFileKeyring(options) };
+  return { ...options, wrappingKeyProvider: resolveFallbackFileKeyring(options, createFallback) };
 }
 
 function loadOrCreateDeviceIdentityOwned(options: DeviceIdentityStoreOptions): DeviceIdentity {

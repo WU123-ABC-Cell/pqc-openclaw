@@ -30,7 +30,7 @@ for the changed key-selection contract and remaining blockers.
 | Identity storage           | AES-256-GCM wrapping and file/environment/OS keyring providers exist. Keypair validation, legacy migration, provider isolation and error handling remain repair targets. Encryption does not protect against a thief who also obtains the wrapping key. |
 | Backups                    | Built-in state backup does not currently exclude the default wrapping-key file. The separate `scripts/backup-pqc.sh` excludes it. Treat existing archives as sensitive and retain independent recovery keys; neither policy alone makes a backup safe.  |
 | Nostr                      | The production plugin still calls NIP-04. The custom `src/security/nip44-v2.ts` helper has no observed production caller and has unresolved protocol defects. Do not enable or treat it as compliant NIP-44 or delivered PQC messaging.                 |
-| Key lifecycle              | Wrapping-key status/import/export and rotation helpers exist, but `openclaw wrap-key` is not registered as an operator CLI. Do not rely on the old documented commands.                                                                                 |
+| Key lifecycle              | Read-only `openclaw wrap-key status` is registered. Import/export/rotation remain helper APIs, not operator commands; persistent lifecycle acceptance is pending. See the diagnostic scope below.                                                       |
 | Audit and required locking | Compose no longer advertises unsupported PQC logging or required-mlock switches. PQC events use the ordinary gateway log stream; there is no separate audit-file sink or fail-closed memory-locking policy.                                             |
 | Secure-memory helpers      | A native secure-memory implementation and tests exist. Availability is build/platform-dependent and fallback is best-effort. This is not complete process-memory protection; immutable JS strings and runtime copies remain outside the guarantee.      |
 | TLS and push               | This repository does not establish an accepted end-to-end hybrid TLS or dual-signature push deployment. Helper presence is not proof of native-client or external-service support.                                                                      |
@@ -38,6 +38,37 @@ for the changed key-selection contract and remaining blockers.
 
 See [the current security status and repair gates](docs/security/pqc-whitepaper.md)
 before reviewing deployment or migration instructions.
+
+### Read-only wrapping-key diagnostic (2026-10-03)
+
+This diagnostic updates the key-lifecycle row above; the other baseline rows are
+historical review notes, not a current acceptance inventory.
+
+```sh
+openclaw wrap-key status
+openclaw wrap-key status --json
+openclaw wrap-key status --identity-key <stored-identity-key> --json
+```
+
+The default checks only the `primary` device identity. It uses the runtime's key
+selection and permission checks, then reads and validates the selected identity
+from SQLite without creating a key, identity, database or migration. It does not
+scan all identities. Exit code `0` means the active key and selected identity are
+usable; exit code `1` means a required key/identity is missing, invalid or
+unavailable. A usable legacy plaintext row is explicitly labeled `plaintext`;
+`ok` is not proof of encryption, production readiness or complete key inventory.
+JSON contains diagnostic metadata, not key bytes or raw provider errors.
+SQLite may create or update its WAL coordination sidecars (`-wal`/`-shm`) for a
+read-only connection; this is not a forensic filesystem-immutability command.
+See [SQLite's read-only WAL contract](https://www.sqlite.org/wal.html#read_only_databases).
+Normal configured logging may also create or append log files. PQC diagnostics
+use OpenClaw's ordinary file/diagnostic transports, respecting `logging.level`
+and redaction; they do not write command stdout or stderr. `logging.file` selects
+the ordinary log destination, not an independent audit sink. `logging.level:
+"silent"` suppresses these events.
+
+`wrap-key import`, `export` and `rotate` are not registered. Do not use historical
+command examples as recovery instructions or overwrite keys to clear an error.
 
 ## Evaluation only
 

@@ -480,6 +480,17 @@ export const cliCommandCatalog: readonly CliCommandCatalogEntry[] = [
     },
   },
   { commandPath: ["secrets"], policy: { configGuard: "skip", networkProxy: "bypass" } },
+  {
+    commandPath: ["wrap-key"],
+    // Local read-only diagnostics must not migrate config/state or initialize
+    // plugin, shell-path, or network policy before inspecting a broken identity.
+    policy: {
+      configGuard: "skip",
+      loadPlugins: "never",
+      ensureCliPath: false,
+      networkProxy: "bypass",
+    },
+  },
   { commandPath: ["security"], policy: { networkProxy: "bypass" } },
   { commandPath: ["system"], policy: { networkProxy: "bypass" } },
   { commandPath: ["terminal"], policy: { networkProxy: "bypass" } },

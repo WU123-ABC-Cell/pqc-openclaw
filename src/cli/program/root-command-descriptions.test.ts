@@ -83,6 +83,7 @@ const JSON_NOT_APPLICABLE = {
       "directory groups",
       "security",
       "secrets",
+      "wrap-key",
       "models aliases",
       "models fallbacks",
       "models image-fallbacks",

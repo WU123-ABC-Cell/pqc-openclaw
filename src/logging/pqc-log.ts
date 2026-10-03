@@ -11,12 +11,11 @@
 //
 // The logger intentionally wraps the openclaw logger rather than
 // writing to stdout directly: the operator's log transport
-// (file / pino / redacted stream) is reused, and the redaction
+// (file / diagnostic events) is reused, and the redaction
 // policy that the openclaw logger applies to values is honoured
 // here. Tests can swap the transport by replacing the `emit` hook.
-import { type Logger as TsLogger } from "tslog";
 import type { LogLevel } from "./levels.js";
-import { normalizeLogLevel } from "./levels.js";
+import { getChildLogger } from "./logger.js";
 
 /** Canonical PQC event ids. Add new ones here; downstream consumers
  *  (doctor hints, log dashboards) read them as a stable vocabulary. */
@@ -70,7 +69,7 @@ export type PqcEmit = (level: LogLevel, event: PqcEventId, payload: PqcLogPayloa
 let currentEmit: PqcEmit = defaultEmit;
 
 /** Pre-emptive payload redaction. Applied at the PqcEmit boundary so
- *  every emit (test recorder, openclaw binding, default stdout) sees
+ *  every emit (test recorder or canonical logger) sees
  *  the redacted form. */
 function emitWithRedaction(
   emit: PqcEmit,
@@ -81,8 +80,7 @@ function emitWithRedaction(
   emit(level, event, redactPayload(payload));
 }
 
-/** Override the emit function. Used by tests + by the openclaw
- *  boot path to bind the openclaw logger. The emit is always
+/** Override the emit function for an explicit recorder. The emit is always
  *  wrapped in the redaction pass so the contract holds regardless
  *  of who supplies the sink. */
 export function setPqcEmit(emit: PqcEmit | null): void {
@@ -94,48 +92,17 @@ export function getPqcEmit(): PqcEmit {
   return currentEmit;
 }
 
-/** Default emit: route through the openclaw logger when one is set,
- *  otherwise write a minimal JSON line on stdout. The fallback is
- *  what unit tests see; production wires in the openclaw logger via
- *  `bindOpenClawLogger` (called from the runtime's bootstrap). */
+/** Security diagnostics use the canonical file/diagnostic transports, not
+ *  command output. Resolve the child per event so changed logger settings and
+ *  exit-time releases follow the same owner; no bootstrap binding is needed. */
 function defaultEmit(level: LogLevel, event: PqcEventId, payload: PqcLogPayload): void {
-  const record = {
-    level: typeof level === "number" ? level : normalizeLogLevel(level),
-    event,
-    ...redactPayload(payload),
-  };
-  // Best-effort stdout; production rebinds this to the openclaw
-  // logger, which routes through pino with redaction.
-  process.stdout.write(`[PQC] ${JSON.stringify(record)}\n`);
-}
-
-/** Bind the PQC emit to an openclaw tslog logger. The openclaw
- *  logger's redaction policy applies to every value. */
-export function bindOpenClawLogger(logger: TsLogger<unknown>): void {
-  setPqcEmit((level, event, payload) => {
-    const tag = `[PQC] ${event}`;
-    const redacted = redactPayload(payload);
-    switch (level) {
-      case "trace":
-        logger.trace(tag, redacted);
-        return;
-      case "debug":
-        logger.debug(tag, redacted);
-        return;
-      case "info":
-        logger.info(tag, redacted);
-        return;
-      case "warn":
-        logger.warn(tag, redacted);
-        return;
-      case "error":
-      case "fatal":
-        logger.error(tag, redacted);
-        return;
-      default:
-        logger.info(tag, redacted);
-    }
-  });
+  if (level === "silent") {
+    return;
+  }
+  getChildLogger({ subsystem: "pqc" })[level](
+    { event, ...redactPayload(payload) },
+    `[PQC] ${event}`,
+  );
 }
 
 /** Wrap an arbitrary emit so the redaction is applied uniformly. */

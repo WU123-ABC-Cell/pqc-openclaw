@@ -1,23 +1,20 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 // PQC fork M9: structured [PQC] log markers (whitepaper 2.2.9).
 //
 // The PQC log surface is an indirection over a single `PqcEmit`
 // function. Tests swap the emit for an in-memory recorder so we can
 // assert the exact (level, event, payload) shape without touching
-// the openclaw logger. Production wires `bindOpenClawLogger` at
-// boot; that path is exercised by a tiny integration test.
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { Logger } from "tslog";
-import {
-  bindOpenClawLogger,
-  getPqcEmit,
-  PQC_EVENT,
-  pqcLog,
-  type PqcEmit,
-  setPqcEmit,
-} from "./pqc-log.js";
+// the openclaw logger. The default sink is also exercised through
+// the real canonical file transport below.
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { flushLogger, resetLogger, setLoggerOverride, testApi } from "./logger.js";
+import { getPqcEmit, PQC_EVENT, pqcLog, type PqcEmit, setPqcEmit } from "./pqc-log.js";
+import { loggingState } from "./state.js";
 
 interface CapturedEntry {
-  level: "trace" | "debug" | "info" | "warn" | "error" | "fatal";
+  level: Parameters<PqcEmit>[0];
   event: string;
   payload: Record<string, unknown>;
 }
@@ -25,7 +22,7 @@ interface CapturedEntry {
 const captured: CapturedEntry[] = [];
 const recorder: PqcEmit = (level, event, payload) => {
   captured.push({
-    level: level as CapturedEntry["level"],
+    level,
     event,
     payload: { ...payload },
   });
@@ -38,6 +35,8 @@ beforeEach(() => {
 
 afterEach(() => {
   setPqcEmit(null);
+  testApi.resetFileLogTransportForTests();
+  resetLogger();
 });
 
 describe("pqcLog (M9 structured log surface)", () => {
@@ -63,7 +62,7 @@ describe("pqcLog (M9 structured log surface)", () => {
     for (const event of Object.values(PQC_EVENT)) {
       captured.length = 0;
       pqcLog.info(event);
-      expect(captured[0].event).toBe(event);
+      expect(captured.map((entry) => entry.event)).toEqual([event]);
     }
   });
 
@@ -72,27 +71,27 @@ describe("pqcLog (M9 structured log surface)", () => {
       keyId: "wrap-key-2026-08",
       detail: undefined,
     });
-    expect(captured[0].payload).toEqual({ keyId: "wrap-key-2026-08" });
-    expect("detail" in captured[0].payload).toBe(false);
+    expect(captured.map((entry) => entry.payload)).toEqual([{ keyId: "wrap-key-2026-08" }]);
   });
 
   it("refuses Buffer / TypedArray values in the payload", () => {
-    pqcLog.info(PQC_EVENT.WrapSecret, {
+    const payload = {
       keyId: "wrap-key-2026-08",
       rawKey: new Uint8Array([0xde, 0xad, 0xbe, 0xef]),
-    });
-    expect("rawKey" in captured[0].payload).toBe(false);
-    expect(captured[0].payload.keyId).toBe("wrap-key-2026-08");
+    };
+    pqcLog.info(PQC_EVENT.WrapSecret, payload);
+    expect(captured.map((entry) => entry.payload)).toEqual([{ keyId: "wrap-key-2026-08" }]);
   });
 
   it("refuses to log fields whose name looks like a secret", () => {
-    pqcLog.info(PQC_EVENT.Backup, {
+    const payload = {
       keyId: "wrap-key-2026-08",
       passphrase: "the operator's secret",
       rawKeyMaterial: "anything",
       privateKey: "should not appear",
-    });
-    expect(captured[0].payload).toEqual({ keyId: "wrap-key-2026-08" });
+    };
+    pqcLog.info(PQC_EVENT.Backup, payload);
+    expect(captured.map((entry) => entry.payload)).toEqual([{ keyId: "wrap-key-2026-08" }]);
   });
 
   it("rebind to a different emit (the Doctor path)", () => {
@@ -108,31 +107,59 @@ describe("pqcLog (M9 structured log surface)", () => {
     expect(captured).toEqual([]);
   });
 
-  it("setPqcEmit(null) restores the default (stdout) sink", () => {
+  it("setPqcEmit(null) restores the canonical sink", () => {
     setPqcEmit(null);
     expect(getPqcEmit()).not.toBe(recorder);
   });
-});
 
-describe("bindOpenClawLogger (production wiring)", () => {
-  it("routes PQC events through the openclaw tslog logger", () => {
-    const logger = new Logger({ type: "hidden" });
-    const sink: Array<{ level: string; args: unknown[] }> = [];
-    // Patch the logger's transport to capture (tslog exposes a
-    // settings.transport hook but it is unstable across versions;
-    // the most portable path is to attach a sink via the
-    // getChildLogger / settings pattern, or by reading the
-    // logger's bound stdout. We use the simpler test: bind, then
-    // assert the bound emit is the production one and that the
-    // bind did not throw.
-    bindOpenClawLogger(logger);
-    pqcLog.info(PQC_EVENT.Restore, { keyId: "wrap-key-2026-08", status: "ok" });
-    // After binding, the active emit is the production one and
-    // the test recorder no longer sees the call.
-    expect(captured).toEqual([]);
-    // Restore the test sink so subsequent tests behave.
-    setPqcEmit(recorder);
-    // Use the sink only to silence the unused variable warning.
-    void sink;
+  it("persists redacted events with canonical levels without writing command output", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pqc-log-"));
+    const file = path.join(dir, "events.jsonl");
+    const previous = loggingState.forceConsoleToStderr;
+    const stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+    const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    try {
+      setPqcEmit(null);
+      setLoggerOverride({ level: "info", file });
+      loggingState.forceConsoleToStderr = true;
+      pqcLog.debug(PQC_EVENT.Mlock, { status: "ok", byteLength: 32 });
+      const payload = {
+        status: "ok" as const,
+        detail: "Bearer sk-proj-abcdefghijklmnopqrstuvwxyz1234567890",
+        rawKey: Buffer.from("do-not-log"),
+        passphrase: "do-not-log",
+      };
+      pqcLog.info(PQC_EVENT.WrapSecret, payload);
+      loggingState.forceConsoleToStderr = false;
+      getPqcEmit()("fatal", PQC_EVENT.Doctor, { status: "fail" });
+      getPqcEmit()("silent", PQC_EVENT.Doctor, {});
+      await flushLogger();
+      const text = fs.readFileSync(file, "utf8");
+      const records = text
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      expect(records.map((record) => record._meta.logLevelName)).toEqual(["INFO", "FATAL"]);
+      expect(records.map((record) => record[1].event)).toEqual([
+        PQC_EVENT.WrapSecret,
+        PQC_EVENT.Doctor,
+      ]);
+      expect(records[0][1]).toMatchObject({ status: "ok" });
+      expect(text).toContain("[PQC] wrap-secret");
+      expect(text).not.toContain("do-not-log");
+      expect(text).not.toContain("abcdefghijklmnopqrstuvwxyz1234567890");
+      setLoggerOverride({ level: "silent", file });
+      pqcLog.error(PQC_EVENT.Keyring, { status: "fail" });
+      await flushLogger();
+      expect(fs.readFileSync(file, "utf8")).toBe(text);
+      expect(stdout).not.toHaveBeenCalled();
+      expect(stderr).not.toHaveBeenCalled();
+    } finally {
+      loggingState.forceConsoleToStderr = previous;
+      stdout.mockRestore();
+      stderr.mockRestore();
+      testApi.resetFileLogTransportForTests();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

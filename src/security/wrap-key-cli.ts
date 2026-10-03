@@ -1,24 +1,8 @@
-// Wrap-key health check + openclaw wrap-key CLI helpers
-// (PQC whitepaper 2.2.7 + 2.2.8).
-//
-// 2.2.7 — wrapKeyHealthCheck verifies the keyring is reachable AND
-//   can unwrap a stored device identity if one is present. The
-//   health check is the doctor entry point; it returns a structured
-//   status the CLI / log layer can surface without re-implementing
-//   the logic.
-//
-// 2.2.8 — openclaw wrap-key status | export | import | rotate
-//   The CLI itself is registered elsewhere (src/cli/program/...) and
-//   delegates to the command functions here. Keeping the command
-//   functions pure (return result objects, do not write to stdout)
-//   lets the CLI + Doctor + tests all drive the same code path.
-//
-// The status command surfaces the current keyId, the active provider
-// type (file / env / os / composite), the rotation grace period
-// (number of historical keys still resolvable via getKeyById), the
-// PBKDF2 cost factor (so the operator sees the live security
-// posture), and — when a device identity is provided — a
-// per-row wrap-status flag.
+// Wrapping-key health and auxiliary lifecycle APIs. The registered operator
+// surface is read-only `wrap-key status`; export/import/rotate are not CLI commands.
+// Requested identities are read and validated without initializing SQLite state.
+// The CLI exposes only diagnostic metadata, not raw errors or the helper's
+// historical-count/cost hints, which are not a verified key inventory.
 
 import {
   type DeviceIdentityStoreOptions,

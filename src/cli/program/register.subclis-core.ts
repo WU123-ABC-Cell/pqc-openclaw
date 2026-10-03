@@ -296,6 +296,11 @@ const entrySpecs: readonly CommandGroupDescriptorSpec<SubCliRegistrar>[] = [
       exportName: "registerSecretsCli",
     },
     {
+      commandNames: ["wrap-key"],
+      loadModule: () => import("../wrap-key-cli.js"),
+      exportName: "registerWrapKeyCli",
+    },
+    {
       commandNames: ["skills"],
       loadModule: () => import("../skills-cli.js"),
       exportName: "registerSkillsCli",
