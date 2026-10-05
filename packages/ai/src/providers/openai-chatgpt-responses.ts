@@ -943,10 +943,18 @@ async function getWebSocketConstructor(): Promise<WebSocketConstructor | null> {
     return cachedWebsocket;
   }
 
+  // Node's bundled WebSocket is not updated by dependency security patches.
+  // Load our pinned implementation lazily so browser and Bun builds stay native.
+  if (typeof process !== "undefined" && process.versions?.node && !process.versions?.bun) {
+    const { WebSocket } = (await dynamicImport("undici")) as typeof import("undici");
+    return WebSocket;
+  }
+
   // bun doesn't respect http proxy envs, ref: https://github.com/oven-sh/bun/issues/15489
   // Keep the fallback until Bun supports proxy envs in websocket.
   if (
-    process?.versions?.bun &&
+    typeof process !== "undefined" &&
+    process.versions?.bun &&
     (process.env.HTTP_PROXY ||
       process.env.HTTPS_PROXY ||
       process.env.http_proxy ||

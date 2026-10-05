@@ -1,5 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { configureAiTransportHost } from "../host.js";
+
+// Keep lifecycle fixtures on the Node constructor dependency; the unmocked
+// handshake suite separately exercises the real pinned implementation.
+vi.mock("undici", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("undici")>()),
+  get WebSocket() {
+    return globalThis.WebSocket;
+  },
+}));
 import type { Context, Model } from "../types.js";
 import {
   closeOpenAICodexWebSocketSessions,

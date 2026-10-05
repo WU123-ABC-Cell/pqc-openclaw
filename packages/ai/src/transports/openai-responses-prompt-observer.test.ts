@@ -2,6 +2,15 @@ import { zstdDecompressSync } from "node:zlib";
 import type { Api, Context, Model } from "@openclaw/llm-core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { configureAiTransportHost, getAiTransportHost } from "../host.js";
+
+// Keep lifecycle fixtures on the Node constructor dependency; the unmocked
+// handshake suite separately exercises the real pinned implementation.
+vi.mock("undici", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("undici")>()),
+  get WebSocket() {
+    return globalThis.WebSocket;
+  },
+}));
 import { responsesPromptObserver, type ResponsesPromptObservation } from "../internal/openai.js";
 import {
   closeOpenAICodexWebSocketSessions,

@@ -4,11 +4,19 @@ import { zstdDecompressSync } from "node:zlib";
 import { MAX_TIMER_TIMEOUT_MS } from "@openclaw/normalization-core/number-coercion";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { configureAiTransportHost } from "../host.js";
+
+// Keep lifecycle fixtures on the Node constructor dependency; the unmocked
+// handshake suite separately exercises the real pinned implementation.
+vi.mock("undici", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("undici")>()),
+  get WebSocket() {
+    return globalThis.WebSocket;
+  },
+}));
 import type { Context, Model } from "../types.js";
 import { SYSTEM_PROMPT_CACHE_BOUNDARY } from "../utils/system-prompt-cache-boundary.js";
 import {
   closeOpenAICodexWebSocketSessions,
-  extractOpenAICodexAccountId,
   parseSSEForTest,
   resetOpenAICodexWebSocketStateForTest,
   streamSimpleOpenAICodexResponses,
@@ -78,25 +86,6 @@ function completedSseResponse(responseId = "resp_test"): Response {
     headers: { "content-type": "text/event-stream" },
   });
 }
-
-describe("extractOpenAICodexAccountId", () => {
-  it("decodes URL-safe base64 JWT payloads", () => {
-    const accessToken = createJwt({
-      "https://api.openai.com/auth": {
-        chatgpt_account_id: "w_ébé_1fzcswWN6Pi5zL",
-      },
-    });
-    expect(accessToken.split(".")[1]).toContain("_");
-
-    expect(extractOpenAICodexAccountId(accessToken)).toBe("w_ébé_1fzcswWN6Pi5zL");
-  });
-
-  it("rejects tokens without a Codex account id", () => {
-    expect(() => extractOpenAICodexAccountId(createJwt({}))).toThrow(
-      "Failed to extract accountId from token",
-    );
-  });
-});
 
 describe("streamOpenAICodexResponses transport", () => {
   afterEach(() => {

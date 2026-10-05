@@ -5,6 +5,15 @@ import { zstdDecompressSync } from "node:zlib";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocket, WebSocketServer } from "ws";
 import { configureAiTransportHost } from "../host.js";
+
+// Keep lifecycle fixtures on the Node constructor dependency; the unmocked
+// handshake suite separately exercises the real pinned implementation.
+vi.mock("undici", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("undici")>()),
+  get WebSocket() {
+    return globalThis.WebSocket;
+  },
+}));
 import { responsesPromptObserver, type ResponsesPromptObservation } from "../internal/openai.js";
 import { cleanupSessionResources } from "../session-resources.js";
 import { MALFORMED_STREAMING_FRAGMENT_ERROR_MESSAGE } from "../transports/transport-utils.js";
