@@ -12,11 +12,19 @@ type Middleware = (req: Request, res: Response, next: NextFunction) => void;
 
 let server: http.Server | undefined;
 
-async function startMiddlewareTestServer(): Promise<{ url: string; getRouteCalls: () => number }> {
+async function startMiddlewareTestServer(
+  trustProxy?: string | string[],
+): Promise<{ url: string; getRouteCalls: () => number }> {
   const app = express();
+  if (trustProxy !== undefined) {
+    app.set("trust proxy", trustProxy);
+  }
   let routeCalls = 0;
   installBrowserCommonMiddleware(app);
   installBrowserAuthMiddleware(app, { token: "test-token" });
+  app.get("/identity", (req, res) => {
+    res.json({ ip: req.ip, ips: req.ips });
+  });
   app.post("/mutate", (req, res) => {
     routeCalls += 1;
     res.status(200).json({ body: req.body });
@@ -123,5 +131,58 @@ describe("installBrowserCommonMiddleware", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ body: { ok: true } });
     expect(getRouteCalls()).toBe(1);
+  });
+
+  it.each([
+    { trustProxy: "::ffff:10.0.0.0/8" },
+    { trustProxy: ["::ffff:10.0.0.0/8", "2001:db8::/32"] },
+    { trustProxy: "::/1" },
+    { trustProxy: ["::/1", "2001:db8::/32"] },
+  ])("does not trust an IPv4 socket via IPv6-only ranges: $trustProxy", async ({ trustProxy }) => {
+    // These configurations exercise the dependency boundary; production keeps Express's default.
+    const { url } = await startMiddlewareTestServer(trustProxy);
+    const response = await fetch(`${url}/identity`, {
+      headers: {
+        authorization: "Bearer test-token",
+        "x-forwarded-for": "203.0.113.9",
+      },
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ip: "127.0.0.1", ips: [] });
+  });
+
+  it.each(["127.0.0.0/8", "::ffff:127.0.0.0/104"])(
+    "preserves correctly configured proxy trust: %s",
+    async (trustProxy) => {
+      const { url } = await startMiddlewareTestServer(trustProxy);
+      const response = await fetch(`${url}/identity`, {
+        headers: {
+          authorization: "Bearer test-token",
+          "x-forwarded-for": "203.0.113.9",
+        },
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ ip: "203.0.113.9", ips: ["203.0.113.9"] });
+    },
+  );
+
+  it("keeps forwarded identity headers outside default browser authentication", async () => {
+    const { url } = await startMiddlewareTestServer();
+    const headers = {
+      "x-forwarded-for": "127.0.0.1",
+      "x-real-ip": "127.0.0.1",
+      "x-forwarded-host": "localhost",
+    };
+    const missingAuth = await fetch(`${url}/identity`, { headers });
+    expect(missingAuth.status).toBe(401);
+    const badAuth = await fetch(`${url}/identity`, {
+      headers: { ...headers, authorization: "Bearer wrong-token" },
+    });
+    expect(badAuth.status).toBe(401);
+    const authorized = await fetch(`${url}/identity`, {
+      headers: { ...headers, authorization: "Bearer test-token" },
+    });
+    expect(authorized.status).toBe(200);
+    expect(await authorized.json()).toEqual({ ip: "127.0.0.1", ips: [] });
   });
 });
