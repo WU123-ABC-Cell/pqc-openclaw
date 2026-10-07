@@ -71,6 +71,7 @@ describe("MCP OAuth provider", () => {
           access_token: "decoy-token",
           refresh_token: "test-auth-token",
           token_type: "Bearer",
+          issuer: "https://auth.example.com",
           expires_in: 3600,
         });
 
@@ -159,6 +160,7 @@ describe("MCP OAuth provider", () => {
             access_token: "gateway-token",
             refresh_token: "secret-token",
             token_type: "Bearer",
+            issuer: "https://auth.example.com",
             expires_in: 3600,
           });
           return "AUTHORIZED";
@@ -193,6 +195,7 @@ describe("MCP OAuth provider", () => {
           access_token: "replacement-token",
           refresh_token: "replacement-refresh",
           token_type: "Bearer",
+          issuer: "https://auth.example.com",
           expires_in: 3600,
         });
 
@@ -214,6 +217,7 @@ describe("MCP OAuth provider", () => {
           access_token: "newer-token",
           refresh_token: "newer-refresh",
           token_type: "Bearer",
+          issuer: "https://auth.example.com",
           expires_in: 3600,
         });
         await expect(
@@ -244,6 +248,7 @@ describe("MCP OAuth provider", () => {
           access_token: "decoy-token",
           refresh_token: "test-auth-token",
           token_type: "Bearer",
+          issuer: "https://auth.example.com",
           expires_in: 3600,
         });
         await provider.saveDiscoveryState?.({
@@ -298,7 +303,7 @@ describe("MCP OAuth provider", () => {
     );
   });
 
-  it("uses a persisted challenge when refreshing after Doctor credential import", async () => {
+  it("uses a persisted challenge when refreshing imported issuer-bound credentials", async () => {
     await withTempHome(
       async () => {
         const serverName = "Remote Docs";
@@ -312,6 +317,7 @@ describe("MCP OAuth provider", () => {
           access_token: "legacy-access",
           refresh_token: "legacy-refresh",
           token_type: "Bearer",
+          issuer: "https://auth.example.com",
           expires_in: 3600,
         });
         updateMcpOAuthStore(storeKey, (store) => ({
@@ -328,6 +334,7 @@ describe("MCP OAuth provider", () => {
             access_token: "gateway-token",
             refresh_token: "secret-token",
             token_type: "Bearer",
+            issuer: "https://auth.example.com",
             expires_in: 3600,
           });
           return "AUTHORIZED";
@@ -357,6 +364,7 @@ describe("MCP OAuth provider", () => {
           access_token: "example",
           refresh_token: "test-auth-token",
           token_type: "Bearer",
+          issuer: "https://auth.example.com",
           expires_in: 3600,
         });
         const storeKey = resolveMcpOAuthStoreKey("Remote Docs", "https://mcp.example.com/mcp");
@@ -380,6 +388,7 @@ describe("MCP OAuth provider", () => {
             access_token: "gateway-token",
             refresh_token: "secret-token",
             token_type: "Bearer",
+            issuer: "https://auth.example.com",
             expires_in: 3600,
           });
           return "AUTHORIZED";
@@ -512,11 +521,16 @@ describe("MCP OAuth provider", () => {
           serverName: "Remote Docs",
           serverUrl: "https://mcp.example.com/mcp",
         });
-        await provider.saveTokens({ access_token: "access", token_type: "Bearer" });
+        await provider.saveTokens({
+          access_token: "access",
+          token_type: "Bearer",
+          issuer: "https://auth.example.com",
+        });
 
         expect(provider.tokens()).toEqual({
           access_token: "access",
           token_type: "Bearer",
+          issuer: "https://auth.example.com",
         });
 
         const databasePath = resolveOpenClawStateSqlitePath();
@@ -554,6 +568,7 @@ describe("MCP OAuth provider", () => {
         ).resolves.toEqual({
           hasTokens: false,
           requiresAuthorization: false,
+          hasUnboundCredentials: false,
           hasClientInformation: false,
           hasCodeVerifier: false,
           hasDiscoveryState: false,
@@ -579,11 +594,15 @@ describe("MCP OAuth provider", () => {
           serverUrl: "https://mcp.example.com/mcp",
           onAuthorizationUrl: () => {},
         });
-        await provider.saveClientInformation?.({ client_id: "client-id" });
+        await provider.saveClientInformation?.({
+          client_id: "client-id",
+          issuer: "https://auth.example.com",
+        });
         await provider.saveTokens({
           access_token: "access",
           refresh_token: "refresh",
           token_type: "Bearer",
+          issuer: "https://auth.example.com",
           expires_in: 3600,
         });
         await provider.saveCodeVerifier("verifier");
@@ -592,7 +611,10 @@ describe("MCP OAuth provider", () => {
         const store = readMcpOAuthStore(
           resolveMcpOAuthStoreKey("Remote Docs", "https://mcp.example.com/mcp"),
         );
-        expect(store.clientInformation).toEqual({ client_id: "client-id" });
+        expect(store.clientInformation).toEqual({
+          client_id: "client-id",
+          issuer: "https://auth.example.com",
+        });
         expect(store.codeVerifier).toBe("verifier");
         expect(store.tokens).toBeUndefined();
         expect(store.tokenExpiresAt).toBeUndefined();
@@ -613,7 +635,11 @@ describe("MCP OAuth provider", () => {
           serverName: "Remote Docs",
           serverUrl: "https://mcp.example.com/mcp",
         });
-        await provider.saveTokens({ access_token: "access", token_type: "Bearer" });
+        await provider.saveTokens({
+          access_token: "access",
+          token_type: "Bearer",
+          issuer: "https://auth.example.com",
+        });
         const storeKey = resolveMcpOAuthStoreKey("Remote Docs", "https://mcp.example.com/mcp");
         openOpenClawStateDatabase()
           .db.prepare("UPDATE mcp_oauth_stores SET store_json = ? WHERE store_key = ?")
@@ -636,7 +662,11 @@ describe("MCP OAuth provider", () => {
           serverName: "Remote Docs",
           serverUrl: "https://mcp.example.com/mcp",
         });
-        await provider.saveTokens({ access_token: "access", token_type: "Bearer" });
+        await provider.saveTokens({
+          access_token: "access",
+          token_type: "Bearer",
+          issuer: "https://auth.example.com",
+        });
         const storeKey = resolveMcpOAuthStoreKey("Remote Docs", "https://mcp.example.com/mcp");
         openOpenClawStateDatabase()
           .db.prepare("UPDATE mcp_oauth_stores SET store_json = ? WHERE store_key = ?")
@@ -663,7 +693,11 @@ describe("MCP OAuth provider", () => {
           serverName: "Remote Docs",
           serverUrl: "https://other.example.com/mcp",
         });
-        await first.saveTokens({ access_token: "access", token_type: "Bearer" });
+        await first.saveTokens({
+          access_token: "access",
+          token_type: "Bearer",
+          issuer: "https://auth.example.com",
+        });
 
         expect(second.tokens()).toBeUndefined();
       },
@@ -834,7 +868,11 @@ describe("MCP OAuth provider", () => {
           serverName: "Remote Docs",
           serverUrl: "https://mcp.example.com/mcp",
         });
-        await provider.saveTokens({ access_token: "access", token_type: "Bearer" });
+        await provider.saveTokens({
+          access_token: "access",
+          token_type: "Bearer",
+          issuer: "https://auth.example.com",
+        });
 
         await clearMcpOAuthCredentials({
           serverName: "Remote Docs",

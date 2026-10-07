@@ -212,6 +212,11 @@ the container normally.
 
 This includes retired MCP OAuth files under `<state-dir>/mcp-oauth/*.json`. Stop the Gateway before repair. Doctor imports valid credentials into `<state-dir>/state/openclaw.sqlite`, preserves an existing canonical SQLite session when both stores exist, drops the obsolete persisted OAuth `state` value, and uses its receipt to prevent a recreated stale file from resurrecting logged-out credentials. Retired `.lock` sidecars fail closed: if Doctor reports a stale owner, verify that no older OpenClaw process is running, remove that sidecar, and rerun Doctor.
 
+Imported MCP OAuth credentials without a recorded authorization-server issuer remain
+unusable after migration. Doctor does not infer or add an issuer. Run
+`openclaw mcp logout <name>` and then `openclaw mcp login <name>` to establish
+a new issuer-bound session.
+
 ## Shared state SQLite compaction
 
 See [Database schemas](/reference/database-schemas) for schema versioning, integrity checks, and downgrade recovery.

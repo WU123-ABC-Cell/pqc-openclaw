@@ -84,6 +84,7 @@ describe("MCP OAuth provider", () => {
           access_token: "test-token-placeholder",
           refresh_token: "test-auth-token",
           token_type: "Bearer",
+          issuer: "https://auth.example.com",
           expires_in: 3600,
         });
 
@@ -116,6 +117,7 @@ describe("MCP OAuth provider", () => {
           access_token: "decoy-token",
           refresh_token: "test-auth-token",
           token_type: "Bearer",
+          issuer: "https://auth.example.com",
           expires_in: -1,
         });
         let signalStarted: (() => void) | undefined;
@@ -184,6 +186,7 @@ describe("MCP OAuth provider", () => {
           access_token: "decoy-token",
           refresh_token: "test-auth-token",
           token_type: "Bearer",
+          issuer: "https://auth.example.com",
           expires_in: -1,
         });
         authMock.mockImplementationOnce(async (refreshProvider) => {
@@ -191,6 +194,7 @@ describe("MCP OAuth provider", () => {
             access_token: "gateway-token",
             refresh_token: "secret-token",
             token_type: "Bearer",
+            issuer: "https://auth.example.com",
             expires_in: 3600,
           });
           return "AUTHORIZED";
@@ -231,6 +235,7 @@ describe("MCP OAuth provider", () => {
           access_token: "decoy-token",
           refresh_token: "test-auth-token",
           token_type: "Bearer",
+          issuer: "https://auth.example.com",
           expires_in: -1,
         });
 
@@ -249,6 +254,7 @@ describe("MCP OAuth provider", () => {
             access_token: "gateway-token",
             refresh_token: "secret-token",
             token_type: "Bearer",
+            issuer: "https://auth.example.com",
             expires_in: 3600,
           });
           return "AUTHORIZED";
@@ -293,6 +299,7 @@ describe("MCP OAuth provider", () => {
           access_token: "decoy-token",
           refresh_token: "test-auth-token",
           token_type: "Bearer",
+          issuer: "https://auth.example.com",
           expires_in: 3600,
         });
 
@@ -309,6 +316,7 @@ describe("MCP OAuth provider", () => {
             access_token: "gateway-token",
             refresh_token: "secret-token",
             token_type: "Bearer",
+            issuer: "https://auth.example.com",
             expires_in: 3600,
           });
           signalRefreshStarted?.();
@@ -362,6 +370,7 @@ describe("MCP OAuth provider", () => {
           access_token: "decoy-token",
           refresh_token: "test-auth-token",
           token_type: "Bearer",
+          issuer: "https://auth.example.com",
           expires_in: -1,
         });
         let signalStarted: (() => void) | undefined;
@@ -379,6 +388,7 @@ describe("MCP OAuth provider", () => {
             access_token: "gateway-token",
             refresh_token: "secret-token",
             token_type: "Bearer",
+            issuer: "https://auth.example.com",
             expires_in: 3600,
           });
           return "AUTHORIZED";
@@ -418,6 +428,7 @@ describe("MCP OAuth provider", () => {
           access_token: "decoy-token",
           refresh_token: "test-auth-token",
           token_type: "Bearer",
+          issuer: "https://auth.example.com",
           expires_in: 3600,
         });
         authMock.mockImplementationOnce(async (refreshProvider) => {
@@ -425,6 +436,7 @@ describe("MCP OAuth provider", () => {
             access_token: "gateway-token",
             refresh_token: "secret-token",
             token_type: "Bearer",
+            issuer: "https://auth.example.com",
             expires_in: 3600,
           });
           return "AUTHORIZED";

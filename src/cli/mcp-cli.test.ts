@@ -616,6 +616,42 @@ describe("mcp cli", () => {
           },
         ],
       });
+
+      readMcpOAuthCredentialsStatus.mockResolvedValue({
+        hasTokens: true,
+        requiresAuthorization: false,
+        hasUnboundCredentials: true,
+        hasClientInformation: true,
+        hasCodeVerifier: false,
+        hasDiscoveryState: true,
+        hasLastAuthorizationUrl: false,
+      });
+      mockLog.mockClear();
+      await runMcpCommand(["mcp", "status", "--verbose"]);
+      const reloginStatusLines = mockLog.mock.calls.map((call) => String(call[0]));
+      expect(reloginStatusLines).toContain(
+        "- docs: streamable-http oauth reauthorization-required",
+      );
+      expect(reloginStatusLines).toContain(
+        "  oauth: tokens=yes authorization=relogin-required client=yes",
+      );
+
+      mockLog.mockClear();
+      await runMcpCommand(["mcp", "doctor", "--json"]);
+      expect(JSON.parse(lastLogLine())).toMatchObject({
+        servers: [
+          {
+            name: "docs",
+            issues: [
+              {
+                level: "warning",
+                message:
+                  "OAuth credentials need a new authorization-server binding; run openclaw mcp logout docs, then openclaw mcp login docs",
+              },
+            ],
+          },
+        ],
+      });
     });
   });
 

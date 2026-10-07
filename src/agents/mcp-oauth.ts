@@ -13,7 +13,9 @@ import {
   withMcpOAuthLeaseSignal,
 } from "./mcp-oauth-provider.js";
 import {
+  assertMcpOAuthCredentialsBound,
   clearMcpOAuthStore,
+  hasUnboundMcpOAuthCredentials,
   readMcpOAuthStore,
   readMcpOAuthStoreReadOnly,
   resolveMcpOAuthStoreKey,
@@ -27,6 +29,7 @@ export type { McpOAuthConfig } from "./mcp-oauth-provider.js";
 export type McpOAuthCredentialsStatus = {
   hasTokens: boolean;
   requiresAuthorization: boolean;
+  hasUnboundCredentials: boolean;
   hasClientInformation: boolean;
   hasCodeVerifier: boolean;
   hasDiscoveryState: boolean;
@@ -133,6 +136,7 @@ export async function resolveMcpOAuthAccessToken(
     storeKey,
     async (lease) => {
       const store = readMcpOAuthStore(storeKey);
+      assertMcpOAuthCredentialsBound(store, params.serverName);
       const tokens = store.tokens;
       const rejectedCurrentToken = params.rejectedAccessToken === tokens?.access_token;
       const challengeAppliesToCurrentState = !tokens?.access_token || rejectedCurrentToken;
@@ -279,6 +283,7 @@ export async function readMcpOAuthCredentialsStatus(params: {
   return {
     hasTokens: Boolean(store.tokens),
     requiresAuthorization: store.pendingAuthorizationChallenge?.requiresAuthorization === true,
+    hasUnboundCredentials: hasUnboundMcpOAuthCredentials(store),
     hasClientInformation: Boolean(store.clientInformation),
     hasCodeVerifier: Boolean(store.codeVerifier),
     hasDiscoveryState: Boolean(store.discoveryState),
@@ -331,6 +336,7 @@ export async function runMcpOAuthLogin(params: {
   const storeKey = resolveMcpOAuthStoreKey(params.serverName, params.serverUrl);
   return await withMcpOAuthLease(storeKey, async (lease) => {
     const store = readMcpOAuthStore(storeKey);
+    assertMcpOAuthCredentialsBound(store, params.serverName);
     const pendingChallenge = store.pendingAuthorizationChallenge;
     const loginParams = {
       ...params,

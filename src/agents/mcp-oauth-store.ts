@@ -52,6 +52,34 @@ export type McpOAuthStore = {
   pendingAuthorizationChallenge?: McpOAuthAuthorizationChallenge;
 };
 
+function hasValidIssuer(value: unknown): boolean {
+  if (typeof value !== "string") {
+    return false;
+  }
+  try {
+    const issuer = new URL(value);
+    return issuer.protocol === "https:" || issuer.protocol === "http:";
+  } catch {
+    return false;
+  }
+}
+
+/** Old credentials have no trustworthy authorization-server provenance. */
+export function hasUnboundMcpOAuthCredentials(store: McpOAuthStore): boolean {
+  return (
+    (store.clientInformation !== undefined && !hasValidIssuer(store.clientInformation.issuer)) ||
+    (store.tokens !== undefined && !hasValidIssuer(store.tokens.issuer))
+  );
+}
+
+export function assertMcpOAuthCredentialsBound(store: McpOAuthStore, serverName: string): void {
+  if (hasUnboundMcpOAuthCredentials(store)) {
+    throw new Error(
+      `MCP server "${serverName}" has OAuth credentials without a recorded authorization server. Run openclaw mcp logout ${serverName}, then openclaw mcp login ${serverName}.`,
+    );
+  }
+}
+
 class McpOAuthStoreCorruptionError extends Error {
   constructor(storeKey: string, detail: string, options?: { cause?: unknown }) {
     super(`MCP OAuth store ${storeKey} is invalid: ${detail}`, options);

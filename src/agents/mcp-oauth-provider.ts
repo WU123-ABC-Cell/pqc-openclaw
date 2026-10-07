@@ -7,6 +7,7 @@ import type { FetchLike } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import type { OpenClawStateLeaseContext } from "../state/openclaw-state-lease.js";
 import {
+  assertMcpOAuthCredentialsBound,
   readMcpOAuthStore,
   resolveMcpOAuthStoreKey,
   updateMcpOAuthStore,
@@ -118,13 +119,17 @@ export function createMcpOAuthClientProvider(params: {
       return randomUUID();
     },
     clientInformation() {
-      return readMcpOAuthStore(storeKey).clientInformation;
+      const store = readMcpOAuthStore(storeKey);
+      assertMcpOAuthCredentialsBound(store, params.serverName);
+      return store.clientInformation;
     },
     saveClientInformation(clientInformation) {
       updateStore((store) => ({ ...beginMcpOAuthAuthorization(store), clientInformation }));
     },
     tokens() {
-      return params.suppressStoredTokens ? undefined : readMcpOAuthStore(storeKey).tokens;
+      const store = readMcpOAuthStore(storeKey);
+      assertMcpOAuthCredentialsBound(store, params.serverName);
+      return params.suppressStoredTokens ? undefined : store.tokens;
     },
     saveTokens(tokens) {
       updateStore((store) => {

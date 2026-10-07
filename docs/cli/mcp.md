@@ -701,6 +701,8 @@ OAuth is for HTTP MCP servers that advertise the MCP OAuth flow. Static `Authori
 
 Native MCP OAuth sessions live in the owner-only shared SQLite database at `<state-dir>/state/openclaw.sqlite` (`mcp_oauth_stores`). The row can contain access and refresh tokens, dynamic client registration secrets, discovery metadata, and the temporary PKCE verifier. Refresh, login, and logout use the same SQLite lease, so parallel OpenClaw processes cannot consume one refresh token or resurrect a logged-out session.
 
+Sessions created before authorization-server binding was recorded cannot be safely reused after this upgrade. OpenClaw retains those credentials but stops using them, and `mcp status`/`mcp doctor` report that a new login is required. Run `openclaw mcp logout <name>`, then `openclaw mcp login <name>` for each affected server. Confirm the authorization URL belongs to the service you intended before approving it. The logout clears that server's old local credentials and prevents Doctor from importing them again; the server definition remains.
+
 Upgrades from the retired `<state-dir>/mcp-oauth/*.json` store are handled only by `openclaw doctor --fix`. Runtime code never reads, writes, or falls back to those files.
 
 Until credentials are available, OpenClaw omits only that MCP server from the agent runtime instead of failing the agent turn. The operator, or an agent with shell access, can then run `openclaw mcp login <name>` and use the server on a later turn.

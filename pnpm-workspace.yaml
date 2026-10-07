@@ -61,7 +61,7 @@ minimumReleaseAgeExclude:
   - "@microsoft/teams.cards@2.0.12"
   - "@microsoft/teams.common@2.0.12"
   - "@microsoft/teams.graph@2.0.12"
-  - "@modelcontextprotocol/sdk@1.30.0"
+  - "@modelcontextprotocol/sdk@1.31.0"
   - "@openai/codex"
   - "@openai/codex-*"
   - "@pierre/diffs@1.2.3"
