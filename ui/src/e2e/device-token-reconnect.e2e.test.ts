@@ -192,7 +192,7 @@ describeControlUiE2e("Control UI device-token reconnect E2E", () => {
     expect(await wilfredReconnect.page.locator("openclaw-login-gate").count()).toBe(0);
 
     const identity = await wilfredSource.page.evaluate(() => {
-      const raw = localStorage.getItem("openclaw-device-identity-v1");
+      const raw = localStorage.getItem("openclaw-device-identity-v2");
       return raw ? JSON.parse(raw) : null;
     });
     const deviceId = requireRecord(identity).deviceId;

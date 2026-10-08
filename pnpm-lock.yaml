@@ -2402,9 +2402,9 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: 1.31.0
         version: 1.31.0(supports-color@10.2.2)(zod@4.4.3)
-      '@noble/ed25519':
-        specifier: 3.1.0
-        version: 3.1.0
+      '@noble/post-quantum':
+        specifier: 0.7.0
+        version: 0.7.0
       '@openclaw/gateway-client':
         specifier: workspace:*
         version: link:../packages/gateway-client

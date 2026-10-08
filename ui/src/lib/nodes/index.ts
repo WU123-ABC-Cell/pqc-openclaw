@@ -1,5 +1,5 @@
 // Shared Nodes operations used by the Control UI page and Gateway event hooks.
-import { getPublicKeyAsync, signAsync, utils } from "@noble/ed25519";
+import { ml_dsa65 } from "@noble/post-quantum/ml-dsa.js";
 import {
   type DeviceAuthEntry,
   type DeviceAuthStore,
@@ -162,7 +162,7 @@ type ExecApprovalsState = NodesRequestState & {
 export type NodesPageDataState = NodesState & DevicesState & ExecApprovalsState;
 
 type StoredIdentity = {
-  version: 1;
+  version: 2;
   deviceId: string;
   publicKey: string;
   privateKey: string;
@@ -177,7 +177,8 @@ type DeviceIdentity = {
 
 const LEGACY_DEVICE_AUTH_STORAGE_KEY = "openclaw.device.auth.v1";
 const DEVICE_AUTH_STORAGE_KEY_PREFIX = `${LEGACY_DEVICE_AUTH_STORAGE_KEY}:`;
-const DEVICE_IDENTITY_STORAGE_KEY = "openclaw-device-identity-v1";
+const LEGACY_DEVICE_IDENTITY_STORAGE_KEY = "openclaw-device-identity-v1";
+const DEVICE_IDENTITY_STORAGE_KEY = "openclaw-device-identity-v2";
 
 export function createInitialNodesState(
   snapshot: Partial<NodesGatewaySnapshot> = {},
@@ -808,12 +809,18 @@ function base64UrlEncode(bytes: Uint8Array): string {
 }
 
 function base64UrlDecode(input: string): Uint8Array {
+  if (!/^[A-Za-z0-9_-]+$/.test(input)) {
+    throw new Error("Invalid browser device key encoding");
+  }
   const normalized = input.replaceAll("-", "+").replaceAll("_", "/");
   const padded = normalized + "=".repeat((4 - (normalized.length % 4)) % 4);
   const binary = atob(padded);
   const out = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i += 1) {
     out[i] = binary.charCodeAt(i);
+  }
+  if (base64UrlEncode(out) !== input) {
+    throw new Error("Non-canonical browser device key encoding");
   }
   return out;
 }
@@ -830,14 +837,45 @@ async function fingerprintPublicKey(publicKey: Uint8Array): Promise<string> {
 }
 
 async function generateIdentity(): Promise<DeviceIdentity> {
-  const privateKey = utils.randomSecretKey();
-  const publicKey = await getPublicKeyAsync(privateKey);
+  const { secretKey, publicKey } = ml_dsa65.keygen();
   const deviceId = await fingerprintPublicKey(publicKey);
   return {
     deviceId,
     publicKey: base64UrlEncode(publicKey),
-    privateKey: base64UrlEncode(privateKey),
+    privateKey: base64UrlEncode(secretKey),
   };
+}
+
+function removeLegacyBrowserIdentity(storage: Storage | null) {
+  if (!storage) {
+    return;
+  }
+  try {
+    const raw = storage.getItem(LEGACY_DEVICE_IDENTITY_STORAGE_KEY);
+    if (!raw) {
+      return;
+    }
+    const legacy = JSON.parse(raw) as { version?: unknown; deviceId?: unknown };
+    if (legacy?.version === 1 && typeof legacy.deviceId === "string") {
+      // Tokens are bound to the retired Ed25519 key and cannot authenticate as
+      // the new ML-DSA identity. Remove only stores belonging to that key.
+      for (let index = storage.length - 1; index >= 0; index -= 1) {
+        const key = storage.key(index);
+        if (
+          key !== LEGACY_DEVICE_AUTH_STORAGE_KEY &&
+          !key?.startsWith(DEVICE_AUTH_STORAGE_KEY_PREFIX)
+        ) {
+          continue;
+        }
+        if (parseDeviceAuthStore(storage.getItem(key))?.deviceId === legacy.deviceId) {
+          storage.removeItem(key);
+        }
+      }
+    }
+    storage.removeItem(LEGACY_DEVICE_IDENTITY_STORAGE_KEY);
+  } catch {
+    // The new identity remains usable even when obsolete storage is read-only.
+  }
 }
 
 /**
@@ -852,7 +890,7 @@ export function peekStoredDeviceIdentityId(): string | null {
       return null;
     }
     const parsed = JSON.parse(raw) as StoredIdentity;
-    return parsed?.version === 1 && typeof parsed.deviceId === "string" && parsed.deviceId
+    return parsed?.version === 2 && typeof parsed.deviceId === "string" && parsed.deviceId
       ? parsed.deviceId
       : null;
   } catch {
@@ -862,34 +900,38 @@ export function peekStoredDeviceIdentityId(): string | null {
 
 export async function loadOrCreateDeviceIdentity(): Promise<DeviceIdentity> {
   const storage = getSafeLocalStorage();
+  if (!storage) {
+    throw new Error(
+      "Browser local storage is unavailable; enable site storage to keep a paired device identity",
+    );
+  }
   try {
-    const raw = storage?.getItem(DEVICE_IDENTITY_STORAGE_KEY);
+    const raw = storage.getItem(DEVICE_IDENTITY_STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as StoredIdentity;
       if (
-        parsed?.version === 1 &&
+        parsed?.version === 2 &&
         typeof parsed.deviceId === "string" &&
         typeof parsed.publicKey === "string" &&
         typeof parsed.privateKey === "string"
       ) {
-        const derivedId = await fingerprintPublicKey(base64UrlDecode(parsed.publicKey));
-        if (derivedId !== parsed.deviceId) {
-          const updated: StoredIdentity = {
-            ...parsed,
-            deviceId: derivedId,
-          };
-          storage?.setItem(DEVICE_IDENTITY_STORAGE_KEY, JSON.stringify(updated));
+        const publicKey = base64UrlDecode(parsed.publicKey);
+        const secretKey = base64UrlDecode(parsed.privateKey);
+        const derivedPublicKey =
+          secretKey.length === ml_dsa65.lengths.secretKey ? ml_dsa65.getPublicKey(secretKey) : null;
+        if (
+          publicKey.length === ml_dsa65.lengths.publicKey &&
+          derivedPublicKey &&
+          base64UrlEncode(derivedPublicKey) === parsed.publicKey &&
+          (await fingerprintPublicKey(publicKey)) === parsed.deviceId
+        ) {
+          removeLegacyBrowserIdentity(storage);
           return {
-            deviceId: derivedId,
+            deviceId: parsed.deviceId,
             publicKey: parsed.publicKey,
             privateKey: parsed.privateKey,
           };
         }
-        return {
-          deviceId: parsed.deviceId,
-          publicKey: parsed.publicKey,
-          privateKey: parsed.privateKey,
-        };
       }
     }
   } catch {
@@ -898,20 +940,31 @@ export async function loadOrCreateDeviceIdentity(): Promise<DeviceIdentity> {
 
   const identity = await generateIdentity();
   const stored: StoredIdentity = {
-    version: 1,
+    version: 2,
     deviceId: identity.deviceId,
     publicKey: identity.publicKey,
     privateKey: identity.privateKey,
     createdAtMs: Date.now(),
   };
-  storage?.setItem(DEVICE_IDENTITY_STORAGE_KEY, JSON.stringify(stored));
+  try {
+    storage.setItem(DEVICE_IDENTITY_STORAGE_KEY, JSON.stringify(stored));
+  } catch (cause) {
+    throw new Error("Could not save browser device identity; enable site storage or free space", {
+      cause,
+    });
+  }
+  // Preserve legacy recovery data if persisting the replacement failed.
+  removeLegacyBrowserIdentity(storage);
   return identity;
 }
 
 export async function signDevicePayload(privateKeyBase64Url: string, payload: string) {
   const key = base64UrlDecode(privateKeyBase64Url);
+  if (key.length !== ml_dsa65.lengths.secretKey) {
+    throw new Error("Invalid ML-DSA-65 browser device secret key");
+  }
   const data = new TextEncoder().encode(payload);
-  const sig = await signAsync(data, key);
+  const sig = ml_dsa65.sign(data, key);
   return base64UrlEncode(sig);
 }
 /* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */

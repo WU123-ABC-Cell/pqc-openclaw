@@ -60,7 +60,7 @@ export function controlUiStableChunkName(id: string): string | undefined {
   }
 
   if (
-    moduleIdIncludesPackage(id, "@noble/ed25519") ||
+    moduleIdIncludesPackage(id, "@noble/post-quantum") ||
     moduleIdIncludesPackage(id, "@noble/hashes") ||
     moduleIdIncludesPackage(id, "ipaddr.js")
   ) {

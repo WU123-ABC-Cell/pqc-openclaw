@@ -322,23 +322,33 @@ window.mcpConformanceUnmount = async () => {
         resolveHello = resolve;
         rejectHello = reject;
       });
+      let lastClose: { code: number; reason: string; willRetry: boolean } | null = null;
       const client = new GatewayBrowserClient({
         url: params.gatewayUrl,
         token: params.authValue,
         onHello: () => resolveHello(),
         onClose: (info: { code: number; reason: string; error?: unknown; willRetry: boolean }) => {
+          lastClose = { code: info.code, reason: info.reason, willRetry: info.willRetry };
           if (!info.willRetry) {
             rejectHello(new Error(`Gateway connection closed: ${JSON.stringify(info)}`));
           }
         },
       });
       client.start();
-      await Promise.race([
-        connected,
-        new Promise((_, reject) => {
-          setTimeout(() => reject(new Error("Gateway connection timed out")), 60_000);
-        }),
-      ]);
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          connected,
+          new Promise((_, reject) => {
+            timeout = setTimeout(
+              () => reject(new Error(`Gateway connection timed out: ${JSON.stringify(lastClose)}`)),
+              60_000,
+            );
+          }),
+        ]);
+      } finally {
+        clearTimeout(timeout);
+      }
       const view = document.createElement("mcp-app-view");
       const root = document.documentElement;
       const themeListeners = new Set<() => void>();

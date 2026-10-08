@@ -1,5 +1,6 @@
 /* @vitest-environment jsdom */
 
+import { ml_dsa65 } from "@noble/post-quantum/ml-dsa.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createStorageMock } from "../../test-helpers/storage.ts";
 import {
@@ -32,13 +33,14 @@ function createState(request: (method: string, params?: unknown) => Promise<unkn
 }
 
 function storeIdentity() {
+  const { publicKey, secretKey } = ml_dsa65.keygen();
   localStorage.setItem(
-    "openclaw-device-identity-v1",
+    "openclaw-device-identity-v2",
     JSON.stringify({
-      version: 1,
+      version: 2,
       deviceId: "00",
-      publicKey: "AA",
-      privateKey: "AA",
+      publicKey: Buffer.from(publicKey).toString("base64url"),
+      privateKey: Buffer.from(secretKey).toString("base64url"),
       createdAtMs: 1,
     }),
   );

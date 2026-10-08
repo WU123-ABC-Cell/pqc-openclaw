@@ -918,6 +918,7 @@ Most post-upgrade breakage is config drift or stricter defaults now being enforc
 
     - Pending device approvals for dashboard/nodes.
     - Pending DM pairing approvals after policy or identity changes.
+    - A Control UI browser that previously stored an Ed25519 device identity creates a new ML-DSA-65 identity on upgrade. Its old device token is not transferred; approve the new browser pairing request or use a fresh owner pairing link.
 
     Common signatures:
 
