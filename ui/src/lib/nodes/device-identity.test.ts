@@ -4,11 +4,12 @@ import { webcrypto } from "node:crypto";
 import { ml_dsa65 } from "@noble/post-quantum/ml-dsa.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  deriveDeviceIdFromPublicKey,
+  fingerprintMlDsa65PublicKey,
   MLDSA65_PUBLIC_KEY_LENGTH,
   MLDSA65_SECRET_KEY_LENGTH,
-  verifyDeviceSignature,
-} from "../../../../src/infra/device-identity.js";
+  MLDSA65_SIGNATURE_LENGTH,
+  verifyMlDsa65Signature,
+} from "../../../../src/infra/mldsa65-key-storage.js";
 import { createStorageMock } from "../../test-helpers/storage.ts";
 import {
   loadDeviceAuthToken,
@@ -38,7 +39,7 @@ describe("Control UI device identity", () => {
 
     expect(Buffer.from(identity.publicKey, "base64url")).toHaveLength(MLDSA65_PUBLIC_KEY_LENGTH);
     expect(Buffer.from(identity.privateKey, "base64url")).toHaveLength(MLDSA65_SECRET_KEY_LENGTH);
-    expect(Buffer.from(signature, "base64url")).toHaveLength(3309);
+    expect(Buffer.from(signature, "base64url")).toHaveLength(MLDSA65_SIGNATURE_LENGTH);
     expect(
       ml_dsa65.verify(
         Buffer.from(signature, "base64url"),
@@ -46,9 +47,23 @@ describe("Control UI device identity", () => {
         Buffer.from(identity.publicKey, "base64url"),
       ),
     ).toBe(true);
-    expect(deriveDeviceIdFromPublicKey(identity.publicKey)).toBe(identity.deviceId);
-    expect(verifyDeviceSignature(identity.publicKey, payload, signature)).toBe(true);
-    expect(verifyDeviceSignature(identity.publicKey, `${payload}|tampered`, signature)).toBe(false);
+    expect(fingerprintMlDsa65PublicKey(Buffer.from(identity.publicKey, "base64url"))).toBe(
+      identity.deviceId,
+    );
+    expect(
+      verifyMlDsa65Signature({
+        publicKey: Buffer.from(identity.publicKey, "base64url"),
+        payload,
+        signatureBase64Url: signature,
+      }),
+    ).toBe(true);
+    expect(
+      verifyMlDsa65Signature({
+        publicKey: Buffer.from(identity.publicKey, "base64url"),
+        payload: `${payload}|tampered`,
+        signatureBase64Url: signature,
+      }),
+    ).toBe(false);
     expect(peekStoredDeviceIdentityId()).toBe(identity.deviceId);
     expect(await loadOrCreateDeviceIdentity()).toEqual(identity);
   });
@@ -90,7 +105,9 @@ describe("Control UI device identity", () => {
 
     const replacement = await loadOrCreateDeviceIdentity();
     expect(replacement.deviceId).not.toBe(identity.deviceId);
-    expect(deriveDeviceIdFromPublicKey(replacement.publicKey)).toBe(replacement.deviceId);
+    expect(fingerprintMlDsa65PublicKey(Buffer.from(replacement.publicKey, "base64url"))).toBe(
+      replacement.deviceId,
+    );
   });
 
   it("fails visibly instead of using an identity that could not be persisted", async () => {
