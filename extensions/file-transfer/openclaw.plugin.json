@@ -31,6 +31,16 @@
               "type": "array",
               "items": { "type": "string" }
             },
+            "allowReadExactPaths": {
+              "type": "array",
+              "description": "Literal read paths, including persistent operator approvals. No glob, tilde, or separator expansion.",
+              "items": { "type": "string" }
+            },
+            "allowWriteExactPaths": {
+              "type": "array",
+              "description": "Literal write paths, including persistent operator approvals. No glob, tilde, or separator expansion.",
+              "items": { "type": "string" }
+            },
             "denyPaths": {
               "type": "array",
               "items": { "type": "string" }

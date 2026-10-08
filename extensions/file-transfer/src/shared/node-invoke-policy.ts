@@ -151,7 +151,7 @@ async function requestApproval(input: {
   const subject = nodeDisplayName ?? input.ctx.nodeId;
   const approval = await approvals.request({
     title: `${verb}: ${input.path}`,
-    description: `Allow ${verb.toLowerCase()} on ${subject}\nPath: ${input.path}\nKind: ${input.kind}\n\n"allow-always" appends this exact path to allow${input.kind === "read" ? "Read" : "Write"}Paths.`,
+    description: `Allow ${verb.toLowerCase()} on ${subject}\nPath: ${input.path}\nKind: ${input.kind}\n\n"allow-always" saves only this literal path in allow${input.kind === "read" ? "Read" : "Write"}ExactPaths for this node. It does not authorize glob matches, aliases, or directory descendants.`,
     severity: input.kind === "write" ? "warning" : "info",
     toolName: input.op,
   });

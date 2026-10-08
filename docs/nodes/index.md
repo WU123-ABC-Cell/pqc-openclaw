@@ -226,6 +226,22 @@ than the Gateway machine. The publishing node must have approved `system.run`,
 and the agent's exec policy must allow `host=node`; otherwise the skill stays
 out of that agent's snapshot.
 
+File-transfer policy lives in `plugins.entries.file-transfer.config.nodes`, keyed
+by node ID, display name, or `"*"`. Administrator-configured `allowReadPaths` and
+`allowWritePaths` are glob patterns. A file-transfer **allow-always** approval
+saves the literal path under that node's unique ID in `allowReadExactPaths` or
+`allowWriteExactPaths` instead. Exact entries do not expand glob syntax, `~`,
+case, or path separators, and do not grant directory descendants or canonical
+aliases. Directory archives still require permission for every included path.
+`denyPaths` overrides both allow lists; `ask: "always"` still prompts every time.
+When a node inherits a display-name or wildcard policy, the saved node-ID entry
+copies that effective policy; the shared entry is not modified.
+
+Approvals saved by older versions used the glob lists without recording their
+origin. Upgrading does not automatically convert or delete those entries.
+Review any previously generated entries, remove unintended patterns, and
+reapprove the intended literal paths. Keep intentional administrator globs.
+
 Set `nodeHost.skills.enabled: false` on the node to stop publication. Gateway
 operators can ignore skills from every paired node with
 `gateway.nodes.allowSkills: false`.

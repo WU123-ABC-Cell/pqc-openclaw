@@ -33,8 +33,9 @@
 //   always    — prompt operator on every call (denyPaths still hard-deny)
 //
 // `denyPaths` always wins, even in `ask: always`.
-// `allow-always` from the prompt appends the path back into allowReadPaths /
-// allowWritePaths via mutateConfigFile.
+// Operator-authored allowReadPaths / allowWritePaths remain glob patterns.
+// `allow-always` appends only the literal path to allowReadExactPaths /
+// allowWriteExactPaths via mutateConfigFile; no glob or alias expansion.
 //
 // `followSymlinks` (default false): if false, the node-side handler
 // realpaths the requested path (or its parent for new-file writes) BEFORE
@@ -77,6 +78,8 @@ type NodeFilePolicyConfig = {
   ask?: FilePolicyAskMode;
   allowReadPaths?: string[];
   allowWritePaths?: string[];
+  allowReadExactPaths?: string[];
+  allowWriteExactPaths?: string[];
   denyPaths?: string[];
   maxBytes?: number;
   followSymlinks?: boolean;
@@ -172,7 +175,7 @@ function resolveNodePolicy(
     (k): k is string => typeof k === "string" && k.length > 0,
   );
   for (const key of candidates) {
-    if (config[key]) {
+    if (Object.hasOwn(config, key) && config[key]) {
       return { key, entry: config[key] };
     }
   }
@@ -291,8 +294,15 @@ export function evaluateFilePolicy(input: {
     input.kind === "read"
       ? normalizeGlobs(nodeConfig.allowReadPaths)
       : normalizeGlobs(nodeConfig.allowWritePaths);
+  const exactPaths =
+    input.kind === "read" ? nodeConfig.allowReadExactPaths : nodeConfig.allowWriteExactPaths;
 
-  if (allowPatterns.length > 0 && matchesAny(input.path, allowPatterns)) {
+  // Approved filenames may contain glob syntax or POSIX literal backslashes.
+  // Do not trim, expand ~, or rewrite separators in this authorization record.
+  if (
+    (Array.isArray(exactPaths) && exactPaths.includes(input.path)) ||
+    matchesAny(input.path, allowPatterns)
+  ) {
     return { ok: true, reason: "matched-allow", maxBytes, followSymlinks };
   }
 
@@ -301,7 +311,7 @@ export function evaluateFilePolicy(input: {
     return {
       ok: false,
       code: "POLICY_DENIED",
-      reason: `path does not match any allow${input.kind === "read" ? "Read" : "Write"}Paths pattern`,
+      reason: "path does not match any allowed pattern or exact path",
       askable: true,
       askMode,
       maxBytes,
@@ -313,9 +323,9 @@ export function evaluateFilePolicy(input: {
     ok: false,
     code: "POLICY_DENIED",
     reason:
-      allowPatterns.length === 0
-        ? `no allow${input.kind === "read" ? "Read" : "Write"}Paths configured`
-        : `path does not match any allow${input.kind === "read" ? "Read" : "Write"}Paths pattern`,
+      allowPatterns.length === 0 && (!Array.isArray(exactPaths) || exactPaths.length === 0)
+        ? `no allow${input.kind === "read" ? "Read" : "Write"}Paths or exact paths configured`
+        : "path does not match any allowed pattern or exact path",
     askable: false,
     askMode,
     maxBytes,
@@ -324,35 +334,26 @@ export function evaluateFilePolicy(input: {
 }
 
 /**
- * Persist an "allow-always" approval by appending the path to the
- * relevant allowReadPaths / allowWritePaths list for the node. Uses
- * mutateConfigFile so the change survives gateway restarts.
- *
- * Inserts under whichever key matched the policy (per-node entry, or
- * the "*" wildcard if that's what was hit). If no entry exists yet,
- * creates one keyed by nodeDisplayName ?? nodeId.
- */
-/**
  * Reject special object keys that would mutate the prototype chain when
  * used as a property name (e.g. `__proto__` setter on a plain object).
- * The nodeDisplayName comes from paired-node metadata which we don't
- * fully control; refuse to persist policy under a key that could corrupt
- * the plugin policy container's prototype.
+ * Refuse node IDs that could corrupt the policy container's prototype
+ * or turn a node-specific approval into a wildcard grant.
  */
 function assertSafeConfigKey(key: string): string {
-  if (key === "__proto__" || key === "prototype" || key === "constructor") {
+  if (key === "*" || key === "__proto__" || key === "prototype" || key === "constructor") {
     throw new Error(`refusing to persist file-transfer policy under unsafe key: ${key}`);
   }
   return key;
 }
 
+/** Persist a literal approval under the specific node, never the wildcard. */
 export async function persistAllowAlways(input: {
   nodeId: string;
   nodeDisplayName?: string;
   kind: FilePolicyKind;
   path: string;
 }): Promise<void> {
-  const field = input.kind === "read" ? "allowReadPaths" : "allowWritePaths";
+  const field = input.kind === "read" ? "allowReadExactPaths" : "allowWriteExactPaths";
   await mutateConfigFile({
     afterWrite: { mode: "none", reason: "file-transfer allow-always policy update" },
     mutate: (draft) => {
@@ -365,28 +366,14 @@ export async function persistAllowAlways(input: {
       const pluginConfig = (pluginEntry.config ??= {}) as Record<string, unknown>;
       const fileTransfer = (pluginConfig.nodes ??= {}) as Record<string, NodeFilePolicyConfig>;
 
-      // SECURITY: never persist allow-always under the "*" wildcard. An
-      // operator approving a path on node A must not silently grant the
-      // same path on every other node sharing the wildcard entry. Always
-      // write under the specific node's own entry, creating it if needed.
-      const candidates = [input.nodeId, input.nodeDisplayName].filter(
-        (k): k is string => typeof k === "string" && k.length > 0,
-      );
-      // Use hasOwnProperty so a node with displayName "constructor" doesn't
-      // accidentally hit Object.prototype.constructor and pretend to match.
-      let entry: NodeFilePolicyConfig | undefined;
-      for (const candidate of candidates) {
-        entry = Object.entries(fileTransfer).find(([key]) => key === candidate)?.[1];
-        if (entry) {
-          break;
-        }
-      }
-      if (!entry) {
-        const key = assertSafeConfigKey(input.nodeDisplayName ?? input.nodeId);
-        entry = {};
-        fileTransfer[key] = entry;
-      }
-      const list = Array.isArray(entry[field]) ? entry[field] : [];
+      // Display names can collide or equal "*". Bind new grants to node ID,
+      // retaining the effective administrator policy without mutating its
+      // shared arrays or dropping inherited deny/ask/size restrictions.
+      const key = assertSafeConfigKey(input.nodeId);
+      const resolved = resolveNodePolicy(fileTransfer, input.nodeId, input.nodeDisplayName);
+      const entry: NodeFilePolicyConfig = { ...resolved?.entry };
+      fileTransfer[key] = entry;
+      const list = Array.isArray(entry[field]) ? [...entry[field]] : [];
       if (!list.includes(input.path)) {
         list.push(input.path);
       }

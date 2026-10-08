@@ -432,8 +432,37 @@ describe("evaluateFilePolicy — node-id resolution", () => {
   });
 });
 
+describe("evaluateFilePolicy — exact approvals", () => {
+  it.each(["read", "write"] as const)("keeps deny and ask-always precedence for %s", (kind) => {
+    const field = kind === "read" ? "allowReadExactPaths" : "allowWriteExactPaths";
+    withConfig({ n1: { [field]: ["/tmp/secret", "/tmp/allowed"], denyPaths: ["**/secret"] } });
+    expect(evaluateFilePolicy({ nodeId: "n1", kind, path: "/tmp/allowed" }).ok).toBe(true);
+    expectResultFields(evaluateFilePolicy({ nodeId: "n1", kind, path: "/tmp/secret" }), {
+      ok: false,
+      askable: false,
+    });
+    withConfig({
+      n1: { ask: "always", [field]: ["/tmp/allowed"], maxBytes: 123, followSymlinks: true },
+    });
+    expectResultFields(evaluateFilePolicy({ nodeId: "n1", kind, path: "/tmp/allowed" }), {
+      ok: true,
+      reason: "ask-always",
+      maxBytes: 123,
+      followSymlinks: true,
+    });
+  });
+
+  it("still rejects traversal even when an exact entry exists", () => {
+    withConfig({ n1: { allowReadExactPaths: ["/tmp/../secret"] } });
+    expectResultFields(evaluateFilePolicy({ nodeId: "n1", kind: "read", path: "/tmp/../secret" }), {
+      ok: false,
+      askable: false,
+    });
+  });
+});
+
 describe("persistAllowAlways", () => {
-  it("appends path to allowReadPaths under the existing matching key", async () => {
+  it("appends exact path without modifying administrator glob rules", async () => {
     let captured: Record<string, unknown> | null = null;
     mutateConfigFileMock.mockImplementation(
       async ({ mutate }: { mutate: (draft: Record<string, unknown>) => void }) => {
@@ -458,7 +487,9 @@ describe("persistAllowAlways", () => {
       plugins: {
         entries: {
           "file-transfer": {
-            config: { nodes: Record<string, { allowReadPaths: string[] }> };
+            config: {
+              nodes: Record<string, { allowReadPaths: string[]; allowReadExactPaths: string[] }>;
+            };
           };
         };
       };
@@ -467,10 +498,11 @@ describe("persistAllowAlways", () => {
       root.plugins.entries["file-transfer"].config.nodes.n1,
       "n1 file-transfer node",
     );
-    expect(node.allowReadPaths).toContain("/srv/added.png");
+    expect(node.allowReadPaths).toEqual(["/tmp/**"]);
+    expect(node.allowReadExactPaths).toEqual(["/srv/added.png"]);
   });
 
-  it("creates a new node entry keyed by displayName when no entry exists", async () => {
+  it("creates a new node entry keyed by node ID, not display name", async () => {
     let captured: Record<string, unknown> | null = null;
     mutateConfigFileMock.mockImplementation(
       async ({ mutate }: { mutate: (draft: Record<string, unknown>) => void }) => {
@@ -491,16 +523,16 @@ describe("persistAllowAlways", () => {
       plugins: {
         entries: {
           "file-transfer": {
-            config: { nodes: Record<string, { allowWritePaths: string[] }> };
+            config: { nodes: Record<string, { allowWriteExactPaths: string[] }> };
           };
         };
       };
     };
     const node = expectDefined(
-      root.plugins.entries["file-transfer"].config.nodes.Lobster,
-      "Lobster file-transfer node",
+      root.plugins.entries["file-transfer"].config.nodes.n1,
+      "n1 file-transfer node",
     );
-    expect(node.allowWritePaths).toContain("/srv/out.txt");
+    expect(node.allowWriteExactPaths).toContain("/srv/out.txt");
   });
 
   it("never persists under the '*' wildcard even when '*' is the matching key", async () => {
@@ -532,7 +564,9 @@ describe("persistAllowAlways", () => {
       plugins: {
         entries: {
           "file-transfer": {
-            config: { nodes: Record<string, { allowReadPaths?: string[] }> };
+            config: {
+              nodes: Record<string, { allowReadPaths?: string[]; allowReadExactPaths?: string[] }>;
+            };
           };
         };
       };
@@ -542,37 +576,34 @@ describe("persistAllowAlways", () => {
     expect(expectDefined(nodes["*"], "wildcard file-transfer node").allowReadPaths).toEqual([
       "/var/log/**",
     ]);
-    // A new entry keyed by displayName (not "*") must hold the new path.
-    expect(expectDefined(nodes.Lobster, "Lobster file-transfer node").allowReadPaths).toEqual([
+    // A new entry keyed by node ID (not displayName or "*") holds the grant.
+    expect(expectDefined(nodes.n1, "n1 file-transfer node").allowReadPaths).toEqual([
+      "/var/log/**",
+    ]);
+    expect(expectDefined(nodes.n1, "n1 file-transfer node").allowReadExactPaths).toEqual([
       "/srv/added.png",
     ]);
   });
 
-  it("rejects unsafe keys (__proto__, prototype, constructor) that would mutate prototype chain", async () => {
-    mutateConfigFileMock.mockImplementation(
-      async ({ mutate }: { mutate: (draft: Record<string, unknown>) => void }) => {
-        const draft: Record<string, unknown> = {};
-        mutate(draft);
-      },
-    );
+  it.each(["__proto__", "prototype", "constructor", "*"])(
+    "rejects unsafe node ID %s",
+    async (nodeId) => {
+      mutateConfigFileMock.mockImplementation(
+        async ({ mutate }: { mutate: (draft: Record<string, unknown>) => void }) => {
+          const draft: Record<string, unknown> = {};
+          mutate(draft);
+        },
+      );
 
-    await expect(
-      persistAllowAlways({
-        nodeId: "n1",
-        nodeDisplayName: "__proto__",
-        kind: "read",
-        path: "/etc/passwd",
-      }),
-    ).rejects.toThrow(/unsafe key.*__proto__/);
-
-    await expect(
-      persistAllowAlways({
-        nodeId: "constructor",
-        kind: "read",
-        path: "/etc/passwd",
-      }),
-    ).rejects.toThrow(/unsafe key.*constructor/);
-  });
+      await expect(
+        persistAllowAlways({
+          nodeId,
+          kind: "read",
+          path: "/etc/passwd",
+        }),
+      ).rejects.toThrow("unsafe key");
+    },
+  );
 
   it("dedupes when path already present", async () => {
     let captured: Record<string, unknown> | null = null;
@@ -582,7 +613,7 @@ describe("persistAllowAlways", () => {
           plugins: {
             entries: {
               "file-transfer": {
-                config: { nodes: { n1: { allowReadPaths: ["/tmp/x"] } } },
+                config: { nodes: { n1: { allowReadExactPaths: ["/tmp/x"] } } },
               },
             },
           },
@@ -597,7 +628,7 @@ describe("persistAllowAlways", () => {
       plugins: {
         entries: {
           "file-transfer": {
-            config: { nodes: Record<string, { allowReadPaths: string[] }> };
+            config: { nodes: Record<string, { allowReadExactPaths: string[] }> };
           };
         };
       };
@@ -605,7 +636,7 @@ describe("persistAllowAlways", () => {
     const list = expectDefined(
       root.plugins.entries["file-transfer"].config.nodes.n1,
       "n1 file-transfer node",
-    ).allowReadPaths;
+    ).allowReadExactPaths;
     expect(list.reduce((count, p) => count + (p === "/tmp/x" ? 1 : 0), 0)).toBe(1);
   });
 });
