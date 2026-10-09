@@ -23,7 +23,7 @@ import {
 
 type PlanFileIdentity = { dev: bigint; ino: bigint };
 
-type SecretRefSetupCommand = {
+export type SecretRefSetupCommand = {
   command(name: string): SecretRefSetupCommand;
   description(value: string): SecretRefSetupCommand;
   option(

@@ -223,7 +223,8 @@ export function readPluginSdkSurfaceBudgets(env = process.env) {
       // +2: shared channel question-reaction store and preflight-audio factories.
       // +1: shared channel interactive dispatcher with canonical binding authorization.
       // +1: namespaced OpenClaw PQC DM runtime for the Nostr channel.
-      4835,
+      // +1: name the existing SecretRef setup command type for consumer declarations.
+      4836,
       env,
     ),
     publicFunctionExports: readPluginSdkSurfaceBudgetEnv(

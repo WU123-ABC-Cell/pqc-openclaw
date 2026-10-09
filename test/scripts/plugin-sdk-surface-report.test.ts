@@ -132,6 +132,22 @@ describe("plugin SDK surface report", () => {
     expect(readDefaultPublicSurfaceBudgets()).toEqual(readCurrentPublicSurfaceCounts());
   });
 
+  it("rejects public export growth beyond the authorized default cap", () => {
+    const budgetConfig = readPluginSdkSurfaceBudgets({});
+    const budget = budgetConfig.budgets.publicExports;
+    const report = {
+      ...surfaceReport,
+      publicStats: {
+        ...surfaceReport.publicStats,
+        totals: { ...surfaceReport.publicStats.totals, exports: budget + 1 },
+      },
+    };
+
+    expect(evaluatePluginSdkSurfaceReport(report, budgetConfig)).toContain(
+      `public exports ${budget + 1} > ${budget}`,
+    );
+  });
+
   it("keeps approval store internals out of the deprecated infra barrel", () => {
     const source = fs.readFileSync("src/plugin-sdk/infra-runtime.ts", "utf8");
     expect(source).not.toMatch(/export\s+(?:type\s+)?\*\s+from\s+["'][^"']*exec-approvals/u);
