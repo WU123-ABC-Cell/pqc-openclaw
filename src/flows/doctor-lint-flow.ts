@@ -18,11 +18,12 @@ export interface DoctorLintRunOptions {
   readonly includeAllChecks?: boolean;
 }
 
-interface DoctorLintRunResult {
+// A structural alias lets external SDK wrappers emit this private result without naming it.
+type DoctorLintRunResult = {
   readonly findings: readonly HealthFinding[];
   readonly checksRun: number;
   readonly checksSkipped: number;
-}
+};
 
 /** Runs selected health checks in lint mode and returns sorted findings. */
 export async function runDoctorLintChecks(
