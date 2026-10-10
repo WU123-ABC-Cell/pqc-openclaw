@@ -123,6 +123,7 @@ verifyDepsBeforeRun: false
 blockExoticSubdeps: true
 
 overrides:
+  "@grpc/grpc-js@1.14.4": 1.14.5
   "@agentclientprotocol/codex-acp@1.1.7>@openai/codex": 0.146.1
   "@anthropic-ai/sdk": 0.115.0
   "@opentelemetry/core": 2.10.0
