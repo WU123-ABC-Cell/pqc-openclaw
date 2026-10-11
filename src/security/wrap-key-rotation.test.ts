@@ -61,7 +61,9 @@ function newKey(): Buffer {
 }
 
 beforeEach(() => {
-  while (trackedKeys.length > 0) trackedKeys.pop();
+  while (trackedKeys.length > 0) {
+    trackedKeys.pop();
+  }
 });
 
 afterEach(() => {
@@ -159,9 +161,9 @@ describe("rotateWrappingKey (whitepaper 2.2.5.C)", () => {
       mldsaPrivateKeyWrapKeyId: wrapped.keyId,
     };
     oldRing.drop("wrap-key-2026-08");
-    expect(() =>
-      rotateWrappingKey({ stored, oldKeyring: oldRing, newKeyring: newRing }),
-    ).toThrow(/not found|invalid/i);
+    expect(() => rotateWrappingKey({ stored, oldKeyring: oldRing, newKeyring: newRing })).toThrow(
+      /not found|invalid/i,
+    );
   });
 });
 
@@ -192,23 +194,19 @@ describe("exportWrapKey / importWrapKey (whitepaper 2.2.5.D)", () => {
       passphrase: "the right one",
       keyId: "wrap-key-2026-08",
     });
-    expect(() =>
-      importWrapKey({ backup, passphrase: "the wrong one" }),
-    ).toThrow();
+    expect(() => importWrapKey({ backup, passphrase: "the wrong one" })).toThrow();
   });
 
   it("rejects an empty passphrase", () => {
     const key = newKey();
-    expect(() =>
-      exportWrapKey({ key, passphrase: "", keyId: "wrap-key-2026-08" }),
-    ).toThrow(/non-empty/);
+    expect(() => exportWrapKey({ key, passphrase: "", keyId: "wrap-key-2026-08" })).toThrow(
+      /non-empty/,
+    );
   });
 
   it("rejects a wrong-size key on export", () => {
     const tooShort = randomBytes(16);
-    expect(() =>
-      exportWrapKey({ key: tooShort, passphrase: "x", keyId: "k" }),
-    ).toThrow(/32-byte/);
+    expect(() => exportWrapKey({ key: tooShort, passphrase: "x", keyId: "k" })).toThrow(/32-byte/);
   });
 
   it("rejects a malformed backup version", () => {
@@ -272,11 +270,34 @@ describe("exportWrapKey / importWrapKey (whitepaper 2.2.5.D)", () => {
     expect(recovered.equals(key)).toBe(true);
   });
 
-  it("rejects a non-positive iteration count", () => {
+  it("rejects an excessive iteration count before deriving an imported key", () => {
+    const key = newKey();
+    const backup = exportWrapKey({ key, passphrase: "x", keyId: "k" });
+    for (const iterations of [1_000_001, Number.MAX_SAFE_INTEGER, Number.POSITIVE_INFINITY]) {
+      expect(() => importWrapKey({ backup: { ...backup, iterations }, passphrase: "x" })).toThrow(
+        /iterations.*at most 1000000/,
+      );
+    }
+  });
+
+  it("round-trips an export at the maximum supported iteration count", () => {
+    const key = newKey();
+    const backup = exportWrapKey({ key, passphrase: "x", keyId: "k", iterations: 1_000_000 });
+    expect(importWrapKey({ backup, passphrase: "x" }).equals(key)).toBe(true);
+  });
+
+  it("does not export a backup that import will reject for excessive cost", () => {
     const key = newKey();
     expect(() =>
-      exportWrapKey({ key, passphrase: "x", keyId: "k", iterations: 0 }),
-    ).toThrow(/positive integer/);
+      exportWrapKey({ key, passphrase: "x", keyId: "k", iterations: 1_000_001 }),
+    ).toThrow(/iterations.*at most 1000000/);
+  });
+
+  it("rejects a non-positive iteration count", () => {
+    const key = newKey();
+    expect(() => exportWrapKey({ key, passphrase: "x", keyId: "k", iterations: 0 })).toThrow(
+      /positive integer/,
+    );
   });
 });
 

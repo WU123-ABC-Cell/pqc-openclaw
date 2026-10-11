@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 // Wrap-key rotation + backup helpers (PQC whitepaper 2.2.5.C + 2.2.5.D).
 //
 // Rotation: re-wrap a stored device identity's ML-DSA-65 secret key
@@ -18,8 +19,13 @@
 // OS). The restore is intentionally not tied to a specific keyring
 // so M8's `openclaw wrap-key import <file>` can hand the bytes to
 // the operator's preferred backend.
-import { createCipheriv, createDecipheriv, pbkdf2Sync, randomBytes, timingSafeEqual } from "node:crypto";
-import { Buffer } from "node:buffer";
+import {
+  createCipheriv,
+  createDecipheriv,
+  pbkdf2Sync,
+  randomBytes,
+  timingSafeEqual,
+} from "node:crypto";
 import {
   deserializeWrappedSecret,
   serializeWrappedSecret,
@@ -34,6 +40,8 @@ import {
  *  a smaller `iterations` field are still accepted; new backups use
  *  this value. */
 const PBKDF2_ITERATIONS = 210_000;
+/** Bound the synchronous KDF cost of a backup before accepting or creating it. */
+const MAX_PBKDF2_ITERATIONS = 1_000_000;
 /** PBKDF2 salt length. 16 bytes is the standard recommendation. */
 const PBKDF2_SALT_BYTES = 16;
 /** AES-256-GCM IV length. 12 bytes is the GCM standard. */
@@ -54,7 +62,11 @@ const AES_GCM_IV_BYTES = 12;
  *  in place (the `wrapKeyId` and the BLOB change; everything else
  *  stays byte-for-byte identical). */
 export function rotateWrappingKey(params: {
-  stored: { privateKeyPem: string; mldsaPrivateKeyWrapped: string | null; mldsaPrivateKeyWrapKeyId: string | null };
+  stored: {
+    privateKeyPem: string;
+    mldsaPrivateKeyWrapped: string | null;
+    mldsaPrivateKeyWrapKeyId: string | null;
+  };
   oldKeyring: WrappingKeyProvider;
   newKeyring: WrappingKeyProvider;
 }): { mldsaPrivateKeyWrapped: string; mldsaPrivateKeyWrapKeyId: string } {
@@ -93,10 +105,8 @@ export function rotateWrappingKey(params: {
 export interface WrapKeyBackup {
   /** Schema version. Bumped on any change to the envelope shape. */
   version: 1;
-  /** PBKDF2-SHA256 iteration count. Older backups may have a smaller
-   *  value; the loader accepts any value but refuses to load a
-   *  smaller one with a warning so a slow-rolling upgrade can be
-   *  forced by re-encrypting. */
+  /** PBKDF2-SHA256 iteration count. Older backups with a smaller positive
+   *  value remain readable; excessive costs are rejected before derivation. */
   iterations: number;
   /** PBKDF2 salt (16 bytes). */
   salt: string;
@@ -118,6 +128,17 @@ function deriveKeyFromPassphrase(passphrase: string, salt: Buffer, iterations: n
   return pbkdf2Sync(Buffer.from(passphrase, "utf8"), salt, iterations, 32, "sha256");
 }
 
+function assertSupportedPbkdf2Iterations(
+  iterations: number,
+  operation: "exportWrapKey" | "importWrapKey",
+): void {
+  if (!Number.isInteger(iterations) || iterations < 1 || iterations > MAX_PBKDF2_ITERATIONS) {
+    throw new Error(
+      `${operation}: iterations must be a positive integer at most ${MAX_PBKDF2_ITERATIONS}, got ${iterations}`,
+    );
+  }
+}
+
 /** Encrypt a 32-byte wrap key under a passphrase. Returns a JSON-
  *  serialisable backup envelope. The caller writes it to a file
  *  (M8's `openclaw wrap-key export`). */
@@ -131,9 +152,7 @@ export function exportWrapKey(params: {
     throw new Error("exportWrapKey: key must be a 32-byte Buffer");
   }
   const iterations = params.iterations ?? PBKDF2_ITERATIONS;
-  if (!Number.isInteger(iterations) || iterations < 1) {
-    throw new Error(`exportWrapKey: iterations must be a positive integer, got ${iterations}`);
-  }
+  assertSupportedPbkdf2Iterations(iterations, "exportWrapKey");
   const salt = randomBytes(PBKDF2_SALT_BYTES);
   const derivedKey = deriveKeyFromPassphrase(params.passphrase, salt, iterations);
   const iv = randomBytes(AES_GCM_IV_BYTES);
@@ -163,9 +182,7 @@ export function importWrapKey(params: { backup: WrapKeyBackup; passphrase: strin
   if (version !== 1) {
     throw new Error(`importWrapKey: unsupported backup version ${version}; expected 1`);
   }
-  if (!Number.isInteger(iterations) || iterations < 1) {
-    throw new Error(`importWrapKey: iterations must be a positive integer, got ${iterations}`);
-  }
+  assertSupportedPbkdf2Iterations(iterations, "importWrapKey");
   // Defensive length checks on every base64url-decoded field so a
   // tampered backup fails at the field name, not deep in the cipher.
   const saltBuf = Buffer.from(salt, "base64url");
@@ -173,13 +190,17 @@ export function importWrapKey(params: { backup: WrapKeyBackup; passphrase: strin
   const cipherBuf = Buffer.from(ciphertext, "base64url");
   const tagBuf = Buffer.from(authTag, "base64url");
   if (saltBuf.length !== PBKDF2_SALT_BYTES) {
-    throw new Error(`importWrapKey: salt must be ${PBKDF2_SALT_BYTES} bytes, got ${saltBuf.length}`);
+    throw new Error(
+      `importWrapKey: salt must be ${PBKDF2_SALT_BYTES} bytes, got ${saltBuf.length}`,
+    );
   }
   if (ivBuf.length !== AES_GCM_IV_BYTES) {
     throw new Error(`importWrapKey: iv must be ${AES_GCM_IV_BYTES} bytes, got ${ivBuf.length}`);
   }
   if (cipherBuf.length !== 32) {
-    throw new Error(`importWrapKey: ciphertext must be 32 bytes (key size), got ${cipherBuf.length}`);
+    throw new Error(
+      `importWrapKey: ciphertext must be 32 bytes (key size), got ${cipherBuf.length}`,
+    );
   }
   if (tagBuf.length !== 16) {
     throw new Error(`importWrapKey: authTag must be 16 bytes, got ${tagBuf.length}`);

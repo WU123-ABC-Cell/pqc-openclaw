@@ -16,12 +16,6 @@ import {
   readStoredDeviceIdentity,
   type DeviceIdentityStoreOptions,
 } from "../infra/device-identity-store.js";
-import {
-  encodeMlDsa65SecretKey,
-  generateMlDsa65KeyPair,
-  encodeMlDsa65PublicKey,
-  fingerprintMlDsa65PublicKey,
-} from "../infra/mldsa65-key-storage.js";
 import { requireNodeSqlite } from "../infra/node-sqlite.js";
 import { closeOpenClawStateDatabaseForTest } from "../state/openclaw-state-db.js";
 import { FileKeyring } from "./keyring-provider.js";
@@ -89,15 +83,21 @@ function newKey(): Buffer {
 }
 
 beforeEach(() => {
-  while (tempDirs.length > 0) tempDirs.pop();
-  while (originalKeys.length > 0) originalKeys.pop();
+  while (tempDirs.length > 0) {
+    tempDirs.pop();
+  }
+  while (originalKeys.length > 0) {
+    originalKeys.pop();
+  }
 });
 
 afterEach(() => {
   closeOpenClawStateDatabaseForTest();
   while (tempDirs.length > 0) {
     const dir = tempDirs.pop();
-    if (!dir) continue;
+    if (!dir) {
+      continue;
+    }
     try {
       fs.rmSync(dir, { recursive: true, force: true });
     } catch {
@@ -253,9 +253,10 @@ describe("wrapKeyHealthCheck (whitepaper 2.2.7)", () => {
     });
     expect(status.ok).toBe(true);
     expect(status.activeKeyId).toBe("wrap-key-2026-09");
-    const row = status.rows[0];
-    expect(row.state).toBe("wrapped");
-    expect(row.wrapKeyId).toBe("wrap-key-2026-08");
+    expect(status.rows[0]).toMatchObject({
+      state: "wrapped",
+      wrapKeyId: "wrap-key-2026-08",
+    });
     expect(status.notes.some((n) => /is NOT the active keyId/.test(n))).toBe(true);
   });
 
@@ -275,8 +276,7 @@ describe("wrapKeyHealthCheck (whitepaper 2.2.7)", () => {
       options: { ...options, wrappingKeyProvider: keyring },
       identityKeys: [PRIMARY_DEVICE_IDENTITY_KEY],
     });
-    const row = status.rows[0];
-    expect(row.state).toBe("plaintext");
+    expect(status.rows[0]).toMatchObject({ state: "plaintext" });
     expect(status.notes.some((n) => /plaintext; consider migrating/.test(n))).toBe(true);
   });
 
@@ -326,6 +326,14 @@ describe("wrapKeyExportCommand / wrapKeyImportCommand (whitepaper 2.2.8)", () =>
       keyId: "wrap-key-2026-08",
     });
     expect(() => wrapKeyImportCommand({ backup, passphrase: "wrong" })).toThrow();
+  });
+
+  it("rejects an excessive backup cost through the import helper", () => {
+    const key = newKey();
+    const backup = wrapKeyExportCommand({ key, passphrase: "x", keyId: "k" });
+    expect(() =>
+      wrapKeyImportCommand({ backup: { ...backup, iterations: 1_000_001 }, passphrase: "x" }),
+    ).toThrow(/iterations.*at most 1000000/);
   });
 
   it("rejects a wrong-size key on export", () => {
