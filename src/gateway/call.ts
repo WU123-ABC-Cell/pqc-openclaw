@@ -547,16 +547,6 @@ function shouldOmitDeviceIdentityForGatewayCall(params: {
   return isLocalBackendSharedAuth || isLocalCliSharedAuth;
 }
 
-function resolveDeviceIdentityForGatewayCall(): DeviceIdentity | null {
-  try {
-    return gatewayCallDeps.loadOrCreateDeviceIdentity();
-  } catch {
-    // Read-only or restricted environments should still be able to call the
-    // gateway with token/password auth without crashing before the RPC.
-    return null;
-  }
-}
-
 function loadStoredOperatorDeviceAuthToken(
   deviceIdentity: DeviceIdentity | null,
 ): DeviceAuthEntry | null {
@@ -1206,11 +1196,12 @@ async function callGatewayWithScopes<T = Record<string, unknown>>(
       "local backend shared auth requires a loopback gateway with token/password credentials or auth mode none",
     );
   }
+  // Identity-required calls must fail before transport, not downgrade auth.
   const deviceIdentity =
     opts.deviceIdentity === undefined
       ? omitDeviceIdentity
         ? null
-        : resolveDeviceIdentityForGatewayCall()
+        : gatewayCallDeps.loadOrCreateDeviceIdentity()
       : opts.deviceIdentity;
   if (useStoredDeviceAuth) {
     const storedAuth = loadStoredOperatorDeviceAuthToken(deviceIdentity);

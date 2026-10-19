@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { HelloOk } from "../../packages/gateway-protocol/src/schema/frames.js";
 import type { OpenClawConfig } from "../config/config.js";
 import { resetConfigRuntimeState, setRuntimeConfigSnapshot } from "../config/runtime-snapshot.js";
+import { DeviceIdentityStorageError } from "../infra/device-identity-store.js";
 import type { DeviceIdentity } from "../infra/device-identity.js";
 import { createEmptyPluginRegistry } from "../plugins/registry-empty.js";
 import { setActivePluginRegistry } from "../plugins/runtime.js";
@@ -35,6 +36,7 @@ const deviceIdentityState = vi.hoisted(() => ({
     privateKeyPem: "test-private-key",
   } satisfies DeviceIdentity,
   throwOnLoad: false,
+  loadError: null as Error | null,
 }));
 const loadDeviceAuthTokenMock = vi.hoisted(() =>
   vi.fn<(...args: unknown[]) => DeviceAuthEntry | null>(() => null),
@@ -179,6 +181,7 @@ const {
   buildGatewayProbeConnectionDetails,
   callGateway,
   callGatewayCli,
+  callGatewayLeastPrivilege,
   formatGatewayAuthErrorJson,
   formatGatewayClientRequestErrorJson,
   formatGatewayTransportErrorJson,
@@ -234,6 +237,9 @@ function resetGatewayCallMocks() {
     createGatewayClient: (opts) => new StubGatewayClient(opts) as never,
     getRuntimeConfig: loadConfigForTests,
     loadOrCreateDeviceIdentity: () => {
+      if (deviceIdentityState.loadError) {
+        throw deviceIdentityState.loadError;
+      }
       if (deviceIdentityState.throwOnLoad) {
         throw new Error("read-only identity dir");
       }
@@ -243,6 +249,7 @@ function resetGatewayCallMocks() {
     resolveGatewayPort: resolveGatewayPortForTests,
   });
   deviceIdentityState.throwOnLoad = false;
+  deviceIdentityState.loadError = null;
   loadDeviceAuthTokenMock.mockReset();
   loadDeviceAuthTokenMock.mockReturnValue({
     token: "paired-device-token",
@@ -292,6 +299,8 @@ describe("callGateway url resolution", () => {
     "OPENCLAW_GATEWAY_URL",
     "OPENCLAW_GATEWAY_TOKEN",
     "OPENCLAW_STATE_DIR",
+    "OPENCLAW_WRAP_KEY_FILE",
+    "OPENCLAW_WRAP_KEY_ID",
   ]);
 
   beforeEach(() => {
@@ -529,7 +538,7 @@ describe("callGateway url resolution", () => {
     expect(lastClientOptions?.deviceIdentity).toEqual(deviceIdentityState.value);
   });
 
-  it("falls back to token/password auth when device identity cannot be persisted", async () => {
+  it("omits identity loading for intentional local shared-token auth", async () => {
     setLocalLoopbackGatewayConfig();
     deviceIdentityState.throwOnLoad = true;
 
@@ -542,6 +551,59 @@ describe("callGateway url resolution", () => {
     expect(lastClientOptions?.token).toBe("explicit-token");
     expect(lastClientOptions?.deviceIdentity).toBeNull();
     expect(lastRequestOptions?.method).toBe("health");
+  });
+
+  it.each([
+    {
+      label: "remote token",
+      call: callGateway,
+      auth: { url: "wss://remote.example.test", token: "explicit-token" },
+    },
+    {
+      label: "remote password",
+      call: callGatewayCli,
+      auth: { url: "wss://remote.example.test", password: "explicit-password" },
+    },
+    { label: "CLI auth-none", call: callGatewayCli, auth: {} },
+    { label: "backend auth-none", call: callGateway, auth: {} },
+    { label: "least-privilege auth-none", call: callGatewayLeastPrivilege, auth: {} },
+    { label: "stored device auth", call: callGatewayCli, auth: { useStoredDeviceAuth: true } },
+  ])("rejects identity loading failures before transport for $label", async ({ call, auth }) => {
+    setGatewayConfig({ mode: "local", bind: "loopback", auth: { mode: "none" } });
+    setGatewayNetworkDefaults();
+    const error = new DeviceIdentityStorageError(
+      "Identity unavailable; run openclaw doctor --fix.",
+    );
+    deviceIdentityState.loadError = error;
+
+    await expect(call({ method: "health", ...auth })).rejects.toBe(error);
+
+    expect(lastClientOptions).toBeNull();
+    expect(startCalls).toBe(0);
+    expect(lastRequestOptions).toBeNull();
+  });
+
+  it("preserves a real wrapping-key failure instead of connecting without identity", async () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-call-identity-"));
+    // A directory cannot be accepted as the configured wrapping-key file.
+    setTestEnvValue("OPENCLAW_STATE_DIR", stateDir);
+    setTestEnvValue("OPENCLAW_WRAP_KEY_FILE", stateDir);
+    setTestEnvValue("OPENCLAW_WRAP_KEY_ID", "unavailable-key");
+    testing.resetDepsForTests();
+    try {
+      await expect(
+        callGateway({
+          method: "health",
+          url: "wss://remote.example.test",
+          token: "explicit-token",
+        }),
+      ).rejects.toThrow();
+      expect(lastClientOptions).toBeNull();
+      expect(startCalls).toBe(0);
+      expect(lastRequestOptions).toBeNull();
+    } finally {
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
   });
 
   it("keeps backend device identity enabled for remote shared-token auth", async () => {
@@ -562,14 +624,16 @@ describe("callGateway url resolution", () => {
 
   it("honors an explicit null device identity override", async () => {
     setLocalLoopbackGatewayConfig();
+    deviceIdentityState.throwOnLoad = true;
 
     await callGateway({
       method: "health",
       token: "explicit-token",
+      url: "wss://remote.example.test",
       deviceIdentity: null,
     });
 
-    expect(lastClientOptions?.url).toBe("ws://127.0.0.1:18789");
+    expect(lastClientOptions?.url).toBe("wss://remote.example.test");
     expect(lastClientOptions?.token).toBe("explicit-token");
     expect(lastClientOptions?.deviceIdentity).toBeNull();
   });
@@ -1316,9 +1380,7 @@ describe("buildGatewayConnectionDetails", () => {
           new StubGatewayClient(
             opts as ConstructorParameters<typeof StubGatewayClient>[0],
           ) as never,
-        loadOrCreateDeviceIdentity: () => {
-          throw new Error("auth mode none should not load a device identity");
-        },
+        loadOrCreateDeviceIdentity: () => deviceIdentityState.value,
         loadDeviceAuthToken: () => null,
         resolveGatewayPort: (config) => config?.gateway?.port ?? 18789,
       });
@@ -1326,7 +1388,7 @@ describe("buildGatewayConnectionDetails", () => {
       await expect(callGateway({ method: "health" })).resolves.toEqual({ ok: true });
 
       expect(lastClientOptions?.url).toBe("ws://127.0.0.1:18800");
-      expect(lastClientOptions?.deviceIdentity).toBeNull();
+      expect(lastClientOptions?.deviceIdentity).toEqual(deviceIdentityState.value);
     } finally {
       resetConfigRuntimeState();
       fs.rmSync(tempStateDir, { recursive: true, force: true });
@@ -1354,9 +1416,7 @@ describe("buildGatewayConnectionDetails", () => {
           new StubGatewayClient(
             opts as ConstructorParameters<typeof StubGatewayClient>[0],
           ) as never,
-        loadOrCreateDeviceIdentity: () => {
-          throw new Error("auth mode none should not load a device identity");
-        },
+        loadOrCreateDeviceIdentity: () => deviceIdentityState.value,
         loadDeviceAuthToken: () => null,
         resolveGatewayPort: (config) => config?.gateway?.port ?? 18789,
       });
