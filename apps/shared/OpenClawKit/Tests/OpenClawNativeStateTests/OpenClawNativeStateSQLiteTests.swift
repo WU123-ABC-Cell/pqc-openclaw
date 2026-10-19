@@ -64,6 +64,66 @@ struct OpenClawNativeStateSQLiteTests {
     }
 
     @Test
+    func `versioned Node identity table accepts only the known PQC columns`() throws {
+        try self.withDatabase { database in
+            try database.execute("""
+            CREATE TABLE schema_meta (
+              meta_key TEXT NOT NULL PRIMARY KEY,
+              role TEXT NOT NULL,
+              schema_version INTEGER NOT NULL
+            ) STRICT;
+            INSERT INTO schema_meta (meta_key, role, schema_version)
+            VALUES ('primary', 'global', 6);
+            CREATE TABLE device_identities (
+              identity_key TEXT NOT NULL PRIMARY KEY,
+              device_id TEXT NOT NULL,
+              public_key_pem TEXT NOT NULL,
+              private_key_pem TEXT NOT NULL,
+              created_at_ms INTEGER NOT NULL,
+              updated_at_ms INTEGER NOT NULL,
+              mldsa_public_key_pem TEXT,
+              mldsa_private_key_pem TEXT,
+              mldsa_private_key_wrapped BLOB,
+              mldsa_private_key_wrap_key_id TEXT
+            ) STRICT;
+            CREATE INDEX idx_device_identities_device
+              ON device_identities(device_id, updated_at_ms DESC);
+            PRAGMA user_version = 6;
+            """)
+
+            try database.ensureCanonicalTable(.deviceIdentities, allowVersionZeroCreation: false)
+            try database.execute("""
+            INSERT INTO device_identities (
+              identity_key, device_id, public_key_pem, private_key_pem, created_at_ms, updated_at_ms
+            ) VALUES ('apple-mldsa65-primary', 'device', 'public', 'seed', 1, 1)
+            """)
+            #expect(try database.scalarInt64("SELECT COUNT(*) FROM device_identities") == 1)
+
+            try database.execute("ALTER TABLE device_identities ADD COLUMN unknown_column TEXT")
+            #expect(throws: OpenClawNativeStateError.self) {
+                try database.ensureCanonicalTable(.deviceIdentities, allowVersionZeroCreation: false)
+            }
+        }
+    }
+
+    @Test
+    func `version zero does not claim a Node extended identity table`() throws {
+        try self.withDatabase { database in
+            try database.ensureCanonicalTable(.deviceIdentities)
+            try database.execute("""
+            ALTER TABLE device_identities ADD COLUMN mldsa_public_key_pem TEXT;
+            ALTER TABLE device_identities ADD COLUMN mldsa_private_key_pem TEXT;
+            ALTER TABLE device_identities ADD COLUMN mldsa_private_key_wrapped BLOB;
+            ALTER TABLE device_identities ADD COLUMN mldsa_private_key_wrap_key_id TEXT;
+            """)
+
+            #expect(throws: OpenClawNativeStateError.self) {
+                try database.ensureCanonicalTable(.deviceIdentities)
+            }
+        }
+    }
+
+    @Test
     func `immediate transaction rolls back all writes`() throws {
         try self.withDatabase { database in
             try database.withImmediateTransaction {

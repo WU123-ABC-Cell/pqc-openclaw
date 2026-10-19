@@ -70,6 +70,25 @@ the ordinary log destination, not an independent audit sink. `logging.level:
 `wrap-key import`, `export` and `rotate` are not registered. Do not use historical
 command examples as recovery instructions or overwrite keys to clear an error.
 
+### Authenticated identity wrapping upgrade
+
+New wrapped identities authenticate their SQLite identity key, device ID and
+canonical ML-DSA public key, together with the envelope version and wrapping-key
+ID. Older envelopes without this binding require an explicit upgrade before
+runtime use. With the original wrapping key available, run `openclaw doctor --fix`
+and review its changes and warnings. Doctor upgrades old wrapped rows, including
+custom identity keys, after verifying the original public/private pair. Successful
+upgrades preserve the device ID and signing keys; the wrapping upgrade is idempotent.
+Then check `openclaw wrap-key status --identity-key <stored-identity-key> --json`.
+
+Failed upgrades preserve their rows and report warnings; other valid rows may
+have upgraded successfully. Authentication failures in bound envelopes require
+restoring the original key or a trusted backup, rather than changing identity
+metadata or regenerating a key. Legacy upgrades cannot establish whether an old
+unbound row was previously moved. This binding does not prevent restoring an
+entire database snapshot or replaying a row in another database with the same
+identity key and wrapping key.
+
 ## Evaluation only
 
 Keep evaluation in a disposable environment with independent state, credentials and

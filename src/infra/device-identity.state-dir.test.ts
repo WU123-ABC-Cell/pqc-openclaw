@@ -1,4 +1,5 @@
 // Covers default device identity SQLite path under the state dir.
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -36,6 +37,60 @@ describe("device identity state dir defaults", () => {
       const second = loadOrCreateDeviceIdentity();
 
       expect(second).toEqual(first);
+    });
+  });
+
+  it.each([false, true])(
+    "uses the custom database's state owner for both key and coordinator (alias: %s)",
+    async (useAlias) => {
+      await withStateDirEnv("openclaw-identity-custom-state-", async ({ stateDir }) => {
+        const physicalStateDir = path.join(stateDir, "custom-state");
+        fs.mkdirSync(physicalStateDir);
+        const selectedStateDir = useAlias ? path.join(stateDir, "state-alias") : physicalStateDir;
+        if (useAlias) {
+          fs.symlinkSync(physicalStateDir, selectedStateDir, "dir");
+        }
+        const options = { path: path.join(selectedStateDir, "state", "custom.sqlite") };
+
+        const identity = loadOrCreateDeviceIdentity(options);
+
+        expect(loadDeviceIdentityIfPresent(options)).toEqual(identity);
+        expect(fs.existsSync(path.join(selectedStateDir, "wrap-key.b64"))).toBe(true);
+        expect(fs.existsSync(path.join(stateDir, "wrap-key.b64"))).toBe(false);
+        expect(fs.existsSync(resolveGatewayLockDir(selectedStateDir))).toBe(true);
+        const pathHash = crypto
+          .createHash("sha256")
+          .update(fs.realpathSync(options.path))
+          .digest("hex")
+          .slice(0, 8);
+        expect(fs.readdirSync(resolveGatewayLockDir(selectedStateDir))).toEqual([
+          `device-identity.${pathHash}.lock.sqlite`,
+        ]);
+        expect(
+          loadDeviceIdentityIfPresent({
+            path: path.join(physicalStateDir, "state", "custom.sqlite"),
+          }),
+        ).toEqual(identity);
+        expect(fs.existsSync(resolveGatewayLockDir(stateDir))).toBe(false);
+      });
+    },
+  );
+
+  it("keeps an explicit state owner when the database is elsewhere", async () => {
+    await withStateDirEnv("openclaw-identity-explicit-owner-", async ({ stateDir }) => {
+      const selectedStateDir = path.join(stateDir, "selected-state");
+      const databaseStateDir = path.join(stateDir, "database-state");
+      const identity = loadOrCreateDeviceIdentity({
+        env: { ...process.env, OPENCLAW_STATE_DIR: selectedStateDir },
+        path: path.join(databaseStateDir, "state", "custom.sqlite"),
+      });
+
+      expect(identity.deviceId).toBeTruthy();
+      expect(fs.existsSync(path.join(selectedStateDir, "wrap-key.b64"))).toBe(true);
+      expect(fs.existsSync(resolveGatewayLockDir(selectedStateDir))).toBe(true);
+      expect(fs.existsSync(path.join(databaseStateDir, "wrap-key.b64"))).toBe(false);
+      expect(fs.existsSync(resolveGatewayLockDir(databaseStateDir))).toBe(false);
+      expect(fs.existsSync(resolveGatewayLockDir(stateDir))).toBe(false);
     });
   });
 

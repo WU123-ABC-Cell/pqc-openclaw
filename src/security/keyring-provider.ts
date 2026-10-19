@@ -22,7 +22,7 @@
 // Compose the providers with `CompositeKeyring` (M6's "auto-inject
 // default keyring", whitepaper 2.2.5.A): try the active source, fall
 // back to the others in order.
-import { randomBytes } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { munlockKey, protectKey } from "./mlock-helper.js";
@@ -263,6 +263,53 @@ export class CompositeKeyring implements KeyringProvider {
     return null;
   }
 
+  /** Inspect every configured built-in leaf, including nested composites, without exposing keys. */
+  inspectConfiguredKeyIdCollisions():
+    | { status: "consistent" }
+    | { status: "collision"; keyId: KeyId }
+    | { status: "opaque-provider" } {
+    const seen = new Map<KeyId, Buffer>();
+    const visit = (
+      provider: KeyringProvider,
+    ):
+      | { status: "consistent" }
+      | { status: "collision"; keyId: KeyId }
+      | { status: "opaque-provider" } => {
+      if (provider instanceof CompositeKeyring) {
+        for (const child of provider.providers) {
+          const result = visit(child);
+          if (result.status !== "consistent") {
+            return result;
+          }
+        }
+        return { status: "consistent" };
+      }
+      if (
+        !(provider instanceof FileKeyring) &&
+        !(provider instanceof EnvKeyring) &&
+        !(provider instanceof OsKeyring)
+      ) {
+        return { status: "opaque-provider" };
+      }
+      const { key, keyId } = provider.getActiveKey();
+      if (
+        typeof keyId !== "string" ||
+        keyId.length === 0 ||
+        !Buffer.isBuffer(key) ||
+        key.length !== 32
+      ) {
+        throw new Error("Configured wrapping-key provider returned an invalid active key");
+      }
+      const previous = seen.get(keyId);
+      if (previous && !timingSafeEqual(previous, key)) {
+        return { status: "collision", keyId };
+      }
+      seen.set(keyId, key);
+      return { status: "consistent" };
+    };
+    return visit(this);
+  }
+
   /** The number of providers in the composite. Useful for tests
    *  asserting that "auto-inject" added a primary + a fallback. */
   get size(): number {
@@ -281,6 +328,70 @@ export class CompositeKeyring implements KeyringProvider {
         }
       }
     }
+  }
+}
+
+export type WrappingKeyProviderPreflight =
+  | { status: "verified"; activeKeyId: KeyId }
+  | {
+      status: "blocked";
+      reason:
+        | "not-configured"
+        | "invalid-active-key"
+        | "active-lookup-mismatch"
+        | "key-id-collision"
+        | "opaque-provider"
+        | "provider-error";
+      activeKeyId?: KeyId;
+      conflictingKeyId?: KeyId;
+    };
+
+/** Snapshot-check the current new-write key lookup and built-in provider ID ownership. */
+export function preflightWrappingKeyProviderReadOnly(
+  provider: KeyringProvider | null | undefined,
+): WrappingKeyProviderPreflight {
+  if (!provider) {
+    return { status: "blocked", reason: "not-configured" };
+  }
+  let activeKeyId: KeyId | undefined;
+  try {
+    const active = provider.getActiveKey();
+    activeKeyId = active.keyId;
+    if (
+      typeof activeKeyId !== "string" ||
+      activeKeyId.length === 0 ||
+      !Buffer.isBuffer(active.key) ||
+      active.key.length !== 32
+    ) {
+      return { status: "blocked", reason: "invalid-active-key" };
+    }
+    const lookup = provider.getKeyById(activeKeyId);
+    if (!Buffer.isBuffer(lookup) || lookup.length !== 32 || !timingSafeEqual(active.key, lookup)) {
+      return { status: "blocked", reason: "active-lookup-mismatch", activeKeyId };
+    }
+    if (provider instanceof CompositeKeyring) {
+      const collision = provider.inspectConfiguredKeyIdCollisions();
+      if (collision.status === "collision") {
+        return {
+          status: "blocked",
+          reason: "key-id-collision",
+          activeKeyId,
+          conflictingKeyId: collision.keyId,
+        };
+      }
+      if (collision.status === "opaque-provider") {
+        return { status: "blocked", reason: "opaque-provider", activeKeyId };
+      }
+    } else if (
+      !(provider instanceof FileKeyring) &&
+      !(provider instanceof EnvKeyring) &&
+      !(provider instanceof OsKeyring)
+    ) {
+      return { status: "blocked", reason: "opaque-provider", activeKeyId };
+    }
+    return { status: "verified", activeKeyId };
+  } catch {
+    return { status: "blocked", reason: "provider-error", ...(activeKeyId ? { activeKeyId } : {}) };
   }
 }
 

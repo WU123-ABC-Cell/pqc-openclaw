@@ -103,6 +103,15 @@ public final class OpenClawNativeStateSQLite: @unchecked Sendable {
             IndexColumn(name: "updated_at_ms", descending: true),
         ])
 
+    // Node adds these nullable columns to the shared versioned table. The
+    // native version-zero bootstrap still owns only the six legacy columns.
+    private static let nodeDeviceIdentityColumns = [
+        Column(name: "mldsa_public_key_pem", type: "TEXT", notNull: false, primaryKeyPosition: 0, hidden: 0),
+        Column(name: "mldsa_private_key_pem", type: "TEXT", notNull: false, primaryKeyPosition: 0, hidden: 0),
+        Column(name: "mldsa_private_key_wrapped", type: "BLOB", notNull: false, primaryKeyPosition: 0, hidden: 0),
+        Column(name: "mldsa_private_key_wrap_key_id", type: "TEXT", notNull: false, primaryKeyPosition: 0, hidden: 0),
+    ]
+
     private static let deviceAuthTokens = CanonicalTable(
         name: "device_auth_tokens",
         indexName: "idx_device_auth_tokens_updated",
@@ -441,8 +450,14 @@ public final class OpenClawNativeStateSQLite: @unchecked Sendable {
     }
 
     private func validateTableShape(_ table: CanonicalTable) throws {
-        guard try self.tableColumns(table.name) == table.columns else {
-            throw OpenClawNativeStateError("\(table.name) has an incompatible schema")
+        let columns = try self.tableColumns(table.name)
+        if columns != table.columns {
+            guard table.name == Self.deviceIdentities.name,
+                  columns == table.columns + Self.nodeDeviceIdentityColumns,
+                  try self.scalarInt64("PRAGMA user_version") > 0
+            else {
+                throw OpenClawNativeStateError("\(table.name) has an incompatible schema")
+            }
         }
         let tableSQL = try self.scalarText(
             "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = '\(table.name)'") ?? ""

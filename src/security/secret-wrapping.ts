@@ -29,6 +29,8 @@ import { pqcLog, PQC_EVENT } from "../logging/pqc-log.js";
 
 /** A wrapped secret ready to be stored in SQLite. All bytes are base64url. */
 export interface WrappedSecret {
+  /** Version 2 requires caller-supplied identity context; absent means legacy. */
+  version?: 2;
   /** AES-256-GCM ciphertext. */
   ciphertext: string;
   /** 12-byte GCM nonce. Fresh per wrap. */
@@ -37,6 +39,13 @@ export interface WrappedSecret {
   authTag: string;
   /** Keyring key id that sealed the payload. */
   keyId: string;
+}
+
+export class WrappedSecretVersionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "WrappedSecretVersionError";
+  }
 }
 
 /** A 32-byte AES-256 key plus its keyring id. */
@@ -67,7 +76,20 @@ const REQUIRED_AUTH_TAG_BYTES = 16;
  *  `WrappedSecret` is JSON-serialisable; pass it through
  *  `serializeWrappedSecret` to flatten it into a single base64url string
  *  for the SQLite BLOB column. */
-export function wrapSecret(plaintext: Buffer, provider: WrappingKeyProvider): WrappedSecret {
+function authenticatedContext(keyId: string, associatedData: Buffer): Buffer {
+  if (!Buffer.isBuffer(associatedData) || associatedData.length === 0) {
+    throw new Error("wrapped secret requires non-empty associated data");
+  }
+  return Buffer.from(
+    JSON.stringify(["openclaw-wrapped-secret", 2, keyId, associatedData.toString("base64url")]),
+  );
+}
+
+export function wrapSecret(
+  plaintext: Buffer,
+  provider: WrappingKeyProvider,
+  associatedData?: Buffer,
+): WrappedSecret {
   if (!Buffer.isBuffer(plaintext)) {
     throw new TypeError("wrapSecret: plaintext must be a Buffer");
   }
@@ -84,6 +106,9 @@ export function wrapSecret(plaintext: Buffer, provider: WrappingKeyProvider): Wr
   }
   const iv = randomBytes(REQUIRED_IV_BYTES);
   const cipher = createCipheriv("aes-256-gcm", key, iv);
+  if (associatedData !== undefined) {
+    cipher.setAAD(authenticatedContext(keyId, associatedData));
+  }
   const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
   const authTag = cipher.getAuthTag();
   if (authTag.length !== REQUIRED_AUTH_TAG_BYTES) {
@@ -97,6 +122,7 @@ export function wrapSecret(plaintext: Buffer, provider: WrappingKeyProvider): Wr
   }
   pqcLog.info(PQC_EVENT.WrapSecret, { status: "ok", keyId, byteLength: plaintext.length });
   return {
+    ...(associatedData !== undefined ? { version: 2 as const } : {}),
     ciphertext: ciphertext.toString("base64url"),
     iv: iv.toString("base64url"),
     authTag: authTag.toString("base64url"),
@@ -111,7 +137,19 @@ export function wrapSecret(plaintext: Buffer, provider: WrappingKeyProvider): Wr
  *  - malformed base64url / JSON shape
  *  The thrown error names the keyId so log analysis can attribute failures
  *  to a specific keyring entry without leaking the ciphertext itself. */
-export function unwrapSecret(wrapped: WrappedSecret, provider: WrappingKeyProvider): Buffer {
+export function unwrapSecret(
+  wrapped: WrappedSecret,
+  provider: WrappingKeyProvider,
+  associatedData?: Buffer,
+): Buffer {
+  if (wrapped.version !== undefined && wrapped.version !== 2) {
+    throw new WrappedSecretVersionError("unwrapSecret: unsupported envelope version");
+  }
+  if ((wrapped.version === 2) !== (associatedData !== undefined)) {
+    throw new WrappedSecretVersionError(
+      "unwrapSecret: envelope version and associated data must agree",
+    );
+  }
   const key = provider.getKeyById(wrapped.keyId);
   if (!key) {
     pqcLog.error(PQC_EVENT.UnwrapSecret, {
@@ -155,6 +193,9 @@ export function unwrapSecret(wrapped: WrappedSecret, provider: WrappingKeyProvid
     );
   }
   const decipher = createDecipheriv("aes-256-gcm", key, iv);
+  if (associatedData !== undefined) {
+    decipher.setAAD(authenticatedContext(wrapped.keyId, associatedData));
+  }
   decipher.setAuthTag(authTag);
   try {
     const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
@@ -209,6 +250,9 @@ export function deserializeWrappedSecret(serialized: string): WrappedSecret {
   }
   const obj = parsed as Record<string, unknown>;
   const { ciphertext, iv, authTag, keyId } = obj;
+  if (obj.version !== undefined && obj.version !== 2) {
+    throw new WrappedSecretVersionError("deserializeWrappedSecret: unsupported envelope version");
+  }
   if (typeof ciphertext !== "string") {
     throw new Error("deserializeWrappedSecret: ciphertext must be a string");
   }
@@ -221,5 +265,5 @@ export function deserializeWrappedSecret(serialized: string): WrappedSecret {
   if (typeof keyId !== "string" || keyId.length === 0) {
     throw new Error("deserializeWrappedSecret: keyId must be a non-empty string");
   }
-  return { ciphertext, iv, authTag, keyId };
+  return { ...(obj.version === 2 ? { version: 2 as const } : {}), ciphertext, iv, authTag, keyId };
 }

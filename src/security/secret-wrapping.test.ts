@@ -18,7 +18,7 @@ import {
  *  Tests use it to drive the wrap/unwrap helpers without touching the
  *  real keyring module (M6 will own that). */
 class InMemoryKeyring implements WrappingKeyProvider {
-  private readonly activeId: string;
+  private activeId: string;
   private readonly keys = new Map<string, Buffer>();
 
   constructor(activeId: string) {
@@ -29,9 +29,9 @@ class InMemoryKeyring implements WrappingKeyProvider {
     this.keys.set(keyId, Buffer.from(key));
   }
 
-  rotate(newActiveId: string, newKey: Buffer): void {
-    this.addKey(newActiveId, newKey);
-    (this as { activeId: string }).activeId = newActiveId;
+  rotate(newActiveId: string, nextKey: Buffer): void {
+    this.addKey(newActiveId, nextKey);
+    this.activeId = newActiveId;
   }
 
   drop(keyId: string): void {
@@ -77,6 +77,30 @@ afterEach(() => {
 });
 
 describe("AES-256-GCM wrap/unwrap (whitepaper 2.2.1)", () => {
+  it("authenticates context and key id even when key aliases contain identical bytes", () => {
+    const context = Buffer.from("device row A");
+    const plaintext = randomBytes(64);
+    const wrapped = deserializeWrappedSecret(
+      serializeWrappedSecret(wrapSecret(plaintext, keyring, context)),
+    );
+    expect(wrapped.version).toBe(2);
+    expect(unwrapSecret(wrapped, keyring, context)).toEqual(plaintext);
+    expect(() => unwrapSecret(wrapped, keyring, Buffer.from("device row B"))).toThrow();
+    keyring.addKey("alias", originalKey);
+    expect(() => unwrapSecret({ ...wrapped, keyId: "alias" }, keyring, context)).toThrow();
+    expect(() => unwrapSecret(wrapped, keyring)).toThrow(/associated data/);
+    const { version: _version, ...downgraded } = wrapped;
+    expect(() => unwrapSecret(downgraded, keyring)).toThrow();
+    expect(() => unwrapSecret(downgraded, keyring, context)).toThrow(/associated data/);
+  });
+
+  it("requires an explicit unbound decode for legacy envelopes and rejects unknown versions", () => {
+    const wrapped = wrapSecret(Buffer.from("legacy"), keyring);
+    expect(() => unwrapSecret(wrapped, keyring, Buffer.from("context"))).toThrow(/associated data/);
+    const future = Buffer.from(JSON.stringify({ ...wrapped, version: 3 })).toString("base64url");
+    expect(() => deserializeWrappedSecret(future)).toThrow(/unsupported envelope version/);
+  });
+
   it("round-trips an empty buffer", () => {
     const wrapped = wrapSecret(Buffer.alloc(0), keyring);
     expect(wrapped.ciphertext).toBe("");
@@ -135,9 +159,9 @@ describe("AES-256-GCM wrap/unwrap (whitepaper 2.2.1)", () => {
       // Flip a bit in the middle of the ciphertext. The length stays
       // the same so the failure is unambiguously from GCM, not from a
       // length check.
-      ciphertext: Buffer.from(wrapped.ciphertext, "base64url")
-        .map((b, i) => (i === 5 ? b ^ 0x01 : b))
-        .toString("base64url"),
+      ciphertext: Buffer.from(
+        Buffer.from(wrapped.ciphertext, "base64url").map((b, i) => (i === 5 ? b ^ 0x01 : b)),
+      ).toString("base64url"),
     };
     expect(() => unwrapSecret(tampered, keyring)).toThrow();
   });
@@ -146,9 +170,9 @@ describe("AES-256-GCM wrap/unwrap (whitepaper 2.2.1)", () => {
     const wrapped = wrapSecret(Buffer.from("the quick brown fox"), keyring);
     const tampered: WrappedSecret = {
       ...wrapped,
-      authTag: Buffer.from(wrapped.authTag, "base64url")
-        .map((b, i) => (i === 0 ? b ^ 0x80 : b))
-        .toString("base64url"),
+      authTag: Buffer.from(
+        Buffer.from(wrapped.authTag, "base64url").map((b, i) => (i === 0 ? b ^ 0x80 : b)),
+      ).toString("base64url"),
     };
     expect(() => unwrapSecret(tampered, keyring)).toThrow();
   });
@@ -157,9 +181,9 @@ describe("AES-256-GCM wrap/unwrap (whitepaper 2.2.1)", () => {
     const wrapped = wrapSecret(Buffer.from("the quick brown fox"), keyring);
     const tampered: WrappedSecret = {
       ...wrapped,
-      iv: Buffer.from(wrapped.iv, "base64url")
-        .map((b, i) => (i === 0 ? b ^ 0x01 : b))
-        .toString("base64url"),
+      iv: Buffer.from(
+        Buffer.from(wrapped.iv, "base64url").map((b, i) => (i === 0 ? b ^ 0x01 : b)),
+      ).toString("base64url"),
     };
     expect(() => unwrapSecret(tampered, keyring)).toThrow();
   });
@@ -192,9 +216,7 @@ describe("AES-256-GCM wrap/unwrap (whitepaper 2.2.1)", () => {
   });
 
   it("rejects a non-Buffer plaintext", () => {
-    expect(() =>
-      wrapSecret("not a buffer" as unknown as Buffer, keyring),
-    ).toThrow(/Buffer/);
+    expect(() => wrapSecret("not a buffer" as unknown as Buffer, keyring)).toThrow(/Buffer/);
   });
 });
 
@@ -218,9 +240,7 @@ describe("serialize/deserialize (whitepaper 2.2.1)", () => {
 
   it("rejects an empty / non-string input", () => {
     expect(() => deserializeWrappedSecret("")).toThrow(/non-empty/);
-    expect(() => deserializeWrappedSecret(undefined as unknown as string)).toThrow(
-      /non-empty/,
-    );
+    expect(() => deserializeWrappedSecret(undefined as unknown as string)).toThrow(/non-empty/);
   });
 
   it("rejects a malformed base64url payload", () => {

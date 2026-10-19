@@ -27,6 +27,7 @@ import {
   getDefaultKeyringFromEnv,
   type KeyringProvider,
   OsKeyring,
+  preflightWrappingKeyProviderReadOnly,
   resetDefaultKeyringCache,
 } from "./keyring-provider.js";
 import { unwrapSecret, wrapSecret } from "./secret-wrapping.js";
@@ -328,6 +329,98 @@ describe("CompositeKeyring (whitepaper 2.2.5.A — auto-inject default)", () => 
 
   it("rejects an empty providers list", () => {
     expect(() => new CompositeKeyring([])).toThrow(/non-empty/);
+  });
+});
+
+describe("read-only wrapping-key provider preflight", () => {
+  const envRing = (id: string, key: Buffer) =>
+    new EnvKeyring("TEST_WRAP_KEY", { TEST_WRAP_KEY: encodeBase64UrlKey(key) }, id);
+
+  it("verifies a configured active key and a distinct historical key without changing either", () => {
+    const active = newKey();
+    const historical = newKey();
+    const provider = new CompositeKeyring([
+      envRing("active", active),
+      envRing("historical", historical),
+    ]);
+    expect(preflightWrappingKeyProviderReadOnly(provider)).toEqual({
+      status: "verified",
+      activeKeyId: "active",
+    });
+    expect(provider.getKeyById("historical")).toEqual(historical);
+  });
+
+  it("blocks different keys sharing an ID even when the collision is not the active ID", () => {
+    const provider = new CompositeKeyring([
+      envRing("active", newKey()),
+      new CompositeKeyring([envRing("history", newKey()), envRing("history", newKey())]),
+    ]);
+    expect(preflightWrappingKeyProviderReadOnly(provider)).toEqual({
+      status: "blocked",
+      reason: "key-id-collision",
+      activeKeyId: "active",
+      conflictingKeyId: "history",
+    });
+  });
+
+  it("allows duplicate IDs only when their key bytes match", () => {
+    const key = newKey();
+    const provider = new CompositeKeyring([envRing("shared", key), envRing("shared", key)]);
+    expect(preflightWrappingKeyProviderReadOnly(provider)).toEqual({
+      status: "verified",
+      activeKeyId: "shared",
+    });
+  });
+
+  it("blocks active IDs whose lookup is absent or resolves a different key", () => {
+    for (const found of [null, newKey()]) {
+      const provider: KeyringProvider = {
+        getActiveKey: () => ({ key: newKey(), keyId: "active" }),
+        getKeyById: () => found,
+      };
+      expect(preflightWrappingKeyProviderReadOnly(provider)).toEqual({
+        status: "blocked",
+        reason: "active-lookup-mismatch",
+        activeKeyId: "active",
+      });
+    }
+  });
+
+  it("does not claim verification for an opaque provider or missing configured key", () => {
+    const key = newKey();
+    const opaque: KeyringProvider = {
+      getActiveKey: () => ({ key, keyId: "active" }),
+      getKeyById: () => key,
+    };
+    expect(preflightWrappingKeyProviderReadOnly(opaque)).toEqual({
+      status: "blocked",
+      reason: "opaque-provider",
+      activeKeyId: "active",
+    });
+    expect(preflightWrappingKeyProviderReadOnly(null)).toEqual({
+      status: "blocked",
+      reason: "not-configured",
+    });
+    const unavailable = new EnvKeyring("MISSING_WRAP_KEY", {}, "missing");
+    expect(preflightWrappingKeyProviderReadOnly(unavailable)).toEqual({
+      status: "blocked",
+      reason: "provider-error",
+    });
+  });
+
+  it("detects an OS-primary/file-history ID collision using the configured provider order", () => {
+    const dir = makeTempDir();
+    const filePath = path.join(dir, "wrap.key");
+    writeKeyFile(filePath, newKey());
+    const osRing = new OsKeyring("openclaw", "preflight", "same-id");
+    osRing.setKeyBase64Url(encodeBase64UrlKey(newKey()));
+    const provider = new CompositeKeyring([osRing, new FileKeyring(filePath, "same-id")]);
+    expect(preflightWrappingKeyProviderReadOnly(provider)).toEqual({
+      status: "blocked",
+      reason: "key-id-collision",
+      activeKeyId: "same-id",
+      conflictingKeyId: "same-id",
+    });
   });
 });
 

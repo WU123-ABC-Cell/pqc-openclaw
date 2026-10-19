@@ -1,9 +1,5 @@
-// PQC fork M8: wrap-key health check + openclaw wrap-key CLI helpers.
-//   2.2.7 — wrapKeyHealthCheck surfaces a JSON-friendly status.
-//   2.2.8 — wrapKeyStatusCommand / wrapKeyExportCommand /
-//           wrapKeyImportCommand are the function-side surface for
-//           the CLI; the actual CLI registration is out of scope for
-//           this milestone.
+// Status tests exercise the registered read-only command helper; auxiliary
+// export/import tests cover the unregistered backup helpers.
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -19,17 +15,9 @@ import {
 import { requireNodeSqlite } from "../infra/node-sqlite.js";
 import { closeOpenClawStateDatabaseForTest } from "../state/openclaw-state-db.js";
 import { FileKeyring } from "./keyring-provider.js";
+import type { ActiveWrappingKey, WrappingKeyProvider } from "./secret-wrapping.js";
 import {
-  type ActiveWrappingKey,
-  type WrappingKeyProvider,
-  serializeWrappedSecret,
-  wrapSecret,
-} from "./secret-wrapping.js";
-import {
-  type WrapKeyStatus,
-  parseWrapEnvelope,
   wrapKeyExportCommand,
-  wrapKeyHealthCheck,
   wrapKeyImportCommand,
   wrapKeyStatusCommand,
 } from "./wrap-key-cli.js";
@@ -109,20 +97,20 @@ afterEach(() => {
   }
 });
 
-describe("wrapKeyHealthCheck (whitepaper 2.2.7)", () => {
+describe("wrapKeyStatusCommand (whitepaper 2.2.7)", () => {
   it("reports a missing keyring with a clear note", async () => {
     const options = makeStoreOptions();
-    const status = await wrapKeyHealthCheck({ options });
+    const status = await wrapKeyStatusCommand({ options });
     expect(status.ok).toBe(false);
     expect(status.activeKeyId).toBe("");
-    expect(status.notes.some((n) => /no WrappingKeyProvider/.test(n))).toBe(true);
+    expect(status.notes.some((n) => n.includes("no WrappingKeyProvider"))).toBe(true);
   });
 
   it("reports a healthy keyring with the live keyId and PBKDF2 cost", async () => {
     const keyring = new InMemoryKeyring("wrap-key-2026-08");
     keyring.addKey("wrap-key-2026-08", newKey());
     const options = makeStoreOptions(keyring);
-    const status = await wrapKeyHealthCheck({ options });
+    const status = await wrapKeyStatusCommand({ options });
     expect(status.ok).toBe(true);
     expect(status.activeKeyId).toBe("wrap-key-2026-08");
     expect(status.provider).toBe("InMemoryKeyring");
@@ -132,7 +120,7 @@ describe("wrapKeyHealthCheck (whitepaper 2.2.7)", () => {
   it("does not report healthy when a requested identity is missing", async () => {
     const keyring = new InMemoryKeyring("active");
     keyring.addKey("active", newKey());
-    const status = await wrapKeyHealthCheck({
+    const status = await wrapKeyStatusCommand({
       options: makeStoreOptions(keyring),
       identityKeys: [PRIMARY_DEVICE_IDENTITY_KEY],
     });
@@ -158,7 +146,7 @@ describe("wrapKeyHealthCheck (whitepaper 2.2.7)", () => {
     } finally {
       db.close();
     }
-    const status = await wrapKeyHealthCheck({
+    const status = await wrapKeyStatusCommand({
       options,
       identityKeys: [PRIMARY_DEVICE_IDENTITY_KEY],
     });
@@ -185,7 +173,7 @@ describe("wrapKeyHealthCheck (whitepaper 2.2.7)", () => {
       db.close();
     }
     expect(() => readStoredDeviceIdentity(options)).toThrow(/invalid persisted device identity/);
-    const status = await wrapKeyHealthCheck({
+    const status = await wrapKeyStatusCommand({
       options,
       identityKeys: [PRIMARY_DEVICE_IDENTITY_KEY],
     });
@@ -203,7 +191,7 @@ describe("wrapKeyHealthCheck (whitepaper 2.2.7)", () => {
     );
     const newKeyring = new InMemoryKeyring("new");
     newKeyring.addKey("new", newKey());
-    const status = await wrapKeyHealthCheck({
+    const status = await wrapKeyStatusCommand({
       options: { ...options, wrappingKeyProvider: newKeyring },
       identityKeys: [PRIMARY_DEVICE_IDENTITY_KEY],
     });
@@ -214,7 +202,7 @@ describe("wrapKeyHealthCheck (whitepaper 2.2.7)", () => {
   it("does not report healthy when the active key has the wrong length", async () => {
     const keyring = new InMemoryKeyring("active");
     keyring.addKey("active", Buffer.alloc(16));
-    const status = await wrapKeyHealthCheck({ options: makeStoreOptions(keyring) });
+    const status = await wrapKeyStatusCommand({ options: makeStoreOptions(keyring) });
     expect(status.ok).toBe(false);
     expect(status.notes).toContain(
       "active key must be 32 bytes (AES-256), got 16; refusing to sign",
@@ -247,7 +235,7 @@ describe("wrapKeyHealthCheck (whitepaper 2.2.7)", () => {
       path: path.join(options.stateDir, "state", "openclaw.sqlite"),
       wrappingKeyProvider: keyringB,
     };
-    const status = await wrapKeyHealthCheck({
+    const status = await wrapKeyStatusCommand({
       options: readOptions,
       identityKeys: [PRIMARY_DEVICE_IDENTITY_KEY],
     });
@@ -257,7 +245,7 @@ describe("wrapKeyHealthCheck (whitepaper 2.2.7)", () => {
       state: "wrapped",
       wrapKeyId: "wrap-key-2026-08",
     });
-    expect(status.notes.some((n) => /is NOT the active keyId/.test(n))).toBe(true);
+    expect(status.notes.some((n) => n.includes("is NOT the active keyId"))).toBe(true);
   });
 
   it("flags a plaintext row (legacy M1/M2) as a hint, not an error", async () => {
@@ -272,32 +260,20 @@ describe("wrapKeyHealthCheck (whitepaper 2.2.7)", () => {
       env: options.env,
       path: path.join(options.stateDir, "state", "openclaw.sqlite"),
     });
-    const status = await wrapKeyHealthCheck({
+    const status = await wrapKeyStatusCommand({
       options: { ...options, wrappingKeyProvider: keyring },
       identityKeys: [PRIMARY_DEVICE_IDENTITY_KEY],
     });
     expect(status.rows[0]).toMatchObject({ state: "plaintext" });
-    expect(status.notes.some((n) => /plaintext; consider migrating/.test(n))).toBe(true);
+    expect(status.notes.some((n) => n.includes("plaintext; consider migrating"))).toBe(true);
   });
 
   it("returns an empty rows array when the caller does not list identity keys", async () => {
     const keyring = new InMemoryKeyring("wrap-key-2026-08");
     keyring.addKey("wrap-key-2026-08", newKey());
     const options = makeStoreOptions(keyring);
-    const status = await wrapKeyHealthCheck({ options });
+    const status = await wrapKeyStatusCommand({ options });
     expect(status.rows).toEqual([]);
-  });
-});
-
-describe("wrapKeyStatusCommand (whitepaper 2.2.8)", () => {
-  it("is a thin alias for wrapKeyHealthCheck", async () => {
-    const keyring = new InMemoryKeyring("wrap-key-2026-08");
-    keyring.addKey("wrap-key-2026-08", newKey());
-    const options = makeStoreOptions(keyring);
-    const a: WrapKeyStatus = await wrapKeyHealthCheck({ options });
-    const b: WrapKeyStatus = await wrapKeyStatusCommand({ options });
-    expect(a.activeKeyId).toBe(b.activeKeyId);
-    expect(a.provider).toBe(b.provider);
   });
 });
 
@@ -343,31 +319,6 @@ describe("wrapKeyExportCommand / wrapKeyImportCommand (whitepaper 2.2.8)", () =>
   });
 });
 
-describe("parseWrapEnvelope (envelope probe)", () => {
-  it("accepts a freshly-wrapped envelope", () => {
-    const keyring = new InMemoryKeyring("wrap-key-2026-08");
-    keyring.addKey("wrap-key-2026-08", newKey());
-    const wrapped = wrapSecret(Buffer.from("hello"), keyring);
-    const serialized = serializeWrappedSecret(wrapped);
-    const result = parseWrapEnvelope(serialized);
-    expect(result.ok).toBe(true);
-  });
-
-  it("rejects a malformed envelope", () => {
-    const result = parseWrapEnvelope("not base64url @@@");
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.reason).toMatch(/malformed|non-empty/);
-    }
-  });
-
-  it("rejects a base64url payload that is not JSON", () => {
-    const notJson = Buffer.from("not json", "utf8").toString("base64url");
-    const result = parseWrapEnvelope(notJson);
-    expect(result.ok).toBe(false);
-  });
-});
-
 describe("FileKeyring + CLI surface (cross-module integration)", () => {
   it("survives a full status flow through the FileKeyring backend", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-pqc-m8-file-"));
@@ -381,12 +332,12 @@ describe("FileKeyring + CLI surface (cross-module integration)", () => {
     }
     const ring = new FileKeyring(keyPath, "wrap-key-2026-08");
     // Status with no wrappingKeyProvider surfaces a clear note.
-    const bareStatus = await wrapKeyHealthCheck({
+    const bareStatus = await wrapKeyStatusCommand({
       options: { env: process.env },
     });
     expect(bareStatus.notes.length).toBeGreaterThan(0);
     // Re-run with the FileKeyring supplied.
-    const fullStatus = await wrapKeyHealthCheck({
+    const fullStatus = await wrapKeyStatusCommand({
       options: { env: process.env, wrappingKeyProvider: ring },
     });
     expect(fullStatus.activeKeyId).toBe("wrap-key-2026-08");

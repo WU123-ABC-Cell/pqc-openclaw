@@ -1,6 +1,10 @@
 // Doctor-authorized retirement of the legacy Ed25519 primary identity JSON.
+import path from "node:path";
 import { root, type Root } from "@openclaw/fs-safe";
-import { runOpenClawStateWriteTransaction } from "../state/openclaw-state-db.js";
+import {
+  openExistingOpenClawStateDatabaseReadOnly,
+  runOpenClawStateWriteTransaction,
+} from "../state/openclaw-state-db.js";
 import { acquireDeviceIdentityCoordinator } from "./device-identity-coordinator.js";
 import {
   normalizeLegacyDeviceIdentity,
@@ -8,16 +12,21 @@ import {
 } from "./device-identity-legacy.js";
 import {
   DeviceIdentityStorageError,
-  ensureStoredDeviceIdentityWrapped,
-  generateStoredDeviceIdentity,
+  preflightDeviceIdentityPopulationReadOnly,
   readStoredDeviceIdentityReadOnly,
-  repairInvalidStoredDeviceIdentity,
+  upgradeDeviceIdentityPopulationWrapped,
   resolveDeviceIdentityStore,
   type DeviceIdentityStoreOptions,
   type StoredDeviceIdentity,
 } from "./device-identity-store.js";
 import { resolveDeviceIdentityWrappingOptions } from "./device-identity.js";
+import { syncDirectoryIfSupported } from "./directory-durability.js";
 import { formatErrorMessage } from "./errors.js";
+import {
+  moveLegacyIdentityPathWithoutOverwrite,
+  MAX_LEGACY_IDENTITY_BYTES,
+  restoreLegacyIdentityClaim,
+} from "./state-migrations.device-identity-claim.js";
 import {
   hasLegacyDeviceIdentityPath,
   repairInvalidCanonicalIdentity,
@@ -27,7 +36,9 @@ import { withLegacyMigrationStateLock } from "./state-migrations.lock.js";
 import {
   markLegacyMigrationSourceRemoved,
   recordLegacyMigrationReceipt,
+  readLegacyMigrationReceiptFromDatabase,
   resolveLegacyMigrationSourceKey,
+  type LegacyMigrationReceipt,
 } from "./state-migrations.receipts.js";
 import {
   legacyMigrationSourceSnapshotsMatch as snapshotsMatch,
@@ -40,7 +51,6 @@ import type { MigrationMessages } from "./state-migrations.types.js";
 const IDENTITY_KEY = "primary";
 const MIGRATION_KIND = "legacy-device-identity-json";
 const RETIREMENT_POLICY_VERSION = 1;
-const MAX_LEGACY_IDENTITY_BYTES = 128 * 1024;
 const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
 
 type LegacySourceSnapshot = LegacyMigrationSourceSnapshot & {
@@ -52,6 +62,8 @@ type CanonicalPqcResult = {
   options: DeviceIdentityStoreOptions;
   repaired: boolean;
   rotated: boolean;
+  upgraded: string[];
+  pendingNative: string[];
 };
 
 type ArchiveResult = {
@@ -97,23 +109,41 @@ function ensureCanonicalPqcIdentity(env: NodeJS.ProcessEnv): CanonicalPqcResult 
       "A wrapping key provider is required before retiring a legacy device identity.",
     );
   }
-  const result = repairInvalidStoredDeviceIdentity(
-    generateStoredDeviceIdentity(Date.now(), options.wrappingKeyProvider),
-    options,
-  );
-  const wrapped = ensureStoredDeviceIdentityWrapped(options);
+  const result = upgradeDeviceIdentityPopulationWrapped(options, { createMissingPrimary: true });
+  if (result.blocked.length) {
+    throw new DeviceIdentityStorageError(
+      "Identity population is blocked; no identities were changed. Restore its wrapping key or backup before retrying.",
+    );
+  }
+  const identity = readStoredDeviceIdentityReadOnly(options);
+  if (!identity) {
+    throw new DeviceIdentityStorageError(
+      "Primary identity was not durable after population upgrade.",
+    );
+  }
   return {
-    identity: wrapped.identity,
+    identity,
     options,
-    repaired: result.repaired || wrapped.rewrapped,
-    rotated: result.rotated,
+    repaired: result.upgraded.includes(IDENTITY_KEY),
+    rotated: result.createdPrimary,
+    upgraded: result.upgraded,
+    pendingNative: result.pendingNative,
   };
 }
 
-function verifyCanonicalPqcIdentity(
+async function verifyCanonicalPqcIdentity(
   expectedDeviceId: string,
   options: DeviceIdentityStoreOptions,
-): void {
+): Promise<void> {
+  const population = await preflightDeviceIdentityPopulationReadOnly(options);
+  if (
+    !population.databaseExists ||
+    population.rows.some((row) => row.status === "blocked" || row.status === "needs-upgrade")
+  ) {
+    throw new DeviceIdentityStorageError(
+      "Identity population changed or is blocked before legacy retirement; restore its wrapping key or backup before retrying.",
+    );
+  }
   const identity = readStoredDeviceIdentityReadOnly(options);
   if (!identity || identity.deviceId !== expectedDeviceId) {
     throw new Error("canonical ML-DSA device identity changed during legacy retirement");
@@ -125,7 +155,7 @@ function recordRetirementReceipt(params: {
   sourcePath: string;
   snapshot: LegacySourceSnapshot;
   targetDeviceId: string;
-}): string {
+}): void {
   const sourceKey = resolveLegacyMigrationSourceKey("device-identity-json", params.sourcePath);
   const runId = `${sourceKey}:${params.snapshot.sha256.slice(0, 16)}`;
   const now = Date.now();
@@ -140,6 +170,7 @@ function recordRetirementReceipt(params: {
     targetDeviceId: params.targetDeviceId,
     authorizationTransferred: false,
     sourceSha256: params.snapshot.sha256,
+    sourceSizeBytes: params.snapshot.size,
   });
   runOpenClawStateWriteTransaction(
     ({ db }) => {
@@ -160,17 +191,171 @@ function recordRetirementReceipt(params: {
     { env: params.env },
     { operationLabel: "device-identity.legacy-retirement-receipt" },
   );
-  return sourceKey;
+}
+
+async function readRetirementReceipt(params: {
+  env: NodeJS.ProcessEnv;
+  sourcePath: string;
+}): Promise<LegacyMigrationReceipt | null> {
+  const database = await openExistingOpenClawStateDatabaseReadOnly({ env: params.env });
+  if (!database) {
+    return null;
+  }
+  try {
+    return readLegacyMigrationReceiptFromDatabase(
+      database.db,
+      resolveLegacyMigrationSourceKey("device-identity-json", params.sourcePath),
+    );
+  } finally {
+    database.walMaintenance.close();
+  }
+}
+
+async function reconcileArchivedRetirement(params: {
+  detected: LegacyDeviceIdentityDetection;
+  stateRoot: Root;
+  stateDir: string;
+  env: NodeJS.ProcessEnv;
+}): Promise<{ finalized: boolean; messages: MigrationMessages }> {
+  const receipt = await readRetirementReceipt({
+    env: params.env,
+    sourcePath: params.detected.sourcePath,
+  });
+  if (!receipt || receipt.removedSource) {
+    return { finalized: false, messages: { changes: [], warnings: [] } };
+  }
+  const changes: string[] = [];
+  const warnings: string[] = [];
+  try {
+    const report: unknown = JSON.parse(receipt.reportJson);
+    if (
+      !report ||
+      typeof report !== "object" ||
+      !("source" in report) ||
+      report.source !== MIGRATION_KIND ||
+      !("targetDeviceId" in report) ||
+      typeof report.targetDeviceId !== "string" ||
+      !/^[a-f0-9]{64}$/.test(report.targetDeviceId) ||
+      !("sourceSha256" in report) ||
+      report.sourceSha256 !== receipt.sourceSha256 ||
+      !("sourceSizeBytes" in report) ||
+      typeof report.sourceSizeBytes !== "number" ||
+      !Number.isSafeInteger(report.sourceSizeBytes) ||
+      !("legacyDeviceId" in report) ||
+      typeof report.legacyDeviceId !== "string" ||
+      !/^[a-f0-9]{64}$/.test(report.legacyDeviceId)
+    ) {
+      throw new Error("retirement receipt is invalid");
+    }
+    const archiveDir = path.dirname(params.detected.sourcePath);
+    const archiveBase = `${path.basename(params.detected.sourcePath)}.migrated`;
+    const entries = await params.stateRoot.list(relativeLegacyPath(params.stateDir, archiveDir));
+    const archiveNames = entries
+      .map((name) => {
+        const suffix = name.startsWith(`${archiveBase}.`) ? name.slice(archiveBase.length + 1) : "";
+        const index = name === archiveBase ? 1 : Number(suffix);
+        return index >= 1 &&
+          index <= 10_000 &&
+          (index === 1 ? name === archiveBase : suffix === String(index))
+          ? { name, index }
+          : null;
+      })
+      .filter((entry): entry is { name: string; index: number } => entry !== null)
+      .toSorted((a, b) => a.index - b.index);
+    for (const { name } of archiveNames) {
+      const candidate = path.join(archiveDir, name);
+      const snapshot = await readLegacyBytesSnapshot({
+        stateRoot: params.stateRoot,
+        stateDir: params.stateDir,
+        sourcePath: candidate,
+      });
+      if (snapshot.sha256 === receipt.sourceSha256 && snapshot.size === report.sourceSizeBytes) {
+        const archivedIdentity = await readLegacySourceSnapshot({
+          stateRoot: params.stateRoot,
+          stateDir: params.stateDir,
+          sourcePath: candidate,
+        });
+        if (archivedIdentity.identity.deviceId !== report.legacyDeviceId) {
+          throw new Error("archived Ed25519 identity differs from the retirement receipt");
+        }
+        await hardenPrivateFile({ ...params, filePath: candidate });
+        const options = resolveDeviceIdentityWrappingOptions(
+          { env: params.env, identityKey: IDENTITY_KEY },
+          false,
+        );
+        const upgrade = upgradeDeviceIdentityPopulationWrapped(options);
+        if (upgrade.blocked.length > 0) {
+          throw new DeviceIdentityStorageError(
+            "Identity population is blocked; restore its wrapping key or backup before finalizing legacy retirement.",
+          );
+        }
+        changes.push(
+          ...upgrade.upgraded.map(
+            (key) => `Upgraded authenticated wrapping for device identity "${key}" in SQLite.`,
+          ),
+        );
+        warnings.push(
+          ...upgrade.pendingNative.map(
+            (key) =>
+              `Device identity "${key}" was preserved and still requires native Apple verification.`,
+          ),
+        );
+        await verifyCanonicalPqcIdentity(report.targetDeviceId, options);
+        for (const activePath of [
+          params.detected.sourcePath,
+          params.detected.claimPath,
+          params.detected.nativeClaimPath,
+        ]) {
+          if (await params.stateRoot.exists(relativeLegacyPath(params.stateDir, activePath))) {
+            throw new Error(
+              "legacy device identity source or claim reappeared before finalization",
+            );
+          }
+        }
+        markLegacyMigrationSourceRemoved(
+          receipt.sourceKey,
+          params.env,
+          "device-identity.legacy-retirement-reconcile",
+        );
+        return {
+          finalized: true,
+          messages: {
+            changes: [
+              ...changes,
+              `Confirmed retired Ed25519 device identity archive → ${candidate}.`,
+            ],
+            warnings,
+          },
+        };
+      }
+    }
+    throw new Error("no matching archive exists; restore the legacy source or archive from backup");
+  } catch (error) {
+    return {
+      finalized: false,
+      messages: {
+        changes,
+        warnings: [
+          ...warnings,
+          `Failed reconciling legacy device identity retirement: ${String(error)}`,
+        ],
+      },
+    };
+  }
 }
 
 async function hardenPrivateFile(params: {
   stateRoot: Root;
   stateDir: string;
   filePath: string;
+  sync?: boolean;
 }): Promise<void> {
   const opened = await params.stateRoot.open(relativeLegacyPath(params.stateDir, params.filePath));
   try {
     await opened.handle.chmod(0o600);
+    if (params.sync) {
+      await opened.handle.sync();
+    }
   } finally {
     await opened.handle.close();
   }
@@ -222,17 +407,15 @@ async function archiveClaim(params: {
 
   const archive = await firstArchivePath({ ...params, snapshot: finalClaim });
   await hardenPrivateFile({ ...params, filePath: params.claimPath });
-  if (archive.duplicate) {
-    await hardenPrivateFile({ ...params, filePath: archive.path });
-    await params.stateRoot.remove(relativeLegacyPath(params.stateDir, params.claimPath));
-    return { action: "removed-duplicate", archivePath: archive.path };
+  if (!archive.duplicate) {
+    // Keep the authoritative claim recoverable until the archive is verified.
+    await params.stateRoot.create(
+      relativeLegacyPath(params.stateDir, archive.path),
+      finalClaim.buffer,
+      { mode: 0o600, mkdir: false },
+    );
   }
-
-  await params.stateRoot.move(
-    relativeLegacyPath(params.stateDir, params.claimPath),
-    relativeLegacyPath(params.stateDir, archive.path),
-  );
-  await hardenPrivateFile({ ...params, filePath: archive.path });
+  await hardenPrivateFile({ ...params, filePath: archive.path, sync: true });
   const archived = await readLegacyBytesSnapshot({
     stateRoot: params.stateRoot,
     stateDir: params.stateDir,
@@ -241,30 +424,25 @@ async function archiveClaim(params: {
   if (finalClaim.sha256 !== archived.sha256 || finalClaim.size !== archived.size) {
     throw new Error("archived Ed25519 device identity does not match the claimed source");
   }
-  return { action: "archived", archivePath: archive.path };
-}
-
-async function restoreClaim(params: {
-  stateRoot: Root;
-  stateDir: string;
-  sourcePath: string;
-  claimPath: string;
-}): Promise<string | null> {
-  try {
-    if (!(await params.stateRoot.exists(relativeLegacyPath(params.stateDir, params.claimPath)))) {
-      return null;
-    }
-    if (await params.stateRoot.exists(relativeLegacyPath(params.stateDir, params.sourcePath))) {
-      return `source path already exists: ${params.sourcePath}`;
-    }
-    await params.stateRoot.move(
-      relativeLegacyPath(params.stateDir, params.claimPath),
-      relativeLegacyPath(params.stateDir, params.sourcePath),
-    );
-    return null;
-  } catch (error) {
-    return String(error);
+  const retainedClaim = await readLegacySourceSnapshot({
+    stateRoot: params.stateRoot,
+    stateDir: params.stateDir,
+    sourcePath: params.claimPath,
+  });
+  if (!snapshotsMatch(finalClaim, retainedClaim)) {
+    throw new Error("legacy device identity claim changed during archival");
   }
+  if (await params.stateRoot.exists(relativeLegacyPath(params.stateDir, params.sourcePath))) {
+    throw new Error("legacy device identity source reappeared during archival");
+  }
+  await syncDirectoryIfSupported(
+    await params.stateRoot.resolve(relativeLegacyPath(params.stateDir, path.dirname(archive.path))),
+  );
+  await params.stateRoot.remove(relativeLegacyPath(params.stateDir, params.claimPath));
+  return {
+    action: archive.duplicate ? "removed-duplicate" : "archived",
+    archivePath: archive.path,
+  };
 }
 
 async function retireWithExclusiveStateOwnership(params: {
@@ -274,7 +452,8 @@ async function retireWithExclusiveStateOwnership(params: {
   env: NodeJS.ProcessEnv;
   beforeClaim?: (sourcePath: string) => void;
   beforeCleanup?: () => void;
-  afterReceiptMarked?: () => void;
+  afterReceiptRecorded?: () => void;
+  afterArchiveVerified?: () => void;
 }): Promise<MigrationMessages> {
   if (
     await params.stateRoot.exists(
@@ -292,16 +471,18 @@ async function retireWithExclusiveStateOwnership(params: {
   const hasSource = await params.stateRoot.exists(
     relativeLegacyPath(params.stateDir, params.detected.sourcePath),
   );
-  const hasClaim = await params.stateRoot.exists(
+  let hasClaim = await params.stateRoot.exists(
     relativeLegacyPath(params.stateDir, params.detected.claimPath),
   );
   if (hasSource && hasClaim) {
-    return {
-      changes: [],
-      warnings: [
-        "Failed retiring legacy device identity: source and interrupted claim both exist.",
-      ],
-    };
+    const restoreError = await restoreLegacyIdentityClaim({ ...params, ...params.detected });
+    if (restoreError) {
+      return {
+        changes: [],
+        warnings: [`Failed retiring legacy device identity: ${restoreError}`],
+      };
+    }
+    hasClaim = false;
   }
   const activePath = hasSource
     ? params.detected.sourcePath
@@ -309,7 +490,7 @@ async function retireWithExclusiveStateOwnership(params: {
       ? params.detected.claimPath
       : null;
   if (!activePath) {
-    return { changes: [], warnings: [] };
+    return (await reconcileArchivedRetirement(params)).messages;
   }
 
   let snapshot: LegacySourceSnapshot;
@@ -329,21 +510,15 @@ async function retireWithExclusiveStateOwnership(params: {
   if (activePath === params.detected.sourcePath) {
     try {
       params.beforeClaim?.(params.detected.sourcePath);
-      await params.stateRoot.move(
-        relativeLegacyPath(params.stateDir, params.detected.sourcePath),
-        relativeLegacyPath(params.stateDir, params.detected.claimPath),
-      );
-      const claimed = await readLegacySourceSnapshot({
-        stateRoot: params.stateRoot,
-        stateDir: params.stateDir,
-        sourcePath: params.detected.claimPath,
+      const claimed = await moveLegacyIdentityPathWithoutOverwrite({
+        ...params,
+        sourcePath: params.detected.sourcePath,
+        targetPath: params.detected.claimPath,
+        snapshot,
       });
-      if (!snapshotsMatch(snapshot, claimed)) {
-        throw new Error("legacy device identity changed before Doctor could claim it");
-      }
-      snapshot = claimed;
+      snapshot = { ...claimed, identity: snapshot.identity };
     } catch (error) {
-      const restoreError = await restoreClaim({ ...params, ...params.detected });
+      const restoreError = await restoreLegacyIdentityClaim({ ...params, ...params.detected });
       return {
         changes: [],
         warnings: [
@@ -353,42 +528,27 @@ async function retireWithExclusiveStateOwnership(params: {
     }
   }
 
+  // SQLite commits before filesystem retirement. Retain those facts even when
+  // later cleanup fails, including approval guidance for a newly created device.
+  let committed: MigrationMessages = { changes: [], warnings: [] };
   try {
     const canonical = ensureCanonicalPqcIdentity(params.env);
-    verifyCanonicalPqcIdentity(canonical.identity.deviceId, canonical.options);
-    const sourceKey = recordRetirementReceipt({
-      env: params.env,
-      sourcePath: params.detected.sourcePath,
-      snapshot,
-      targetDeviceId: canonical.identity.deviceId,
-    });
-    params.beforeCleanup?.();
-    verifyCanonicalPqcIdentity(canonical.identity.deviceId, canonical.options);
-    markLegacyMigrationSourceRemoved(
-      sourceKey,
-      params.env,
-      "device-identity.legacy-retirement-complete",
-    );
-    params.afterReceiptMarked?.();
-    const archived = await archiveClaim({
-      ...params,
-      sourcePath: params.detected.sourcePath,
-      claimPath: params.detected.claimPath,
-      snapshot,
-    });
-
     const identityChange = canonical.rotated
       ? "Generated a new ML-DSA primary device identity."
       : canonical.repaired
-        ? "Repaired the existing ML-DSA primary device identity metadata."
+        ? "Upgraded authenticated wrapping for the existing ML-DSA primary device identity."
         : "Preserved the existing ML-DSA primary device identity.";
-    const archiveChange =
-      archived.action === "archived"
-        ? `Archived retired Ed25519 device identity → ${archived.archivePath}.`
-        : `Removed duplicate retired Ed25519 source; archive remains at ${archived.archivePath}.`;
-    return {
-      changes: [identityChange, archiveChange],
-      warnings: [],
+    committed = {
+      changes: [
+        identityChange,
+        ...canonical.upgraded
+          .filter((key) => key !== IDENTITY_KEY)
+          .map((key) => `Upgraded authenticated wrapping for device identity "${key}" in SQLite.`),
+      ],
+      warnings: canonical.pendingNative.map(
+        (key) =>
+          `Device identity "${key}" was preserved and still requires native Apple verification.`,
+      ),
       notices: canonical.rotated
         ? [
             "The retired Ed25519 device authorization was not transferred; approve the new ML-DSA device identity.",
@@ -397,11 +557,44 @@ async function retireWithExclusiveStateOwnership(params: {
             "The retired Ed25519 device authorization was not transferred; the existing ML-DSA identity was preserved.",
           ],
     };
-  } catch (error) {
-    const restoreError = await restoreClaim({ ...params, ...params.detected });
+    params.beforeCleanup?.();
+    await verifyCanonicalPqcIdentity(canonical.identity.deviceId, canonical.options);
+    recordRetirementReceipt({
+      env: params.env,
+      sourcePath: params.detected.sourcePath,
+      snapshot,
+      targetDeviceId: canonical.identity.deviceId,
+    });
+    params.afterReceiptRecorded?.();
+    await verifyCanonicalPqcIdentity(canonical.identity.deviceId, canonical.options);
+    const archived = await archiveClaim({
+      ...params,
+      sourcePath: params.detected.sourcePath,
+      claimPath: params.detected.claimPath,
+      snapshot,
+    });
+    params.afterArchiveVerified?.();
+    const finalized = await reconcileArchivedRetirement(params);
+    if (!finalized.finalized) {
+      throw new Error(
+        finalized.messages.warnings.join("; ") || "retirement receipt was not finalized",
+      );
+    }
+
+    const archiveChange =
+      archived.action === "archived"
+        ? `Archived retired Ed25519 device identity → ${archived.archivePath}.`
+        : `Removed duplicate retired Ed25519 source; archive remains at ${archived.archivePath}.`;
     return {
-      changes: [],
+      ...committed,
+      changes: [...committed.changes, archiveChange],
+    };
+  } catch (error) {
+    const restoreError = await restoreLegacyIdentityClaim({ ...params, ...params.detected });
+    return {
+      ...committed,
       warnings: [
+        ...committed.warnings,
         `Failed retiring legacy device identity: ${String(error)}${restoreError ? `; restore failure: ${restoreError}` : ""}`,
       ],
     };
@@ -416,13 +609,29 @@ export async function migrateLegacyDeviceIdentity(params: {
   doctorOnlyStateMigrations?: boolean;
   beforeClaim?: (sourcePath: string) => void;
   beforeCleanup?: () => void;
-  afterReceiptMarked?: () => void;
+  afterReceiptRecorded?: () => void;
+  afterArchiveVerified?: () => void;
 }): Promise<MigrationMessages> {
-  if (!params.detected.hasLegacy && !params.detected.hasInvalidCanonical) {
-    return { changes: [], warnings: [] };
-  }
   if (params.doctorOnlyStateMigrations !== true) {
     return { changes: [], warnings: [] };
+  }
+  let pendingRetirement = false;
+  if (!params.detected.hasLegacy) {
+    try {
+      const receipt = await readRetirementReceipt({
+        env: { ...(params.env ?? process.env), OPENCLAW_STATE_DIR: params.stateDir },
+        sourcePath: params.detected.sourcePath,
+      });
+      if ((!receipt || receipt.removedSource) && !params.detected.hasInvalidCanonical) {
+        return { changes: [], warnings: [] };
+      }
+      pendingRetirement = receipt?.removedSource === false;
+    } catch (error) {
+      return {
+        changes: [],
+        warnings: [`Failed reading legacy device identity retirement receipt: ${String(error)}`],
+      };
+    }
   }
   let identityCoordinator: ReturnType<typeof acquireDeviceIdentityCoordinator> | undefined;
   return await withLegacyMigrationStateLock({
@@ -446,7 +655,7 @@ export async function migrateLegacyDeviceIdentity(params: {
           ],
         };
       }
-      if (hasLegacyDeviceIdentityPath(params.detected)) {
+      if (hasLegacyDeviceIdentityPath(params.detected) || pendingRetirement) {
         const stateRoot = await root(params.stateDir, {
           hardlinks: "reject",
           maxBytes: MAX_LEGACY_IDENTITY_BYTES,

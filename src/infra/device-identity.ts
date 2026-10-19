@@ -18,6 +18,8 @@ import {
   FileKeyring,
   generateWrappingKey,
   getDefaultKeyringFromEnv,
+  preflightWrappingKeyProviderReadOnly,
+  type WrappingKeyProviderPreflight,
 } from "../security/keyring-provider.js";
 import {
   assertPrivateWindowsWrapKeyDirectory,
@@ -28,10 +30,12 @@ import {
   generateStoredDeviceIdentity,
   insertStoredDeviceIdentityIfAbsent,
   PRIMARY_DEVICE_IDENTITY_KEY,
+  preflightDeviceIdentityPopulationReadOnly,
   readStoredDeviceIdentity,
   readStoredDeviceIdentityReadOnly,
   resolveDeviceIdentityStore,
   type DeviceIdentity,
+  type DeviceIdentityPopulationPreflight,
   type DeviceIdentityStoreOptions,
   type StoredDeviceIdentity,
 } from "./device-identity-store.js";
@@ -126,7 +130,8 @@ function withDeviceIdentityCoordinator<T>(
   };
   const coordinator = acquireDeviceIdentityCoordinator({
     databasePath: resolved.databasePath,
-    env: options.env,
+    // Custom database paths must use the same state owner as wrapping and migration.
+    env: { ...(options.env ?? process.env), OPENCLAW_STATE_DIR: resolveLegacyStateDir(options) },
   });
   let result: T;
   try {
@@ -205,6 +210,27 @@ export function resolveDeviceIdentityWrappingOptions(
   return { ...options, wrappingKeyProvider: resolveFallbackFileKeyring(options, createFallback) };
 }
 
+/** Read-only snapshot of both existing identities and the current new-write key path. */
+export async function preflightDeviceIdentityReadinessReadOnly(
+  options: Omit<DeviceIdentityStoreOptions, "identityKey"> = {},
+): Promise<{
+  population: DeviceIdentityPopulationPreflight;
+  provider: WrappingKeyProviderPreflight;
+}> {
+  let resolvedOptions = options;
+  let provider: WrappingKeyProviderPreflight;
+  try {
+    resolvedOptions = resolveDeviceIdentityWrappingOptions(options, false);
+    provider = preflightWrappingKeyProviderReadOnly(resolvedOptions.wrappingKeyProvider);
+  } catch {
+    provider = { status: "blocked", reason: "provider-error" };
+  }
+  return {
+    population: await preflightDeviceIdentityPopulationReadOnly(resolvedOptions),
+    provider,
+  };
+}
+
 function loadOrCreateDeviceIdentityOwned(options: DeviceIdentityStoreOptions): DeviceIdentity {
   assertNoPendingLegacyIdentity(options);
   // M5.5 auto-inject: when the caller didn't supply a wrapping keyring
@@ -228,7 +254,9 @@ function loadOrCreateDeviceIdentityOwned(options: DeviceIdentityStoreOptions): D
   // path actually wraps the freshly generated secret; without this the
   // candidate would be plaintext and `insertStoredDeviceIdentityIfAbsent`
   // would persist a plaintext row even though the keyring is configured.
-  const candidate = generateStoredDeviceIdentity(Date.now(), resolvedOptions.wrappingKeyProvider);
+  const candidate = generateStoredDeviceIdentity(Date.now(), resolvedOptions.wrappingKeyProvider, {
+    identityKey: resolvedOptions.identityKey,
+  });
   return toDeviceIdentity(insertStoredDeviceIdentityIfAbsent(candidate, resolvedOptions));
 }
 

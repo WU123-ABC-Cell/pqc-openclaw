@@ -20,15 +20,32 @@
 // columns are still populated for backward compat with M1/M2 row shapes
 // (they hold the same prefixed material) — a future milestone can drop
 // them once no row pre-dates M5.
+import {
+  DeviceIdentityStorageError,
+  identityWrappingContext,
+  invalidStoredIdentityError,
+  normalizeIdentityKey,
+  parseCreatedAtMs,
+  validateStoredDeviceIdentity,
+  type StoredDeviceIdentity,
+} from "./device-identity-store.crypto.js";
+export {
+  DeviceIdentityStorageError,
+  generateStoredDeviceIdentity,
+  PRIMARY_DEVICE_IDENTITY_KEY,
+  validateStoredDeviceIdentity,
+} from "./device-identity-store.crypto.js";
+export type { DeviceIdentity, StoredDeviceIdentity } from "./device-identity-store.crypto.js";
 import fs from "node:fs";
 import path from "node:path";
-import type { Insertable, Selectable } from "kysely";
+import type { Selectable } from "kysely";
 import { pqcLog, PQC_EVENT } from "../logging/pqc-log.js";
 import {
   deserializeWrappedSecret,
   serializeWrappedSecret,
   unwrapSecret,
   type WrappedSecret,
+  WrappedSecretVersionError,
   type WrappingKeyProvider,
   wrapSecret,
 } from "../security/secret-wrapping.js";
@@ -40,6 +57,12 @@ import {
   type OpenClawStateDatabaseOptions,
 } from "../state/openclaw-state-db.js";
 import { resolveOpenClawStateSqlitePath } from "../state/openclaw-state-db.paths.js";
+import { runDeviceIdentityPopulationPreflight } from "./device-identity-store.population-preflight.js";
+import type { DeviceIdentityPopulationPreflight } from "./device-identity-store.population-preflight.js";
+import {
+  inspectStoredIdentityPopulation,
+  upgradeStoredIdentityPopulation,
+} from "./device-identity-store.wrapping-upgrade.js";
 import {
   executeSqliteQuerySync,
   executeSqliteQueryTakeFirstSync,
@@ -48,10 +71,8 @@ import {
 import {
   decodeMlDsa65PublicKey,
   decodeMlDsa65SecretKey,
-  encodeMlDsa65PublicKey,
   encodeMlDsa65SecretKey,
   fingerprintMlDsa65PublicKey,
-  generateMlDsa65KeyPair,
   isMlDsa65PublicKey,
   isMlDsa65SecretKey,
   MLDSA65_PUBLIC_KEY_LENGTH,
@@ -59,31 +80,10 @@ import {
   mlDsa65KeyPairMatches,
 } from "./mldsa65-key-storage.js";
 
-export const PRIMARY_DEVICE_IDENTITY_KEY = "primary";
-
-export type DeviceIdentity = {
-  deviceId: string;
-  publicKeyPem: string;
-  privateKeyPem: string;
-};
-
-/** The internal / pre-persistence shape of a device identity. It carries
- *  either a plaintext ML-DSA-65 secret key PEM (`mldsaPrivateKeyPem`) or
- *  a wrapped form (`mldsaPrivateKeyWrapped` + `mldsaPrivateKeyWrapKeyId`),
- *  never both. The public side is always present in plaintext.
- *  `DeviceIdentity` (the public, post-validation shape) is the
- *  `privateKeyPem` string callers sign with; the internal fields here
- *  exist so the storage layer can persist the wrap envelope without
- *  round-tripping through the runtime type. */
-export type StoredDeviceIdentity = DeviceIdentity & {
-  createdAtMs: number;
-  /** MLDSA65-SECRET-KEY: prefixed base64url, or null when a wrapped form is set. */
-  mldsaPrivateKeyPem: string | null;
-  /** Serialized WrappedSecret (base64url JSON), or null when plaintext. */
-  mldsaPrivateKeyWrapped: string | null;
-  /** Keyring id that sealed `mldsaPrivateKeyWrapped`, or null. */
-  mldsaPrivateKeyWrapKeyId: string | null;
-};
+export type {
+  DeviceIdentityPopulationPreflight,
+  DeviceIdentityPopulationRow,
+} from "./device-identity-store.population-preflight.js";
 
 export type DeviceIdentityStoreOptions = OpenClawStateDatabaseOptions & {
   identityKey?: string;
@@ -95,51 +95,9 @@ export type DeviceIdentityStoreOptions = OpenClawStateDatabaseOptions & {
 
 type DeviceIdentityDatabase = Pick<OpenClawStateKyselyDatabase, "device_identities">;
 type DeviceIdentityRow = Selectable<DeviceIdentityDatabase["device_identities"]>;
-type DeviceIdentityInsert = Insertable<DeviceIdentityDatabase["device_identities"]>;
-
-export class DeviceIdentityStorageError extends Error {
-  constructor(message: string, options?: ErrorOptions) {
-    super(message, options);
-    this.name = "DeviceIdentityStorageError";
-  }
-}
 
 /** Failure to authenticate/decrypt is not proof that the identity may be replaced. */
 class DeviceIdentityKeyAccessError extends DeviceIdentityStorageError {}
-
-/** Convert the internal `StoredDeviceIdentity` (with the wrap envelope
- *  intact) to the public `DeviceIdentity` shape that callers sign with.
- *  The runtime never sees the wrapped form — only the unwrapped secret PEM. */
-function storedIdentityToRuntime(stored: StoredDeviceIdentity): DeviceIdentity {
-  return {
-    deviceId: stored.deviceId,
-    publicKeyPem: stored.publicKeyPem,
-    privateKeyPem: stored.privateKeyPem,
-  };
-}
-
-function normalizeIdentityKey(key: string | undefined): string {
-  const normalized = key ?? PRIMARY_DEVICE_IDENTITY_KEY;
-  if (normalized.length === 0 || normalized !== normalized.trim()) {
-    throw new DeviceIdentityStorageError(
-      "Device identity key must be a non-empty string without surrounding whitespace.",
-    );
-  }
-  if (normalized.length > 128) {
-    throw new DeviceIdentityStorageError("Device identity key exceeds 128 characters.");
-  }
-  return normalized;
-}
-
-function invalidStoredIdentityError(
-  identityKey: string,
-  cause?: unknown,
-): DeviceIdentityStorageError {
-  return new DeviceIdentityStorageError(
-    `SQLite contains an invalid persisted device identity "${identityKey}". Run "openclaw doctor --fix" before starting the gateway or connecting this client.`,
-    cause === undefined ? undefined : { cause },
-  );
-}
 
 function identityKeyAccessError(
   identityKey: string,
@@ -149,136 +107,6 @@ function identityKeyAccessError(
     `Cannot authenticate or decrypt device identity "${identityKey}". Restore its wrapping key before attempting repair.`,
     { cause },
   );
-}
-
-function fingerprintPublicKey(publicKeyPem: string): string {
-  const raw = decodeMlDsa65PublicKey(publicKeyPem);
-  return fingerprintMlDsa65PublicKey(raw);
-}
-
-/** Build the canonical `StoredDeviceIdentity` from a freshly generated
- *  ML-DSA-65 keypair. If a `wrappingKeyProvider` is supplied, the secret
- *  key is wrapped under AES-256-GCM and the plaintext PEM is set to null.
- *  The public side is always plaintext so the row's `device_id` is
- *  resolvable without the keyring.
- *
- *  This function is intentionally side-effect-free — it does NOT touch the
- *  database. The caller (the write transaction below) owns the persistence
- *  boundary. The optional `now` parameter keeps tests deterministic. */
-export function generateStoredDeviceIdentity(
-  now: number = Date.now(),
-  wrappingKeyProvider?: WrappingKeyProvider,
-  options: { allowPlaintextPrivateKey?: boolean } = {},
-): StoredDeviceIdentity {
-  if (!wrappingKeyProvider && options.allowPlaintextPrivateKey !== true) {
-    throw new DeviceIdentityStorageError(
-      "Refusing to generate a plaintext device identity without a wrapping key provider.",
-    );
-  }
-  const { publicKey, secretKey } = generateMlDsa65KeyPair();
-  const deviceId = fingerprintMlDsa65PublicKey(publicKey);
-  const publicKeyPem = encodeMlDsa65PublicKey(publicKey);
-  if (wrappingKeyProvider) {
-    // Wrap the raw secret bytes (not the prefixed PEM) so the wrap
-    // envelope is independent of the wire format. M5 stores the result
-    // as a base64url JSON BLOB in `mldsa_private_key_wrapped`.
-    const wrapped = wrapSecret(Buffer.from(secretKey), wrappingKeyProvider);
-    pqcLog.info(PQC_EVENT.DeviceIdentity, {
-      status: "ok",
-      detail: "generated wrapped identity",
-      keyId: wrapped.keyId,
-    });
-    return {
-      deviceId,
-      publicKeyPem,
-      privateKeyPem: "", // populated lazily by `rowToStoredIdentity` on read
-      createdAtMs: now,
-      mldsaPrivateKeyPem: null,
-      mldsaPrivateKeyWrapped: serializeWrappedSecret(wrapped),
-      mldsaPrivateKeyWrapKeyId: wrapped.keyId,
-    };
-  }
-  const privateKeyPem = encodeMlDsa65SecretKey(secretKey);
-  pqcLog.warn(PQC_EVENT.DeviceIdentity, {
-    status: "ok",
-    detail: "generated plaintext identity (no keyring)",
-  });
-  return {
-    deviceId,
-    publicKeyPem,
-    privateKeyPem,
-    createdAtMs: now,
-    mldsaPrivateKeyPem: privateKeyPem,
-    mldsaPrivateKeyWrapped: null,
-    mldsaPrivateKeyWrapKeyId: null,
-  };
-}
-
-function keyPairMatches(publicKeyPem: string, privateKeyPem: string): boolean {
-  let privateKeyRaw: Uint8Array | undefined;
-  try {
-    if (!isMlDsa65PublicKey(publicKeyPem) || !isMlDsa65SecretKey(privateKeyPem)) {
-      return false;
-    }
-    const publicKeyRaw = decodeMlDsa65PublicKey(publicKeyPem);
-    privateKeyRaw = decodeMlDsa65SecretKey(privateKeyPem);
-    return mlDsa65KeyPairMatches(publicKeyRaw, privateKeyRaw);
-  } catch {
-    return false;
-  } finally {
-    privateKeyRaw?.fill(0);
-  }
-}
-
-function parseCreatedAtMs(value: unknown): number | null {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
-}
-
-/** Validate persisted key material and return the canonical runtime shape. */
-export function validateStoredDeviceIdentity(
-  value: StoredDeviceIdentity,
-  identityKey = PRIMARY_DEVICE_IDENTITY_KEY,
-): DeviceIdentity {
-  try {
-    if (
-      !value.deviceId ||
-      !/^[a-f0-9]{64}$/.test(value.deviceId) ||
-      !value.publicKeyPem ||
-      parseCreatedAtMs(value.createdAtMs) === null
-    ) {
-      throw invalidStoredIdentityError(identityKey);
-    }
-    // The plaintext form requires `privateKeyPem` to be a valid ML-DSA-65
-    // PEM AND `mldsaPrivateKeyPem` to be a matching plaintext. The wrapped
-    // form requires the wrap envelope to be parseable; the actual unwrap
-    // is performed by `rowToStoredIdentity` because only the call site
-    // holds the keyring. We do not unwrap here.
-    const hasPlaintext =
-      typeof value.privateKeyPem === "string" &&
-      value.privateKeyPem.length > 0 &&
-      (value.mldsaPrivateKeyPem === null || value.mldsaPrivateKeyPem === value.privateKeyPem);
-    const hasWrapped =
-      typeof value.mldsaPrivateKeyWrapped === "string" &&
-      value.mldsaPrivateKeyWrapped.length > 0 &&
-      typeof value.mldsaPrivateKeyWrapKeyId === "string" &&
-      value.mldsaPrivateKeyWrapKeyId.length > 0;
-    if (!hasPlaintext && !hasWrapped) {
-      throw invalidStoredIdentityError(identityKey);
-    }
-    if (hasPlaintext && !keyPairMatches(value.publicKeyPem, value.privateKeyPem)) {
-      throw invalidStoredIdentityError(identityKey);
-    }
-    const derivedDeviceId = fingerprintPublicKey(value.publicKeyPem);
-    if (derivedDeviceId !== value.deviceId) {
-      throw invalidStoredIdentityError(identityKey);
-    }
-    return storedIdentityToRuntime(value);
-  } catch (error) {
-    if (error instanceof DeviceIdentityStorageError) {
-      throw error;
-    }
-    throw invalidStoredIdentityError(identityKey, error);
-  }
 }
 
 /** Convert a row to the internal `StoredDeviceIdentity` shape, unwrapping
@@ -293,6 +121,7 @@ function rowToStoredIdentity(
   row: DeviceIdentityRow,
   expectedIdentityKey: string,
   wrappingKeyProvider?: WrappingKeyProvider,
+  allowLegacyWrapped = false,
 ): StoredDeviceIdentity {
   if (
     row.identity_key !== expectedIdentityKey ||
@@ -347,17 +176,31 @@ function rowToStoredIdentity(
     try {
       wrapped = deserializeWrappedSecret(serialized);
     } catch (error) {
+      if (error instanceof WrappedSecretVersionError) {
+        throw identityKeyAccessError(expectedIdentityKey, error);
+      }
       throw invalidStoredIdentityError(expectedIdentityKey, error);
     }
     if (wrapped.keyId !== wrapKeyId) {
-      throw invalidStoredIdentityError(
+      throw identityKeyAccessError(
         expectedIdentityKey,
         new Error("wrapped device identity key id does not match its database metadata"),
       );
     }
+    if (wrapped.version !== 2 && !allowLegacyWrapped) {
+      throw new DeviceIdentityStorageError(
+        `Device identity "${expectedIdentityKey}" needs an authenticated wrapping upgrade. Run "openclaw doctor --fix" before using it.`,
+      );
+    }
     let rawSecret: Buffer;
     try {
-      rawSecret = unwrapSecret(wrapped, wrappingKeyProvider);
+      rawSecret = unwrapSecret(
+        wrapped,
+        wrappingKeyProvider,
+        wrapped.version === 2
+          ? identityWrappingContext(expectedIdentityKey, row.device_id, publicKeyPem ?? "")
+          : undefined,
+      );
     } catch (error) {
       pqcLog.error(PQC_EVENT.DeviceIdentity, {
         status: "fail",
@@ -443,6 +286,15 @@ function salvageStoredIdentityRow(
     wrapKeyId.length > 0;
 
   if (hasWrapped) {
+    let wrapped: WrappedSecret;
+    try {
+      wrapped = deserializeWrappedSecret(Buffer.from(wrappedBlob).toString("utf8"));
+    } catch (error) {
+      if (error instanceof WrappedSecretVersionError) {
+        throw identityKeyAccessError(expectedIdentityKey, error);
+      }
+      return null;
+    }
     // Metadata repair preserves keys only after authenticated unwrap and the
     // same pairing proof used by runtime reads; lengths alone do not prove it.
     const publicKeyPem =
@@ -452,29 +304,42 @@ function salvageStoredIdentityRow(
           ? row.public_key_pem
           : null;
     if (publicKeyPem === null || !isMlDsa65PublicKey(publicKeyPem)) {
+      if (wrapped.version === 2) {
+        throw identityKeyAccessError(expectedIdentityKey);
+      }
       return null;
     }
     let publicKeyRaw: Uint8Array;
     try {
       publicKeyRaw = decodeMlDsa65PublicKey(publicKeyPem);
     } catch {
+      if (wrapped.version === 2) {
+        throw identityKeyAccessError(expectedIdentityKey);
+      }
       return null;
     }
     if (publicKeyRaw.length !== MLDSA65_PUBLIC_KEY_LENGTH) {
+      if (wrapped.version === 2) {
+        throw identityKeyAccessError(expectedIdentityKey);
+      }
       return null;
     }
     try {
       if (!wrappingKeyProvider) {
         throw identityKeyAccessError(expectedIdentityKey);
       }
-      const serialized = Buffer.from(wrappedBlob).toString("utf8");
-      const wrapped = deserializeWrappedSecret(serialized);
       if (wrapped.keyId !== wrapKeyId) {
-        return null;
+        throw identityKeyAccessError(expectedIdentityKey);
       }
       let secret: Buffer;
       try {
-        secret = unwrapSecret(wrapped, wrappingKeyProvider);
+        secret = unwrapSecret(
+          wrapped,
+          wrappingKeyProvider,
+          wrapped.version === 2
+            ? identityWrappingContext(expectedIdentityKey, row.device_id, publicKeyPem)
+            : undefined,
+        );
       } catch (error) {
         throw identityKeyAccessError(expectedIdentityKey, error);
       }
@@ -482,6 +347,30 @@ function salvageStoredIdentityRow(
         if (!mlDsa65KeyPairMatches(publicKeyRaw, secret)) {
           return null;
         }
+        // Only Doctor may trust an old unbound row after proving its key pair.
+        // New envelopes must authenticate their persisted context before repair.
+        const deviceId = fingerprintMlDsa65PublicKey(publicKeyRaw);
+        const upgraded =
+          wrapped.version === 2
+            ? wrapped
+            : wrapSecret(
+                secret,
+                wrappingKeyProvider,
+                identityWrappingContext(expectedIdentityKey, deviceId, publicKeyPem),
+              );
+        const createdAtMs =
+          parseCreatedAtMs(row.created_at_ms) ??
+          parseCreatedAtMs(row.updated_at_ms) ??
+          repairedAtMs;
+        return {
+          deviceId,
+          publicKeyPem,
+          privateKeyPem: "",
+          createdAtMs,
+          mldsaPrivateKeyPem: null,
+          mldsaPrivateKeyWrapped: serializeWrappedSecret(upgraded),
+          mldsaPrivateKeyWrapKeyId: upgraded.keyId,
+        };
       } finally {
         secret.fill(0);
       }
@@ -491,18 +380,6 @@ function salvageStoredIdentityRow(
       }
       return null;
     }
-    const createdAtMs =
-      parseCreatedAtMs(row.created_at_ms) ?? parseCreatedAtMs(row.updated_at_ms) ?? repairedAtMs;
-    const salvaged: StoredDeviceIdentity = {
-      deviceId: fingerprintMlDsa65PublicKey(publicKeyRaw),
-      publicKeyPem,
-      privateKeyPem: "", // unwrap happens on read; Doctor does not need the plaintext
-      createdAtMs,
-      mldsaPrivateKeyPem: null,
-      mldsaPrivateKeyWrapped: Buffer.from(wrappedBlob).toString("utf8"),
-      mldsaPrivateKeyWrapKeyId: wrapKeyId,
-    };
-    return salvaged;
   }
 
   // Plaintext salvage path. Prefer the new column, fall back to the
@@ -547,7 +424,7 @@ function storedIdentityToRow(
   identityKey: string,
   stored: StoredDeviceIdentity,
   updatedAtMs = stored.createdAtMs,
-): DeviceIdentityInsert {
+): DeviceIdentityRow {
   // The legacy `public_key_pem` / `private_key_pem` columns are kept in
   // sync with the new `mldsa_*` columns so callers that still read the
   // old shape (M1/M2 code paths) keep working. The plaintext PEM is
@@ -608,6 +485,43 @@ export function resolveDeviceIdentityStore(options: DeviceIdentityStoreOptions =
     ),
     identityKey: normalizeIdentityKey(options.identityKey),
   };
+}
+
+/** Doctor census: authenticate Node rows and report every upgrade, block, or native-proof requirement. */
+export function listDeviceIdentityWrappingUpgrades(
+  options: DeviceIdentityStoreOptions = {},
+): string[] {
+  return inspectStoredIdentityPopulation(
+    options,
+    rowToStoredIdentity,
+    (error) => error instanceof DeviceIdentityKeyAccessError,
+  )
+    .report.filter((row) => row.status !== "verified")
+    .map((row) => row.identityKey);
+}
+
+export function upgradeDeviceIdentityPopulationWrapped(
+  options: DeviceIdentityStoreOptions = {},
+  params: { createMissingPrimary?: boolean } = {},
+) {
+  return upgradeStoredIdentityPopulation(
+    options,
+    rowToStoredIdentity,
+    (error) => error instanceof DeviceIdentityKeyAccessError,
+    storedIdentityToRow,
+    params,
+  );
+}
+
+/** Read the entire identity table on a dedicated SQLite read-only connection. No repair or key write. */
+export async function preflightDeviceIdentityPopulationReadOnly(
+  options: Omit<DeviceIdentityStoreOptions, "identityKey"> = {},
+): Promise<DeviceIdentityPopulationPreflight> {
+  return runDeviceIdentityPopulationPreflight(
+    options,
+    rowToStoredIdentity,
+    (error) => error instanceof DeviceIdentityKeyAccessError,
+  );
 }
 
 /** Read through the writable shared-state lifecycle, validating any existing row. */
@@ -744,19 +658,7 @@ export function repairInvalidStoredDeviceIdentity(
             db,
             getNodeSqliteKysely<DeviceIdentityDatabase>(db)
               .updateTable("device_identities")
-              .set({
-                device_id: salvaged.deviceId,
-                public_key_pem: salvaged.publicKeyPem,
-                private_key_pem: salvaged.privateKeyPem,
-                created_at_ms: salvaged.createdAtMs,
-                updated_at_ms: candidate.createdAtMs,
-                mldsa_public_key_pem: salvaged.publicKeyPem,
-                mldsa_private_key_pem: salvaged.mldsaPrivateKeyPem,
-                mldsa_private_key_wrapped: salvaged.mldsaPrivateKeyWrapped
-                  ? new TextEncoder().encode(salvaged.mldsaPrivateKeyWrapped)
-                  : null,
-                mldsa_private_key_wrap_key_id: salvaged.mldsaPrivateKeyWrapKeyId,
-              })
+              .set(storedIdentityToRow(resolved.identityKey, salvaged, candidate.createdAtMs))
               .where("identity_key", "=", resolved.identityKey),
           );
           const authoritative = readStoredIdentityFromDatabase(
@@ -830,9 +732,11 @@ export function ensureStoredDeviceIdentityWrapped(options: DeviceIdentityStoreOp
           `SQLite device identity "${resolved.identityKey}" does not exist.`,
         );
       }
-      const existing = rowToStoredIdentity(row, resolved.identityKey, wrappingKeyProvider);
+      const existing = rowToStoredIdentity(row, resolved.identityKey, wrappingKeyProvider, true);
       validateStoredDeviceIdentity(existing, resolved.identityKey);
       const alreadyCanonical =
+        existing.mldsaPrivateKeyWrapped !== null &&
+        deserializeWrappedSecret(existing.mldsaPrivateKeyWrapped).version === 2 &&
         row.mldsa_private_key_wrapped !== null &&
         row.mldsa_private_key_wrapped !== undefined &&
         row.mldsa_private_key_wrapped.length > 0 &&
@@ -849,7 +753,11 @@ export function ensureStoredDeviceIdentityWrapped(options: DeviceIdentityStoreOp
       let rawSecret: Uint8Array | undefined;
       try {
         rawSecret = decodeMlDsa65SecretKey(existing.privateKeyPem);
-        const wrapped = wrapSecret(Buffer.from(rawSecret), wrappingKeyProvider);
+        const wrapped = wrapSecret(
+          Buffer.from(rawSecret),
+          wrappingKeyProvider,
+          identityWrappingContext(resolved.identityKey, existing.deviceId, existing.publicKeyPem),
+        );
         const canonical: StoredDeviceIdentity = {
           ...existing,
           mldsaPrivateKeyPem: null,
@@ -861,19 +769,7 @@ export function ensureStoredDeviceIdentityWrapped(options: DeviceIdentityStoreOp
           db,
           getNodeSqliteKysely<DeviceIdentityDatabase>(db)
             .updateTable("device_identities")
-            .set({
-              device_id: canonical.deviceId,
-              public_key_pem: canonical.publicKeyPem,
-              private_key_pem: "",
-              created_at_ms: canonical.createdAtMs,
-              updated_at_ms: Date.now(),
-              mldsa_public_key_pem: canonical.publicKeyPem,
-              mldsa_private_key_pem: null,
-              mldsa_private_key_wrapped: new TextEncoder().encode(
-                canonical.mldsaPrivateKeyWrapped!,
-              ),
-              mldsa_private_key_wrap_key_id: canonical.mldsaPrivateKeyWrapKeyId,
-            })
+            .set(storedIdentityToRow(resolved.identityKey, canonical, Date.now()))
             .where("identity_key", "=", resolved.identityKey),
         );
       } finally {

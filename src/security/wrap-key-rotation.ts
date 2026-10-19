@@ -69,6 +69,7 @@ export function rotateWrappingKey(params: {
   };
   oldKeyring: WrappingKeyProvider;
   newKeyring: WrappingKeyProvider;
+  associatedData?: Buffer;
 }): { mldsaPrivateKeyWrapped: string; mldsaPrivateKeyWrapKeyId: string } {
   if (!params.stored.mldsaPrivateKeyWrapped) {
     throw new Error(
@@ -84,19 +85,21 @@ export function rotateWrappingKey(params: {
   }
   // Recover the plaintext ML-DSA-65 secret once via the old keyring.
   const wrapped: WrappedSecret = deserializeWrappedSecret(params.stored.mldsaPrivateKeyWrapped);
-  const rawSecret: Buffer = unwrapSecret(wrapped, params.oldKeyring);
-  // Re-wrap under the new key. The wrap envelope's keyId field is
-  // the source of truth; we ignore `wrapped.keyId` from the old
-  // envelope because the rotation explicitly re-issues the keyId.
-  const rewrapped = wrapSecret(rawSecret, params.newKeyring);
-  // Wipe the recovered plaintext from the caller's stack as best we
-  // can. JS strings/Buffers are not reliably zeroable, but a
-  // best-effort fill here is what we have.
-  rawSecret.fill(0);
-  return {
-    mldsaPrivateKeyWrapped: serializeWrappedSecret(rewrapped),
-    mldsaPrivateKeyWrapKeyId: rewrapped.keyId,
-  };
+  if (wrapped.keyId !== params.stored.mldsaPrivateKeyWrapKeyId) {
+    throw new Error("rotateWrappingKey: envelope key id does not match row metadata");
+  }
+  const rawSecret: Buffer = unwrapSecret(wrapped, params.oldKeyring, params.associatedData);
+  try {
+    // The new envelope owns the re-issued keyId; never retain the old one.
+    const rewrapped = wrapSecret(rawSecret, params.newKeyring, params.associatedData);
+    return {
+      mldsaPrivateKeyWrapped: serializeWrappedSecret(rewrapped),
+      mldsaPrivateKeyWrapKeyId: rewrapped.keyId,
+    };
+  } finally {
+    // Best-effort wipe even when the new keyring or encryption fails.
+    rawSecret.fill(0);
+  }
 }
 
 /** Serialised wrap-key backup envelope (whitepaper 2.2.5.D.1). All
@@ -180,7 +183,7 @@ export function importWrapKey(params: { backup: WrapKeyBackup; passphrase: strin
   }
   const { version, iterations, salt, iv, ciphertext, authTag, keyId } = params.backup;
   if (version !== 1) {
-    throw new Error(`importWrapKey: unsupported backup version ${version}; expected 1`);
+    throw new Error(`importWrapKey: unsupported backup version ${String(version)}; expected 1`);
   }
   assertSupportedPbkdf2Iterations(iterations, "importWrapKey");
   // Defensive length checks on every base64url-decoded field so a

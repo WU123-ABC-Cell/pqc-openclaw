@@ -5,7 +5,7 @@
 //             (PBKDF2-SHA256 + AES-256-GCM). Restore is the inverse
 //             and refuses the wrong passphrase.
 import { randomBytes } from "node:crypto";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { encodeMlDsa65SecretKey } from "../infra/mldsa65-key-storage.js";
 import {
   deserializeWrappedSecret,
@@ -73,6 +73,42 @@ afterEach(() => {
 });
 
 describe("rotateWrappingKey (whitepaper 2.2.5.C)", () => {
+  it("preserves authenticated context across rotation and rejects row key-id disagreement", () => {
+    const oldRing = new InMemoryKeyring("old");
+    oldRing.addKey("old", newKey());
+    const newRing = new InMemoryKeyring("new");
+    newRing.addKey("new", newKey());
+    const associatedData = Buffer.from("bound identity");
+    const secret = randomBytes(64);
+    const wrapped = wrapSecret(secret, oldRing, associatedData);
+    const stored = {
+      privateKeyPem: "",
+      mldsaPrivateKeyWrapped: serializeWrappedSecret(wrapped),
+      mldsaPrivateKeyWrapKeyId: "old",
+    };
+    const rotated = rotateWrappingKey({
+      stored,
+      oldKeyring: oldRing,
+      newKeyring: newRing,
+      associatedData,
+    });
+    const envelope = deserializeWrappedSecret(rotated.mldsaPrivateKeyWrapped);
+    expect(envelope.version).toBe(2);
+    expect(unwrapSecret(envelope, newRing, associatedData)).toEqual(secret);
+    expect(() => unwrapSecret(envelope, newRing, Buffer.from("another identity"))).toThrow();
+    expect(() => rotateWrappingKey({ stored, oldKeyring: oldRing, newKeyring: newRing })).toThrow(
+      /associated data/,
+    );
+    expect(() =>
+      rotateWrappingKey({
+        stored: { ...stored, mldsaPrivateKeyWrapKeyId: "other" },
+        oldKeyring: oldRing,
+        newKeyring: newRing,
+        associatedData,
+      }),
+    ).toThrow(/does not match/);
+  });
+
   it("re-wraps the same plaintext under the new key", () => {
     const oldKey = newKey();
     const newKeyBuf = newKey();
@@ -164,6 +200,33 @@ describe("rotateWrappingKey (whitepaper 2.2.5.C)", () => {
     expect(() => rotateWrappingKey({ stored, oldKeyring: oldRing, newKeyring: newRing })).toThrow(
       /not found|invalid/i,
     );
+  });
+
+  it("clears the unwrapped secret when the new keyring cannot re-wrap it", () => {
+    const oldRing = new InMemoryKeyring("old");
+    oldRing.addKey("old", newKey());
+    const newRing = new InMemoryKeyring("missing");
+    const secret = randomBytes(4032);
+    const wrapped = wrapSecret(secret, oldRing);
+    const stored = {
+      privateKeyPem: "unused",
+      mldsaPrivateKeyWrapped: serializeWrappedSecret(wrapped),
+      mldsaPrivateKeyWrapKeyId: wrapped.keyId,
+    };
+    const fillSpy = vi.spyOn(Buffer.prototype, "fill");
+    try {
+      expect(() => rotateWrappingKey({ stored, oldKeyring: oldRing, newKeyring: newRing })).toThrow(
+        /active key missing: missing/,
+      );
+      const clearedSecret = fillSpy.mock.contexts.find(
+        (context): context is Buffer =>
+          Buffer.isBuffer(context) && context.length === secret.length,
+      );
+      expect(clearedSecret).toBeDefined();
+      expect(clearedSecret?.equals(Buffer.alloc(secret.length))).toBe(true);
+    } finally {
+      fillSpy.mockRestore();
+    }
   });
 });
 

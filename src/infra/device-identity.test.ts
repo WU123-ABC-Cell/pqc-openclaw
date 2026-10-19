@@ -285,18 +285,36 @@ describe("device identity SQLite store", () => {
       closeOpenClawStateDatabaseForTest();
 
       const sqlite = await import("node:sqlite");
-      const database = new sqlite.DatabaseSync(options.path!);
+      const databasePath = options.path;
+      if (!databasePath) {
+        throw new Error("The identity fixture must select a database path");
+      }
+      const database = new sqlite.DatabaseSync(databasePath);
       database
         .prepare("UPDATE device_identities SET device_id = ? WHERE identity_key = ?")
         .run("corrupt-device-id", "primary");
+      const persistedRow = database
+        .prepare("SELECT * FROM device_identities WHERE identity_key = ?")
+        .get("primary");
+      expect(persistedRow).toBeDefined();
       database.close();
 
       expect(() => loadDeviceIdentityIfPresent(options)).toThrow(
-        /invalid persisted device identity/,
+        /Cannot authenticate or decrypt device identity "primary"/,
       );
       expect(() => loadOrCreateDeviceIdentity(options)).toThrow(
-        /invalid persisted device identity/,
+        /Cannot authenticate or decrypt device identity "primary"/,
       );
+      const preservedDatabase = new sqlite.DatabaseSync(databasePath, { readOnly: true });
+      try {
+        expect(
+          preservedDatabase
+            .prepare("SELECT * FROM device_identities WHERE identity_key = ?")
+            .get("primary"),
+        ).toEqual(persistedRow);
+      } finally {
+        preservedDatabase.close();
+      }
     });
   });
 

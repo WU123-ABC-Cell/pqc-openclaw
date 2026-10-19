@@ -132,6 +132,21 @@ must be implemented and verified before claiming lifecycle support.
 
 ### Migration and compatibility
 
+New device-identity envelopes use AES-GCM associated data to bind the SQLite
+identity key, device ID, canonical ML-DSA public key, envelope version and
+wrapping-key ID. Runtime reads reject old unbound envelopes. With the original
+wrapping key available, `openclaw doctor --fix` verifies each old wrapped row's
+public/private pair and upgrades it, including custom identity keys. Successful
+upgrades preserve signing keys and device IDs and are idempotent. Review Doctor's
+changes and warnings, then verify each required identity with
+`openclaw wrap-key status --identity-key <stored-identity-key> --json`.
+
+Failed upgrades preserve their rows; other valid rows may already have upgraded.
+Bound-envelope authentication failures preserve the identity and require recovery
+from the original key or a trusted backup. Migration cannot prove historical
+row ownership for old unbound data. AAD does not prevent database rollback or
+cross-database replay with the same identity key and wrapping key.
+
 Doctor-authorized retirement validates the legacy Ed25519 public/private pair,
 creates a wrapped ML-DSA-65 identity when none exists, and preserves an already-valid
 ML-DSA identity. It archives the exact legacy JSON as `device.json.migrated` (or a

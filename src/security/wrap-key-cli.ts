@@ -8,7 +8,7 @@ import {
   type DeviceIdentityStoreOptions,
   readStoredDeviceIdentityReadOnly,
 } from "../infra/device-identity-store.js";
-import { deserializeWrappedSecret, type WrappingKeyProvider } from "./secret-wrapping.js";
+import type { WrappingKeyProvider } from "./secret-wrapping.js";
 import {
   WRAP_KEY_BACKUP_CONSTANTS,
   exportWrapKey,
@@ -31,7 +31,7 @@ export interface WrapKeyStatus {
   notes: string[];
 }
 
-export interface WrapKeyRowHealth {
+interface WrapKeyRowHealth {
   identityKey: string;
   deviceId: string;
   state: "wrapped" | "plaintext" | "missing-key" | "malformed-envelope" | "unwrappable";
@@ -58,7 +58,7 @@ function countHistoricalKeys(_provider: WrappingKeyProvider): number {
  *  state of every primary identity the caller asked about. The
  *  caller passes the list of identity keys so this module does
  *  not need to know the full SQLite schema. */
-export async function checkRows(params: {
+async function checkRows(params: {
   options: DeviceIdentityStoreOptions;
   identityKeys: string[];
 }): Promise<WrapKeyRowHealth[]> {
@@ -100,10 +100,9 @@ export async function checkRows(params: {
   return out;
 }
 
-/** Top-level health check. The `options.wrappingKeyProvider` MUST
- *  be supplied when any of the rows are wrapped; otherwise the
- *  health check surfaces a `unwrappable` row for each. */
-export async function wrapKeyHealthCheck(params: {
+/** Read-only status for the requested identities. Without a wrapping-key
+ *  provider, return an unavailable status before reading any identity. */
+export async function wrapKeyStatusCommand(params: {
   options: DeviceIdentityStoreOptions;
   identityKeys?: string[];
 }): Promise<WrapKeyStatus> {
@@ -178,31 +177,6 @@ export async function wrapKeyHealthCheck(params: {
   };
 }
 
-/** Probe whether a stored row's wrap envelope is parseable without
- *  unwrapping it. Used by the doctor health check to flag malformed
- *  envelopes before the runtime trips on them. */
-export function parseWrapEnvelope(
-  serialized: string,
-): { ok: true } | { ok: false; reason: string } {
-  try {
-    deserializeWrappedSecret(serialized);
-    return { ok: true };
-  } catch (error) {
-    return { ok: false, reason: (error as Error).message };
-  }
-}
-
-/** `openclaw wrap-key status` — alias for `wrapKeyHealthCheck`
- *  with the rows populated from the canonical identity keys. The
- *  CLI layer is expected to pass the keys it wants reported; the
- *  default (no keys) returns a provider-only status. */
-export async function wrapKeyStatusCommand(params: {
-  options: DeviceIdentityStoreOptions;
-  identityKeys?: string[];
-}): Promise<WrapKeyStatus> {
-  return wrapKeyHealthCheck(params);
-}
-
 /** `openclaw wrap-key export` — encrypt a 32-byte key under a
  *  passphrase and return the JSON-serialisable backup envelope. The
  *  CLI writes the JSON to a file. The function itself never touches
@@ -228,18 +202,4 @@ export function wrapKeyImportCommand(params: {
   passphrase: string;
 }): Buffer {
   return importWrapKey({ backup: params.backup, passphrase: params.passphrase });
-}
-
-/** `openclaw wrap-key rotate` — drive the M7 rotation against the
- *  device-identities table. The caller passes the new keying so
- *  this function does not need to know the on-disk key shape; the
- *  CLI loads the new key from a file / env first, then calls this.
- *  Returns the per-row rotation result for the CLI to print. */
-export interface WrapKeyRotateRowResult {
-  identityKey: string;
-  deviceId: string;
-  rotated: boolean;
-  oldKeyId: string | null;
-  newKeyId: string;
-  detail: string;
 }

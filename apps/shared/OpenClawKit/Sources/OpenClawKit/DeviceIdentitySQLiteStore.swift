@@ -64,7 +64,10 @@ enum DeviceIdentitySQLiteStore {
         afterLegacyCommit: (() throws -> Void)? = nil) throws
         -> DeviceIdentity
     {
-        let coordinator = try self.acquireIdentityCoordinator(databaseURL: databaseURL)
+        try self.secureDirectory(destinationStateDirURL)
+        let coordinator = try self.acquireIdentityCoordinator(
+            databaseURL: databaseURL,
+            stateDirectoryURL: destinationStateDirURL)
         do {
             let identity = try self.loadOrCreateOwned(
                 databaseURL: databaseURL,
@@ -128,7 +131,6 @@ enum DeviceIdentitySQLiteStore {
         beforeLegacyClaim: ((DeviceIdentityPaths.LegacyIdentitySource) throws -> Void)?,
         afterLegacyCommit: (() throws -> Void)?) throws -> DeviceIdentity
     {
-        try self.secureDirectory(destinationStateDirURL)
         try self.secureDirectory(databaseURL.deletingLastPathComponent())
         var claims: [LegacyClaim] = []
         do {
@@ -211,11 +213,16 @@ enum DeviceIdentitySQLiteStore {
         return authoritative.identity
     }
 
-    private static func acquireIdentityCoordinator(databaseURL: URL) throws -> IdentityCoordinator {
+    private static func acquireIdentityCoordinator(
+        databaseURL: URL,
+        stateDirectoryURL: URL) throws -> IdentityCoordinator
+    {
         let canonicalPath = self.canonicalDatabasePath(databaseURL)
         let digest = SHA256.hash(data: Data(canonicalPath.utf8))
         let pathHash = digest.prefix(4).map { String(format: "%02x", $0) }.joined()
-        let lockDirectoryURL = FileManager.default.temporaryDirectory
+        // Share Node/Doctor's state-local owner, including an explicitly selected state root.
+        let lockDirectoryURL = stateDirectoryURL.standardizedFileURL
+            .appendingPathComponent("tmp", isDirectory: true)
             .appendingPathComponent("openclaw-\(getuid())", isDirectory: true)
         try self.secureCoordinatorDirectory(lockDirectoryURL)
         let coordinatorURL = lockDirectoryURL.appendingPathComponent(
@@ -258,6 +265,7 @@ enum DeviceIdentitySQLiteStore {
             guard inspectError == ENOENT else {
                 throw POSIXError(POSIXErrorCode(rawValue: inspectError) ?? .EIO)
             }
+            try self.secureDirectory(url.deletingLastPathComponent())
             if mkdir(url.path, mode_t(0o700)) != 0, errno != EEXIST {
                 throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
             }

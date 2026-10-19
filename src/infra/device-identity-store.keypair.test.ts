@@ -3,7 +3,11 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, expect, it } from "vitest";
 import { FileKeyring, resetDefaultKeyringCache } from "../security/keyring-provider.js";
-import { serializeWrappedSecret, wrapSecret } from "../security/secret-wrapping.js";
+import {
+  deserializeWrappedSecret,
+  serializeWrappedSecret,
+  wrapSecret,
+} from "../security/secret-wrapping.js";
 import { closeOpenClawStateDatabaseForTest } from "../state/openclaw-state-db.js";
 import {
   generateStoredDeviceIdentity,
@@ -17,7 +21,11 @@ import {
 import { loadOrCreateDeviceIdentity } from "./device-identity.js";
 import { decodeMlDsa65SecretKey } from "./mldsa65-key-storage.js";
 import { requireNodeSqlite } from "./node-sqlite.js";
-import { repairInvalidCanonicalIdentity } from "./state-migrations.device-identity-repair.js";
+import {
+  detectLegacyDeviceIdentity,
+  repairInvalidCanonicalIdentity,
+} from "./state-migrations.device-identity-repair.js";
+import { migrateLegacyDeviceIdentity } from "./state-migrations.device-identity.js";
 
 const dirs: string[] = [];
 const providers: FileKeyring[] = [];
@@ -41,7 +49,7 @@ function fixture() {
 function plain() {
   return generateStoredDeviceIdentity(1700000000000, undefined, { allowPlaintextPrivateKey: true });
 }
-function wrap(stored: StoredDeviceIdentity, provider: FileKeyring) {
+function wrap(stored: StoredDeviceIdentity, provider: FileKeyring, legacy = false) {
   const raw = decodeMlDsa65SecretKey(stored.privateKeyPem);
   const buffer = Buffer.from(raw);
   try {
@@ -49,7 +57,22 @@ function wrap(stored: StoredDeviceIdentity, provider: FileKeyring) {
       ...stored,
       privateKeyPem: "",
       mldsaPrivateKeyPem: null,
-      mldsaPrivateKeyWrapped: serializeWrappedSecret(wrapSecret(buffer, provider)),
+      mldsaPrivateKeyWrapped: serializeWrappedSecret(
+        wrapSecret(
+          buffer,
+          provider,
+          legacy
+            ? undefined
+            : Buffer.from(
+                JSON.stringify([
+                  "device_identities",
+                  "primary",
+                  stored.deviceId,
+                  stored.publicKeyPem,
+                ]),
+              ),
+        ),
+      ),
       mldsaPrivateKeyWrapKeyId: "fixture-key",
     };
   } finally {
@@ -92,6 +115,153 @@ afterEach(() => {
   }
 });
 
+it("Doctor upgrades an old envelope without a legacy identity file and preserves the signing identity", () => {
+  const options = fixture();
+  const identity = plain();
+  insertStoredDeviceIdentityIfAbsent(wrap(identity, options.wrappingKeyProvider), options);
+  const legacy = wrap(identity, options.wrappingKeyProvider, true);
+  update(
+    options,
+    "UPDATE device_identities SET mldsa_private_key_wrapped = ? WHERE identity_key = 'primary'",
+    Buffer.from(legacy.mldsaPrivateKeyWrapped),
+  );
+  const before = snapshot(options);
+  expect(() => readStoredDeviceIdentityReadOnly(options)).toThrow(/doctor --fix/);
+  expect(snapshot(options)).toEqual(before);
+  const detection = () =>
+    detectLegacyDeviceIdentity({
+      stateDir: options.env.OPENCLAW_STATE_DIR,
+      env: options.env,
+      doctorOnlyStateMigrations: true,
+    });
+  expect(detection().hasInvalidCanonical).toBe(true);
+  const result = repairInvalidCanonicalIdentity(options.env);
+  expect(result.warnings).toEqual([]);
+  expect(result.notices).toBeUndefined();
+  const upgraded = readStoredDeviceIdentity(options)!;
+  expect(upgraded.deviceId).toBe(identity.deviceId);
+  expect(upgraded.privateKeyPem).toBe(identity.privateKeyPem);
+  expect(deserializeWrappedSecret(upgraded.mldsaPrivateKeyWrapped!).version).toBe(2);
+  expect(detection().hasInvalidCanonical).toBe(false);
+  const after = snapshot(options);
+  expect(repairInvalidCanonicalIdentity(options.env).changes).toEqual([]);
+  expect(snapshot(options)).toEqual(after);
+});
+
+it("Doctor upgrades custom legacy rows without creating a missing primary identity", async () => {
+  const options = fixture();
+  const customOptions = { ...options, identityKey: "custom" };
+  const identity = loadOrCreateDeviceIdentity(customOptions);
+  const stored = readStoredDeviceIdentity(customOptions)!;
+  const legacy = wrap(stored, options.wrappingKeyProvider, true);
+  update(
+    options,
+    "UPDATE device_identities SET mldsa_private_key_wrapped = ? WHERE identity_key = 'custom'",
+    Buffer.from(legacy.mldsaPrivateKeyWrapped),
+  );
+  expect(
+    detectLegacyDeviceIdentity({
+      stateDir: options.env.OPENCLAW_STATE_DIR,
+      env: options.env,
+      doctorOnlyStateMigrations: true,
+    }).hasInvalidCanonical,
+  ).toBe(true);
+  const stateDir = options.env.OPENCLAW_STATE_DIR;
+  const detected = detectLegacyDeviceIdentity({
+    stateDir,
+    env: options.env,
+    doctorOnlyStateMigrations: true,
+  });
+  const before = snapshot(options);
+  expect(await migrateLegacyDeviceIdentity({ stateDir, env: options.env, detected })).toEqual({
+    changes: [],
+    warnings: [],
+  });
+  expect(snapshot(options)).toEqual(before);
+  const result = await migrateLegacyDeviceIdentity({
+    stateDir,
+    env: options.env,
+    detected,
+    doctorOnlyStateMigrations: true,
+  });
+  expect(result.warnings).toEqual([]);
+  expect(result.changes).toEqual([
+    'Upgraded authenticated wrapping for device identity "custom" in SQLite.',
+  ]);
+  expect(readStoredDeviceIdentity(customOptions)?.privateKeyPem).toBe(identity.privateKeyPem);
+  expect(readStoredDeviceIdentity(options)).toBeNull();
+  expect(repairInvalidCanonicalIdentity(options.env).changes).toEqual([]);
+});
+
+it("Doctor preserves an old wrapped row when its original key is unavailable", () => {
+  const options = fixture();
+  const stored = insertStoredDeviceIdentityIfAbsent(
+    generateStoredDeviceIdentity(Date.now(), options.wrappingKeyProvider),
+    options,
+  );
+  const legacy = wrap(stored, options.wrappingKeyProvider, true);
+  update(
+    options,
+    "UPDATE device_identities SET mldsa_private_key_wrapped = ? WHERE identity_key = 'primary'",
+    Buffer.from(legacy.mldsaPrivateKeyWrapped),
+  );
+  const before = snapshot(options);
+  const wrongPath = path.join(options.env.OPENCLAW_STATE_DIR, "wrong-upgrade-key");
+  fs.writeFileSync(wrongPath, Buffer.alloc(32, 8).toString("base64url"), { mode: 0o600 });
+  const result = repairInvalidCanonicalIdentity({
+    ...options.env,
+    OPENCLAW_WRAP_KEY_FILE: wrongPath,
+  });
+  expect(result.changes).toEqual([]);
+  expect(result.warnings).toHaveLength(1);
+  expect(snapshot(options)).toEqual(before);
+});
+
+it.each(["device_id", "mldsa_public_key_pem"])(
+  "Doctor preserves a bound row when %s authentication fails",
+  (column) => {
+    const options = fixture();
+    insertStoredDeviceIdentityIfAbsent(
+      generateStoredDeviceIdentity(Date.now(), options.wrappingKeyProvider),
+      options,
+    );
+    const replacement = column === "device_id" ? "0".repeat(64) : plain().publicKeyPem;
+    update(
+      options,
+      `UPDATE device_identities SET ${column} = ? WHERE identity_key = 'primary'`,
+      replacement,
+    );
+    const before = snapshot(options);
+    expect(() => readStoredDeviceIdentity(options)).toThrow(/Cannot authenticate or decrypt/);
+    const result = repairInvalidCanonicalIdentity(options.env);
+    expect(result.changes).toEqual([]);
+    expect(result.warnings).toHaveLength(1);
+    expect(snapshot(options)).toEqual(before);
+  },
+);
+
+it.each([undefined, 1, 3])(
+  "Doctor preserves a bound envelope after a version change to %s",
+  (version) => {
+    const options = fixture();
+    const stored = insertStoredDeviceIdentityIfAbsent(
+      generateStoredDeviceIdentity(Date.now(), options.wrappingKeyProvider),
+      options,
+    );
+    const envelope = deserializeWrappedSecret(stored.mldsaPrivateKeyWrapped!);
+    update(
+      options,
+      "UPDATE device_identities SET mldsa_private_key_wrapped = ? WHERE identity_key = 'primary'",
+      Buffer.from(Buffer.from(JSON.stringify({ ...envelope, version })).toString("base64url")),
+    );
+    const before = snapshot(options);
+    const result = repairInvalidCanonicalIdentity(options.env);
+    expect(result.changes).toEqual([]);
+    expect(result.warnings).toHaveLength(1);
+    expect(snapshot(options)).toEqual(before);
+  },
+);
+
 it("rejects independently valid but mismatched plaintext keypairs before persistence", () => {
   const options = fixture(),
     a = plain(),
@@ -107,7 +277,9 @@ it("rolls back a mismatched wrapped candidate at authoritative insertion", () =>
     a = plain(),
     b = wrap(plain(), options.wrappingKeyProvider);
   const mixed = { ...b, deviceId: a.deviceId, publicKeyPem: a.publicKeyPem };
-  expect(() => insertStoredDeviceIdentityIfAbsent(mixed, options)).toThrow(/invalid persisted/);
+  expect(() => insertStoredDeviceIdentityIfAbsent(mixed, options)).toThrow(
+    /Cannot authenticate or decrypt/,
+  );
   expect(readStoredDeviceIdentity(options)).toBeNull();
 });
 
@@ -122,36 +294,40 @@ it("refuses mismatched persisted wrapped keys without replacing them at runtime"
     Buffer.from(b.mldsaPrivateKeyWrapped!),
   );
   const before = snapshot(options);
-  expect(() => readStoredDeviceIdentityReadOnly(options)).toThrow(/invalid persisted/);
-  expect(() => readStoredDeviceIdentity(options)).toThrow(/invalid persisted/);
-  expect(() => loadOrCreateDeviceIdentity(options)).toThrow(/invalid persisted/);
+  expect(() => readStoredDeviceIdentityReadOnly(options)).toThrow(/Cannot authenticate or decrypt/);
+  expect(() => readStoredDeviceIdentity(options)).toThrow(/Cannot authenticate or decrypt/);
+  expect(() => loadOrCreateDeviceIdentity(options)).toThrow(/Cannot authenticate or decrypt/);
   expect(snapshot(options)).toEqual(before);
 });
 
-it("Doctor rejects mismatched wrapped salvage and reports an explicit identity replacement", () => {
+it("Doctor blocks mismatched wrapped salvage without replacing the identity", () => {
   const options = fixture(),
     a = plain(),
-    b = wrap(plain(), options.wrappingKeyProvider);
+    b = wrap({ ...a, privateKeyPem: plain().privateKeyPem }, options.wrappingKeyProvider);
   insertStoredDeviceIdentityIfAbsent(wrap(a, options.wrappingKeyProvider), options);
   update(
     options,
     "UPDATE device_identities SET mldsa_private_key_wrapped = ? WHERE identity_key = 'primary'",
     Buffer.from(b.mldsaPrivateKeyWrapped!),
   );
+  const before = snapshot(options);
   const result = repairInvalidCanonicalIdentity(options.env);
-  expect(result.warnings).toEqual([]);
-  expect(result.changes).toEqual(["Replaced invalid primary device identity in SQLite."]);
-  expect(result.notices).toEqual([
-    "The repaired device has a new identity and must be approved again.",
-  ]);
-  expect(readStoredDeviceIdentity(options)!.deviceId).not.toBe(a.deviceId);
+  expect(result.warnings).toHaveLength(1);
+  expect(result.changes).toEqual([]);
+  expect(result.notices).toBeUndefined();
+  expect(snapshot(options)).toEqual(before);
 });
 
-it("Doctor preserves matching wrapped key bytes while repairing metadata", () => {
+it("Doctor upgrades legacy wrapping while preserving matching identity keys and repairing metadata", () => {
   const options = fixture(),
     a = plain();
-  const original = wrap(a, options.wrappingKeyProvider);
-  insertStoredDeviceIdentityIfAbsent(original, options);
+  insertStoredDeviceIdentityIfAbsent(wrap(a, options.wrappingKeyProvider), options);
+  const original = wrap(a, options.wrappingKeyProvider, true);
+  update(
+    options,
+    "UPDATE device_identities SET mldsa_private_key_wrapped = ? WHERE identity_key = 'primary'",
+    Buffer.from(original.mldsaPrivateKeyWrapped),
+  );
   update(
     options,
     "UPDATE device_identities SET device_id = ?, created_at_ms = ? WHERE identity_key = 'primary'",
@@ -166,7 +342,7 @@ it("Doctor preserves matching wrapped key bytes while repairing metadata", () =>
   expect(result.rotated).toBe(false);
   expect(result.identity.deviceId).toBe(a.deviceId);
   expect(result.identity.privateKeyPem).toBe(a.privateKeyPem);
-  expect(result.identity.mldsaPrivateKeyWrapped).toBe(original.mldsaPrivateKeyWrapped);
+  expect(deserializeWrappedSecret(result.identity.mldsaPrivateKeyWrapped!).version).toBe(2);
 });
 
 it.each(["intact", "invalid metadata"])(

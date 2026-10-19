@@ -4,7 +4,7 @@ import SQLite3
 import Testing
 @testable import OpenClawKit
 
-private final class DeviceIdentityMigrationFixture {
+final class DeviceIdentityMigrationFixture {
     let root: URL
     let destination: URL
     let databaseURL: URL
@@ -652,15 +652,20 @@ struct DeviceIdentityStoreTests {
         let legacyData = try Self.nodePEMIdentityJSON()
         let source = try fixture.source(contents: legacyData)
         let claimURL = fixture.claimURL(for: source)
+        var committedIdentity: DeviceIdentity?
 
         #expect(throws: NSError.self) {
             try fixture.load(
                 sources: [source],
                 afterLegacyCommit: {
+                    committedIdentity = try DeviceIdentitySQLiteStore.loadExisting(
+                        databaseURL: fixture.databaseURL,
+                        profile: .primary)
                     try legacyData.write(to: source.identityURL, atomically: true, encoding: .utf8)
                 })
         }
 
+        let identity = try #require(committedIdentity)
         #expect(FileManager.default.fileExists(atPath: source.identityURL.path))
         #expect(FileManager.default.fileExists(atPath: claimURL.path))
         #expect(try Self.scalarText(

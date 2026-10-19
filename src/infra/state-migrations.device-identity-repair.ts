@@ -1,11 +1,11 @@
-// Doctor-only detection and replacement for invalid canonical device identity rows.
+// Doctor-only detection and atomic wrapping upgrade of canonical identity populations.
 import fs from "node:fs";
 import path from "node:path";
 import {
   DeviceIdentityStorageError,
-  generateStoredDeviceIdentity,
+  listDeviceIdentityWrappingUpgrades,
   readStoredDeviceIdentityReadOnly,
-  repairInvalidStoredDeviceIdentity,
+  upgradeDeviceIdentityPopulationWrapped,
 } from "./device-identity-store.js";
 import { resolveDeviceIdentityWrappingOptions } from "./device-identity.js";
 import { formatErrorMessage } from "./errors.js";
@@ -39,12 +39,17 @@ export function detectLegacyDeviceIdentity(params: {
   let hasInvalidCanonical = false;
   if (doctorAuthorized) {
     try {
-      readStoredDeviceIdentityReadOnly({
-        env: { ...(params.env ?? process.env), OPENCLAW_STATE_DIR: params.stateDir },
-        identityKey: IDENTITY_KEY,
-      });
-    } catch (error) {
-      hasInvalidCanonical = error instanceof DeviceIdentityStorageError;
+      const options = resolveDeviceIdentityWrappingOptions(
+        {
+          env: { ...(params.env ?? process.env), OPENCLAW_STATE_DIR: params.stateDir },
+          identityKey: IDENTITY_KEY,
+        },
+        false,
+      );
+      readStoredDeviceIdentityReadOnly(options);
+      hasInvalidCanonical = listDeviceIdentityWrappingUpgrades(options).length > 0;
+    } catch {
+      hasInvalidCanonical = true;
     }
   }
   return {
@@ -66,8 +71,10 @@ export function hasLegacyDeviceIdentityPath(detected: LegacyDeviceIdentityDetect
   );
 }
 
-/** Generate a replacement only after the caller acquires Doctor's exclusive state lock. */
+/** Upgrade only after the caller acquires Doctor's exclusive state lock. Never replace blocked rows. */
 export function repairInvalidCanonicalIdentity(env: NodeJS.ProcessEnv): MigrationMessages {
+  const changes: string[] = [];
+  const warnings: string[] = [];
   try {
     const options = resolveDeviceIdentityWrappingOptions({ env, identityKey: IDENTITY_KEY }, true);
     const wrappingKeyProvider = options.wrappingKeyProvider;
@@ -76,30 +83,33 @@ export function repairInvalidCanonicalIdentity(env: NodeJS.ProcessEnv): Migratio
         "A wrapping key provider is required before Doctor can replace a device identity.",
       );
     }
-    const result = repairInvalidStoredDeviceIdentity(
-      generateStoredDeviceIdentity(Date.now(), wrappingKeyProvider),
-      {
-        ...options,
-      },
+    const result = upgradeDeviceIdentityPopulationWrapped(options);
+    changes.push(
+      ...result.upgraded.map(
+        (identityKey) =>
+          `Upgraded authenticated wrapping for device identity "${identityKey}" in SQLite.`,
+      ),
     );
-    if (!result.repaired) {
-      return { changes: [], warnings: [] };
-    }
-    if (!result.rotated) {
-      return {
-        changes: ["Repaired invalid primary device identity metadata in SQLite."],
-        warnings: [],
-      };
-    }
-    return {
-      changes: ["Replaced invalid primary device identity in SQLite."],
-      warnings: [],
-      notices: ["The repaired device has a new identity and must be approved again."],
-    };
+    warnings.push(
+      ...result.blocked.map(
+        (row) =>
+          `Could not upgrade wrapping for device identity "${row.identityKey}"; the entire identity population was preserved. Restore its key or backup before retrying.`,
+      ),
+    );
+    warnings.push(
+      ...result.pendingNative.map(
+        (identityKey) =>
+          `Device identity "${identityKey}" was preserved and still requires native Apple verification.`,
+      ),
+    );
+    return { changes, warnings };
   } catch (error) {
     return {
-      changes: [],
-      warnings: [`Failed repairing invalid SQLite device identity: ${formatErrorMessage(error)}`],
+      changes,
+      warnings: [
+        ...warnings,
+        `Failed repairing invalid SQLite device identity: ${formatErrorMessage(error)}`,
+      ],
     };
   }
 }
