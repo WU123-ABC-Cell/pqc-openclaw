@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type { Root } from "@openclaw/fs-safe";
+import { publishFileNoClobber } from "./directory-durability.js";
 
 /** The stable source identity every doctor-owned import verifies before cleanup. */
 export type LegacyMigrationSourceSnapshot = {
@@ -67,13 +68,41 @@ export class LegacyMigrationSourceClaim<
     return await this.params.readSnapshot(claimed ? this.claimPath : this.sourcePath);
   }
 
+  /** A crash after exclusive hardlink publication leaves two names for one inode. */
+  async recoverIncompletePublication(): Promise<void> {
+    if (!(await this.exists()) || !(await this.exists(true))) {
+      return;
+    }
+    const source = await this.params.stateRoot.stat(this.sourceRelativePath);
+    const claim = await this.params.stateRoot.stat(this.claimRelativePath);
+    if (
+      source.isFile &&
+      claim.isFile &&
+      source.dev === claim.dev &&
+      source.ino === claim.ino &&
+      source.nlink === 2 &&
+      claim.nlink === 2
+    ) {
+      await this.params.stateRoot.remove(this.claimRelativePath);
+    }
+  }
+
+  private async moveWithoutOverwrite(sourceRelativePath: string, targetRelativePath: string) {
+    await publishFileNoClobber(
+      await this.params.stateRoot.resolve(sourceRelativePath),
+      await this.params.stateRoot.resolve(targetRelativePath),
+      { strategy: "link-required", moveSource: true, durability: "degrade" },
+    );
+  }
+
   async recover(conflictMessage: string): Promise<void> {
+    await this.recoverIncompletePublication();
     if (!(await this.exists(true))) {
       return;
     }
     const claimed = await this.read(true);
     if (!(await this.exists())) {
-      await this.params.stateRoot.move(this.claimRelativePath, this.sourceRelativePath);
+      await this.moveWithoutOverwrite(this.claimRelativePath, this.sourceRelativePath);
       return;
     }
     if (!legacyMigrationSourceContentMatches(claimed, await this.read())) {
@@ -84,13 +113,14 @@ export class LegacyMigrationSourceClaim<
 
   async restore(): Promise<string | null> {
     try {
+      await this.recoverIncompletePublication();
       if (!(await this.exists(true))) {
         return null;
       }
       if (await this.exists()) {
         return `source path already exists: ${this.sourcePath}`;
       }
-      await this.params.stateRoot.move(this.claimRelativePath, this.sourceRelativePath);
+      await this.moveWithoutOverwrite(this.claimRelativePath, this.sourceRelativePath);
       return null;
     } catch (error) {
       return this.params.formatError?.(error) ?? String(error);
@@ -103,7 +133,7 @@ export class LegacyMigrationSourceClaim<
     beforeClaim?: () => void;
   }): Promise<TSnapshot> {
     params.beforeClaim?.();
-    await this.params.stateRoot.move(this.sourceRelativePath, this.claimRelativePath);
+    await this.moveWithoutOverwrite(this.sourceRelativePath, this.claimRelativePath);
     const claimed = await this.read(true);
     if (!legacyMigrationSourceSnapshotsMatch(claimed, params.snapshot)) {
       throw new Error(params.mismatchMessage);

@@ -1,7 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import { root, type Root } from "@openclaw/fs-safe";
-import { afterEach, describe, expect, it } from "vitest";
+import { __setFsSafeTestHooksForTest } from "@openclaw/fs-safe/test-hooks";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import {
   assertLegacyMigrationSourceUnchanged,
@@ -15,10 +16,48 @@ import {
   resolveLegacyMigrationRelativePath,
 } from "./state-migrations.source-snapshot.js";
 
+const publishRace = vi.hoisted(() => ({
+  targetPath: "",
+  inject: undefined as (() => void) | undefined,
+}));
+
+vi.mock("./directory-durability.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./directory-durability.js")>();
+  return {
+    ...actual,
+    publishFileNoClobber: async (...args: Parameters<typeof actual.publishFileNoClobber>) => {
+      if (args[1] === publishRace.targetPath) {
+        publishRace.inject?.();
+        publishRace.inject = undefined;
+      }
+      return await actual.publishFileNoClobber(...args);
+    },
+  };
+});
+
 describe("doctor legacy migration source contract", () => {
   const tempDirs = useAutoCleanupTempDirTracker((cleanup) => {
-    afterEach(cleanup);
+    afterEach(() => {
+      __setFsSafeTestHooksForTest(undefined);
+      publishRace.targetPath = "";
+      publishRace.inject = undefined;
+      cleanup();
+    });
   });
+
+  function occupyMoveTarget(targetPath: string, bytes: Buffer) {
+    const inject = () => fs.writeFileSync(targetPath, bytes, { mode: 0o600 });
+    publishRace.targetPath = targetPath;
+    publishRace.inject = inject;
+    __setFsSafeTestHooksForTest({
+      beforeRootFallbackMutation: (operation, candidatePath) => {
+        if (operation === "move" && candidatePath === targetPath) {
+          inject();
+          publishRace.inject = undefined;
+        }
+      },
+    });
+  }
 
   function createSource(content = '{"version":1}\n') {
     const stateDir = tempDirs.make("openclaw-migration-source-");
@@ -124,6 +163,54 @@ describe("doctor legacy migration source contract", () => {
     expect(fs.readFileSync(sourcePath, "utf8")).toBe('{"version":1}\n');
     expect(fs.existsSync(claim.claimPath)).toBe(false);
   });
+
+  it("recovers a complete claim interrupted before source removal", async () => {
+    const { sourcePath, stateDir } = createSource();
+    const stateRoot = await root(stateDir, { hardlinks: "reject", symlinks: "reject" });
+    const claim = createClaim(stateRoot, stateDir, sourcePath);
+    fs.linkSync(sourcePath, claim.claimPath);
+
+    await claim.recover("conflicting source");
+
+    expect(fs.readFileSync(sourcePath, "utf8")).toBe('{"version":1}\n');
+    expect(fs.existsSync(claim.claimPath)).toBe(false);
+  });
+
+  it("does not overwrite a claim occupied after the move precheck", async () => {
+    const { sourcePath, stateDir } = createSource();
+    const stateRoot = await root(stateDir, { hardlinks: "reject", symlinks: "reject" });
+    const claim = createClaim(stateRoot, stateDir, sourcePath);
+    const snapshot = await claim.read();
+    const competitor = Buffer.from("competing claim");
+    occupyMoveTarget(claim.claimPath, competitor);
+
+    await expect(claim.claim({ snapshot, mismatchMessage: "source changed" })).rejects.toThrow();
+    expect(publishRace.inject).toBeUndefined();
+    expect(fs.readFileSync(claim.claimPath)).toEqual(competitor);
+    expect(fs.readFileSync(sourcePath)).toEqual(snapshot.buffer);
+  });
+
+  it.each(["recover", "restore"])(
+    "does not overwrite a source occupied during %s",
+    async (operation) => {
+      const { sourcePath, stateDir } = createSource();
+      const stateRoot = await root(stateDir, { hardlinks: "reject", symlinks: "reject" });
+      const claim = createClaim(stateRoot, stateDir, sourcePath);
+      const original = fs.readFileSync(sourcePath);
+      fs.renameSync(sourcePath, claim.claimPath);
+      const competitor = Buffer.from("competing source");
+      occupyMoveTarget(sourcePath, competitor);
+
+      if (operation === "recover") {
+        await expect(claim.recover("conflicting source")).rejects.toThrow();
+      } else {
+        expect(await claim.restore()).not.toBeNull();
+      }
+      expect(publishRace.inject).toBeUndefined();
+      expect(fs.readFileSync(sourcePath)).toEqual(competitor);
+      expect(fs.readFileSync(claim.claimPath)).toEqual(original);
+    },
+  );
 
   it("rejects an inode replacement with matching bytes and restores its source", async () => {
     const { sourcePath, stateDir } = createSource();

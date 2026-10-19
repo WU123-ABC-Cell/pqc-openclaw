@@ -514,22 +514,29 @@ describe("legacy APNs Doctor migration", () => {
     expect(fs.existsSync(sourcePath)).toBe(true);
   });
 
-  it("imports an interrupted claim when no receipt exists", async () => {
-    const stateDir = useStateDir();
-    const sourcePath = await writeLegacyState(stateDir, {
-      "legacy-direct": directRegistration(),
-    });
-    const claimPath = `${sourcePath}.doctor-importing`;
-    await fsp.rename(sourcePath, claimPath);
+  it.each(["moved", "hardlinked"] as const)(
+    "imports an interrupted %s claim when no receipt exists",
+    async (interruption) => {
+      const stateDir = useStateDir();
+      const sourcePath = await writeLegacyState(stateDir, {
+        "legacy-direct": directRegistration(),
+      });
+      const claimPath = `${sourcePath}.doctor-importing`;
+      if (interruption === "moved") {
+        await fsp.rename(sourcePath, claimPath);
+      } else {
+        await fsp.link(sourcePath, claimPath);
+      }
 
-    const result = await migrate(stateDir);
+      const result = await migrate(stateDir);
 
-    expect(result.warnings).toEqual([]);
-    await expect(loadApnsRegistration("legacy-direct", stateDir)).resolves.toMatchObject({
-      nodeId: "legacy-direct",
-    });
-    expect(fs.existsSync(claimPath)).toBe(false);
-  });
+      expect(result.warnings).toEqual([]);
+      await expect(loadApnsRegistration("legacy-direct", stateDir)).resolves.toMatchObject({
+        nodeId: "legacy-direct",
+      });
+      expect(fs.existsSync(claimPath)).toBe(false);
+    },
+  );
 
   it("refuses source and claim files together without a receipt", async () => {
     const stateDir = useStateDir();

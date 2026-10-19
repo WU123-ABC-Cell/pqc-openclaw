@@ -358,6 +358,11 @@ async function migrateWithExclusiveStateOwnership(params: {
     readSnapshot: (snapshotPath) =>
       readLegacySourceSnapshot(params.stateRoot, params.stateDir, snapshotPath),
   });
+  try {
+    await source.recoverIncompletePublication();
+  } catch (error) {
+    return { changes, warnings: [`Failed recovering legacy APNs claim: ${String(error)}`] };
+  }
   const hasSource = await source.exists();
   const hasClaim = await source.exists(true);
   if (hasSource && hasClaim) {

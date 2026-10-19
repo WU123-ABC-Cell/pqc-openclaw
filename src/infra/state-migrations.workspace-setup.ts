@@ -382,6 +382,7 @@ async function cleanupReceiptSource(params: {
   try {
     assertConfiguredWorkspaceIdentity(params.source);
     const sourceClaim = params.sourceClaim;
+    await sourceClaim.recoverIncompletePublication();
     const hasSource = await sourceClaim.exists();
     const hasClaim = await sourceClaim.exists(true);
     if (!hasSource && !hasClaim) {
@@ -481,6 +482,7 @@ async function migrateOneSource(params: {
   let hasSource: boolean;
   let hasClaim: boolean;
   try {
+    await sourceClaim.recoverIncompletePublication();
     hasSource = await sourceClaim.exists();
     hasClaim = await sourceClaim.exists(true);
   } catch (error) {

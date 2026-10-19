@@ -548,19 +548,26 @@ describe("legacy MCP OAuth Doctor migration", () => {
     expect(receipt(env)).toBeUndefined();
   });
 
-  it("imports a valid interrupted claim", async () => {
-    const { env, stateDir } = useStateDir();
-    const sourcePath = await writeLegacy({ stateDir });
-    const claimPath = `${sourcePath}.doctor-importing`;
-    await fsp.rename(sourcePath, claimPath);
+  it.each(["moved", "hardlinked"] as const)(
+    "imports a valid interrupted %s claim",
+    async (interruption) => {
+      const { env, stateDir } = useStateDir();
+      const sourcePath = await writeLegacy({ stateDir });
+      const claimPath = `${sourcePath}.doctor-importing`;
+      if (interruption === "moved") {
+        await fsp.rename(sourcePath, claimPath);
+      } else {
+        await fsp.link(sourcePath, claimPath);
+      }
 
-    const result = await migrate(stateDir, env);
+      const result = await migrate(stateDir, env);
 
-    expect(result.warnings).toEqual([]);
-    expect(storeRow(env)).toBeDefined();
-    expect(fs.existsSync(sourcePath)).toBe(false);
-    expect(fs.existsSync(claimPath)).toBe(false);
-  });
+      expect(result.warnings).toEqual([]);
+      expect(storeRow(env)).toBeDefined();
+      expect(fs.existsSync(sourcePath)).toBe(false);
+      expect(fs.existsSync(claimPath)).toBe(false);
+    },
+  );
 
   it("refuses source and interrupted claim together without a receipt", async () => {
     const { env, stateDir } = useStateDir();

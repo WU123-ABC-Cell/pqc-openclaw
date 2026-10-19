@@ -157,6 +157,24 @@ describe("legacy subagent registry Doctor migration", () => {
     });
   });
 
+  it("recovers a hardlinked claim interrupted before source removal", async () => {
+    const { env, stateDir } = useStateDir();
+    const sourcePath = await writeLegacy({ stateDir });
+    const claimPath = `${sourcePath}.doctor-importing`;
+    await fsp.link(sourcePath, claimPath);
+
+    const result = await migrateLegacySubagentRegistry({
+      detected: detectLegacySubagentRegistry({ stateDir, doctorOnlyStateMigrations: true }),
+      env,
+      stateDir,
+    });
+
+    expect(result.warnings).toEqual([]);
+    expect(receipt(env)).toMatchObject({ removed_source: 1, status: "completed" });
+    expect(fs.existsSync(sourcePath)).toBe(false);
+    expect(fs.existsSync(claimPath)).toBe(false);
+  });
+
   it("never parses malformed or blank-ID retired JSON into SQLite", async () => {
     const { env, stateDir } = useStateDir();
     const sourcePath = await writeLegacy({

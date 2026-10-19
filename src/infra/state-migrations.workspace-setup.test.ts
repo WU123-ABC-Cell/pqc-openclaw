@@ -593,28 +593,37 @@ describe("legacy workspace Doctor migration", () => {
     ).toEqual([{ filename: "AGENTS.md", sha256: HASH }]);
   });
 
-  it("resumes an interrupted unreceipted claim", async () => {
-    const context = setup();
-    const setupPath = path.join(context.workspaceDir, "openclaw-workspace-state.json");
-    const claimPath = `${setupPath}.doctor-importing`;
-    await fsp.writeFile(
-      setupPath,
-      JSON.stringify({ version: 1, setupCompletedAt: "2026-07-15T10:01:00.000Z" }),
-      "utf8",
-    );
-    await fsp.rename(setupPath, claimPath);
+  it.each(["moved", "hardlinked"] as const)(
+    "resumes an interrupted unreceipted %s claim",
+    async (interruption) => {
+      const context = setup();
+      const setupPath = path.join(context.workspaceDir, "openclaw-workspace-state.json");
+      const claimPath = `${setupPath}.doctor-importing`;
+      await fsp.writeFile(
+        setupPath,
+        JSON.stringify({ version: 1, setupCompletedAt: "2026-07-15T10:01:00.000Z" }),
+        "utf8",
+      );
+      if (interruption === "moved") {
+        await fsp.rename(setupPath, claimPath);
+      } else {
+        await fsp.link(setupPath, claimPath);
+      }
 
-    const result = await migrate(context);
+      const result = await migrate(context);
 
-    expect(result.warnings).toEqual([]);
-    expect(fs.existsSync(claimPath)).toBe(false);
-    const identity = resolveWorkspaceStateIdentity(context.workspaceDir);
-    expect(
-      openOpenClawStateDatabase({ env: context.env })
-        .db.prepare("SELECT setup_completed_at FROM workspace_setup_state WHERE workspace_key = ?")
-        .get(identity.workspaceKey),
-    ).toEqual({ setup_completed_at: "2026-07-15T10:01:00.000Z" });
-  });
+      expect(result.warnings).toEqual([]);
+      expect(fs.existsSync(claimPath)).toBe(false);
+      const identity = resolveWorkspaceStateIdentity(context.workspaceDir);
+      expect(
+        openOpenClawStateDatabase({ env: context.env })
+          .db.prepare(
+            "SELECT setup_completed_at FROM workspace_setup_state WHERE workspace_key = ?",
+          )
+          .get(identity.workspaceKey),
+      ).toEqual({ setup_completed_at: "2026-07-15T10:01:00.000Z" });
+    },
+  );
 
   it.each(["hardlink", "oversized"] as const)(
     "detects but retains an owned %s sibling attestation",

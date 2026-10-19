@@ -125,6 +125,7 @@ async function recoverInterruptedClaim(params: {
   source: LegacyMigrationSourceClaim;
   env: NodeJS.ProcessEnv;
 }): Promise<void> {
+  await params.source.recoverIncompletePublication();
   if (!(await params.source.exists(true))) {
     return;
   }

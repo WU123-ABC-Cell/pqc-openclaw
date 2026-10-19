@@ -256,18 +256,25 @@ describe("legacy restart sentinel migration", () => {
     expect(fs.existsSync(sourcePath)).toBe(false);
   });
 
-  it("recovers an interrupted claim and finishes the same migration owner", async () => {
-    const { env, stateDir } = useStateDir();
-    const sourcePath = await writeLegacy(stateDir, { version: 1, payload: payload() });
-    await fsp.rename(sourcePath, `${sourcePath}.doctor-importing`);
+  it.each(["moved", "hardlinked"] as const)(
+    "recovers an interrupted %s claim and finishes the same migration owner",
+    async (interruption) => {
+      const { env, stateDir } = useStateDir();
+      const sourcePath = await writeLegacy(stateDir, { version: 1, payload: payload() });
+      if (interruption === "moved") {
+        await fsp.rename(sourcePath, `${sourcePath}.doctor-importing`);
+      } else {
+        await fsp.link(sourcePath, `${sourcePath}.doctor-importing`);
+      }
 
-    const result = await migrate({ env, stateDir });
+      const result = await migrate({ env, stateDir });
 
-    expect(result.warnings).toEqual([]);
-    await expect(readRestartSentinel(env)).resolves.toMatchObject({ payload: payload() });
-    expect(fs.existsSync(sourcePath)).toBe(false);
-    expect(fs.existsSync(`${sourcePath}.doctor-importing`)).toBe(false);
-  });
+      expect(result.warnings).toEqual([]);
+      await expect(readRestartSentinel(env)).resolves.toMatchObject({ payload: payload() });
+      expect(fs.existsSync(sourcePath)).toBe(false);
+      expect(fs.existsSync(`${sourcePath}.doctor-importing`)).toBe(false);
+    },
+  );
 
   it("preserves changed source bytes and records no receipt", async () => {
     const { env, stateDir } = useStateDir();
