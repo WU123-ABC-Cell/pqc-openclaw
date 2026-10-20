@@ -1,12 +1,5 @@
 // Nostr plugin module implements nostr bus behavior.
-import {
-  SimplePool,
-  finalizeEvent,
-  getPublicKey,
-  nip44,
-  verifyEvent,
-  type Event,
-} from "nostr-tools";
+import { SimplePool, getPublicKey, nip44, verifyEvent, type Event } from "nostr-tools";
 import { decrypt as decryptLegacyNip04 } from "nostr-tools/nip04";
 import {
   createDirectDmPreCryptoGuardPolicy,
@@ -18,11 +11,11 @@ import { DEFAULT_RELAYS } from "./default-relays.js";
 import {
   createMetrics,
   createNoopMetrics,
-  type NostrMetrics,
   type MetricsSnapshot,
   type MetricEvent,
 } from "./metrics.js";
 import { createNostrCursorStateWriter, createNostrDurableCursor } from "./nostr-cursor.js";
+import { decodeSignedPairingPublicKey, sendEncryptedDm } from "./nostr-dm-publish.js";
 import { chunkNostrOutboundText, DEFAULT_NOSTR_DM_SIZE_LIMITS } from "./nostr-dm-size.js";
 import { NostrIngressPermanentError } from "./nostr-ingress-state.js";
 import {
@@ -40,6 +33,11 @@ import {
 } from "./nostr-pqc-key-announcement.js";
 import { publishProfile as publishProfileFn, type ProfilePublishResult } from "./nostr-profile.js";
 import { createFixedWindowRateLimiter } from "./nostr-rate-limiter.js";
+import {
+  createCircuitBreaker,
+  createRelayHealthTracker,
+  type CircuitBreaker,
+} from "./nostr-relay-health.js";
 import { createNostrRelaySubscriptionGroup } from "./nostr-relay-subscription.js";
 import {
   readNostrBusState,
@@ -50,15 +48,12 @@ import {
   readNostrPqcKeyState,
   writeNostrPqcKeyState,
 } from "./nostr-state-store.js";
-import { publishNostrEventToRelay } from "./relay-publish.js";
-
 const {
   decodeMlKem768PublicKey,
   decodeMlKem768SecretKey,
   deriveMlKem768PublicKey,
   decryptOpenClawPqcDmV1,
   encodeMlKemKey,
-  encryptOpenClawPqcDmV1,
   OPENCLAW_PQC_DM_EVENT_KIND,
 } = openClawPqcDm;
 
@@ -71,14 +66,6 @@ const STATE_PERSIST_DEBOUNCE_MS = 5000; // Debounce state writes
 const NOSTR_INGRESS_ENVELOPE_OVERHEAD_BYTES = 16 * 1024;
 const NOSTR_INGRESS_MAX_PENDING_EVENTS = 1_000;
 const DEFAULT_INBOUND_GUARD_POLICY = DEFAULT_NOSTR_DM_SIZE_LIMITS;
-const PAIRING_ML_KEM_KEY_TAG = "ocpqc-pk";
-
-// Circuit breaker configuration
-const CIRCUIT_BREAKER_THRESHOLD = 5; // failures before opening
-const CIRCUIT_BREAKER_RESET_MS = 30000; // 30 seconds before half-open
-
-// Health tracker configuration
-const HEALTH_WINDOW_MS = 60000; // 1 minute window for health stats
 
 // ============================================================================
 // Types
@@ -154,183 +141,6 @@ export interface NostrBusHandle {
   updatePinnedPeerPqcKey: (pubkey: string, publicKey: string) => void;
   /** Read the key currently used for outbound messages. */
   getPinnedPeerPqcKey: (pubkey: string) => string | undefined;
-}
-
-// ============================================================================
-// Circuit Breaker
-// ============================================================================
-
-interface CircuitBreakerState {
-  state: "closed" | "open" | "half_open";
-  failures: number;
-  lastFailure: number;
-  lastSuccess: number;
-}
-
-interface CircuitBreaker {
-  /** Check if requests should be allowed */
-  canAttempt: () => boolean;
-  /** Record a success */
-  recordSuccess: () => void;
-  /** Record a failure */
-  recordFailure: () => void;
-  /** Get current state */
-  getState: () => CircuitBreakerState["state"];
-}
-
-function createCircuitBreaker(
-  relay: string,
-  metrics: NostrMetrics,
-  threshold: number = CIRCUIT_BREAKER_THRESHOLD,
-  resetMs: number = CIRCUIT_BREAKER_RESET_MS,
-): CircuitBreaker {
-  const state: CircuitBreakerState = {
-    state: "closed",
-    failures: 0,
-    lastFailure: 0,
-    lastSuccess: Date.now(),
-  };
-
-  return {
-    canAttempt(): boolean {
-      if (state.state === "closed") {
-        return true;
-      }
-
-      if (state.state === "open") {
-        // Check if enough time has passed to try half-open
-        if (Date.now() - state.lastFailure >= resetMs) {
-          state.state = "half_open";
-          metrics.emit("relay.circuit_breaker.half_open", 1, { relay });
-          return true;
-        }
-        return false;
-      }
-
-      // half_open: allow one attempt
-      return true;
-    },
-
-    recordSuccess(): void {
-      if (state.state === "half_open") {
-        state.state = "closed";
-        state.failures = 0;
-        metrics.emit("relay.circuit_breaker.close", 1, { relay });
-      } else if (state.state === "closed") {
-        state.failures = 0;
-      }
-      state.lastSuccess = Date.now();
-    },
-
-    recordFailure(): void {
-      state.failures++;
-      state.lastFailure = Date.now();
-
-      if (state.state === "half_open") {
-        state.state = "open";
-        metrics.emit("relay.circuit_breaker.open", 1, { relay });
-      } else if (state.state === "closed" && state.failures >= threshold) {
-        state.state = "open";
-        metrics.emit("relay.circuit_breaker.open", 1, { relay });
-      }
-    },
-
-    getState(): CircuitBreakerState["state"] {
-      return state.state;
-    },
-  };
-}
-
-// ============================================================================
-// Relay Health Tracker
-// ============================================================================
-
-interface RelayHealthStats {
-  successCount: number;
-  failureCount: number;
-  latencySum: number;
-  latencyCount: number;
-  lastSuccess: number;
-  lastFailure: number;
-}
-
-interface RelayHealthTracker {
-  /** Record a successful operation */
-  recordSuccess: (relay: string, latencyMs: number) => void;
-  /** Record a failed operation */
-  recordFailure: (relay: string) => void;
-  /** Get health score (0-1, higher is better) */
-  getScore: (relay: string) => number;
-  /** Get relays sorted by health (best first) */
-  getSortedRelays: (relays: string[]) => string[];
-}
-
-function createRelayHealthTracker(): RelayHealthTracker {
-  const stats = new Map<string, RelayHealthStats>();
-
-  function getOrCreate(relay: string): RelayHealthStats {
-    let s = stats.get(relay);
-    if (!s) {
-      s = {
-        successCount: 0,
-        failureCount: 0,
-        latencySum: 0,
-        latencyCount: 0,
-        lastSuccess: 0,
-        lastFailure: 0,
-      };
-      stats.set(relay, s);
-    }
-    return s;
-  }
-
-  return {
-    recordSuccess(relay: string, latencyMs: number): void {
-      const s = getOrCreate(relay);
-      s.successCount++;
-      s.latencySum += latencyMs;
-      s.latencyCount++;
-      s.lastSuccess = Date.now();
-    },
-
-    recordFailure(relay: string): void {
-      const s = getOrCreate(relay);
-      s.failureCount++;
-      s.lastFailure = Date.now();
-    },
-
-    getScore(relay: string): number {
-      const s = stats.get(relay);
-      if (!s) {
-        return 0.5;
-      } // Unknown relay gets neutral score
-
-      const total = s.successCount + s.failureCount;
-      if (total === 0) {
-        return 0.5;
-      }
-
-      // Success rate (0-1)
-      const successRate = s.successCount / total;
-
-      // Recency bonus (prefer recently successful relays)
-      const now = Date.now();
-      const recencyBonus =
-        s.lastSuccess > s.lastFailure
-          ? Math.max(0, 1 - (now - s.lastSuccess) / HEALTH_WINDOW_MS) * 0.2
-          : 0;
-
-      // Latency penalty (lower is better)
-      const avgLatency = s.latencyCount > 0 ? s.latencySum / s.latencyCount : 1000;
-      const latencyPenalty = Math.min(0.2, avgLatency / 10000);
-
-      return Math.max(0, Math.min(1, successRate + recencyBonus - latencyPenalty));
-    },
-
-    getSortedRelays(relays: string[]): string[] {
-      return [...relays].toSorted((a, b) => this.getScore(b) - this.getScore(a));
-    },
-  };
 }
 
 /**
@@ -892,124 +702,3 @@ export async function startNostrBus(options: NostrBusOptions): Promise<NostrBusH
     getPinnedPeerPqcKey,
   };
 }
-
-// Send DM with Circuit Breaker + Health Scoring
-
-function decodeSignedPairingPublicKey(event: Event): Uint8Array {
-  const keyTags = event.tags.filter((tag) => tag[0] === PAIRING_ML_KEM_KEY_TAG);
-  const encodedKey = keyTags[0]?.[1];
-  if (keyTags.length !== 1 || keyTags[0]?.length !== 2 || typeof encodedKey !== "string") {
-    throw new Error("Nostr pairing requires exactly one signed ML-KEM public key tag");
-  }
-  return decodeMlKem768PublicKey(encodedKey);
-}
-
-/**
- * Send an encrypted DM to a pubkey
- */
-async function sendEncryptedDm(
-  pool: SimplePool,
-  sk: Uint8Array,
-  fromPubkey: string,
-  senderMlKemPublicKey: string,
-  peerMlKemPublicKeys: ReadonlyMap<string, Uint8Array>,
-  toPubkey: string,
-  text: string,
-  relays: string[],
-  metrics: NostrMetrics,
-  circuitBreakers: Map<string, CircuitBreaker>,
-  healthTracker: RelayHealthTracker,
-  sizeLimits: Pick<
-    ReturnType<typeof createDirectDmPreCryptoGuardPolicy>,
-    "maxPlaintextBytes" | "maxCiphertextBytes"
-  >,
-  onError?: (error: Error, context: string) => void,
-  replyToEventId?: string,
-  pairingRecipientKey?: Uint8Array,
-): Promise<string> {
-  const recipientMlKemPublicKey = peerMlKemPublicKeys.get(toPubkey) ?? pairingRecipientKey;
-  if (!recipientMlKemPublicKey) {
-    throw new Error(`No pinned ML-KEM-768 public key for Nostr peer ${toPubkey}`);
-  }
-  const plaintextBytes = Buffer.byteLength(text, "utf8");
-  if (plaintextBytes > sizeLimits.maxPlaintextBytes) {
-    throw new Error(
-      `Nostr plaintext is ${plaintextBytes} bytes, exceeding the ${sizeLimits.maxPlaintextBytes}-byte receive limit`,
-    );
-  }
-  const classicalConversationKey = nip44.v2.utils.getConversationKey(sk, toPubkey);
-  let ciphertext: string;
-  try {
-    ciphertext = encryptOpenClawPqcDmV1({
-      classicalConversationKey,
-      recipientMlKemPublicKey,
-      senderPubkey: fromPubkey,
-      recipientPubkey: toPubkey,
-      plaintext: text,
-    });
-  } finally {
-    classicalConversationKey.fill(0);
-  }
-  const ciphertextBytes = Buffer.byteLength(ciphertext, "utf8");
-  if (ciphertextBytes > sizeLimits.maxCiphertextBytes) {
-    throw new Error(
-      `Nostr ciphertext is ${ciphertextBytes} bytes, exceeding the ${sizeLimits.maxCiphertextBytes}-byte receive limit`,
-    );
-  }
-  const tags = [
-    ["p", toPubkey],
-    [PAIRING_ML_KEM_KEY_TAG, senderMlKemPublicKey],
-  ];
-  if (replyToEventId) {
-    tags.push(["e", replyToEventId]);
-  }
-  const reply = finalizeEvent(
-    {
-      kind: OPENCLAW_PQC_DM_EVENT_KIND,
-      content: ciphertext,
-      tags,
-      created_at: Math.floor(Date.now() / 1000),
-    },
-    sk,
-  );
-
-  // Sort relays by health score (best first)
-  const sortedRelays = healthTracker.getSortedRelays(relays);
-
-  // Try relays in order of health, respecting circuit breakers
-  let lastError: Error | undefined;
-  for (const relay of sortedRelays) {
-    const cb = circuitBreakers.get(relay);
-
-    // Skip if circuit breaker is open
-    if (cb && !cb.canAttempt()) {
-      continue;
-    }
-
-    const startTime = Date.now();
-    try {
-      await publishNostrEventToRelay(pool, relay, reply);
-      const latency = Date.now() - startTime;
-
-      // Record success
-      cb?.recordSuccess();
-      healthTracker.recordSuccess(relay, latency);
-
-      return reply.id;
-    } catch (err) {
-      lastError = err instanceof Error ? err : new Error(String(err));
-      const latency = Date.now() - startTime;
-
-      // Record failure
-      cb?.recordFailure();
-      healthTracker.recordFailure(relay);
-      metrics.emit("relay.error", 1, { relay, latency });
-
-      onError?.(lastError, `publish to ${relay}`);
-    }
-  }
-
-  throw new Error(`Failed to publish to any relay: ${lastError?.message}`);
-}
-
-/* oxlint-disable max-lines -- TODO: split this grandfathered oversized transport module. */
