@@ -4,6 +4,7 @@
 // prebuilt package artifact with dist inventory, not a source checkout.
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
@@ -164,7 +165,14 @@ process.stdout.write(JSON.stringify(resolutions));`,
   }
 }
 
-function collectBundledPackageRuntimeErrors({ name, entries, files, packageRoot, readText }) {
+function collectBundledPackageRuntimeErrors({
+  name,
+  entries,
+  files,
+  packageRoot,
+  readText,
+  rootDependencies,
+}) {
   const errors = [];
   const packagePrefix = `node_modules/${name}/`;
   const manifestPath = `${packagePrefix}package.json`;
@@ -181,6 +189,33 @@ function collectBundledPackageRuntimeErrors({ name, entries, files, packageRoot,
   }
   if (bundledPackageJson.name !== name) {
     errors.push(`bundled ${name} package.json must name ${name}`);
+  }
+  const privateUndiciVersion = bundledPackageJson.dependencies?.undici;
+  if (name === "@openclaw/ai" && privateUndiciVersion !== rootDependencies?.undici) {
+    const nestedManifest = `${packagePrefix}node_modules/undici/package.json`;
+    if (typeof privateUndiciVersion !== "string" || !entries.has(nestedManifest)) {
+      errors.push(`bundled ${name} must include its private undici package`);
+    } else {
+      try {
+        const nestedPackageJson = JSON.parse(readText(nestedManifest));
+        if (
+          nestedPackageJson.name !== "undici" ||
+          nestedPackageJson.version !== privateUndiciVersion
+        ) {
+          errors.push(`bundled ${name} private undici version must be ${privateUndiciVersion}`);
+        }
+        const resolved = createRequire(
+          path.join(packageRoot, packagePrefix, "dist/providers.mjs"),
+        ).resolve("undici/package.json");
+        if (fs.realpathSync(resolved) !== fs.realpathSync(path.join(packageRoot, nestedManifest))) {
+          errors.push(`bundled ${name} must resolve its private undici package`);
+        }
+      } catch (error) {
+        errors.push(
+          `bundled ${name} private undici is not resolvable: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
   }
   const packageExports =
     bundledPackageJson.exports &&
@@ -266,6 +301,7 @@ function collectRequiredBundledWorkspaceDependencyErrors(
         files,
         packageRoot,
         readText,
+        rootDependencies: dependencies,
       }),
     );
   }

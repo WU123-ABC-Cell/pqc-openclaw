@@ -532,6 +532,83 @@ describe("package-openclaw-for-docker", () => {
     }
   });
 
+  it("keeps the AI runtime's pinned Undici separate from the root version", async () => {
+    const sourceDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-docker-ai-undici-source-"));
+    const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-docker-ai-undici-output-"));
+    const rootPackageJsonPath = path.join(sourceDir, "package.json");
+    const rootPackageJson = JSON.stringify({
+      dependencies: { "@openclaw/ai": "workspace:*", "dep-a": "1.2.3", undici: "8.10.2" },
+      name: "openclaw",
+      version: "2026.7.2",
+    });
+    const aiWorkspacePath = path.join(sourceDir, "packages", "ai");
+    const installedUndiciPath = path.join(aiWorkspacePath, "node_modules", "undici");
+    const stagedAiPath = path.join(sourceDir, "node_modules", "@openclaw", "ai");
+    fs.mkdirSync(installedUndiciPath, { recursive: true });
+    fs.mkdirSync(stagedAiPath, { recursive: true });
+    fs.writeFileSync(path.join(aiWorkspacePath, "package.json"), "{}\n");
+    fs.writeFileSync(
+      path.join(installedUndiciPath, "package.json"),
+      JSON.stringify({ name: "undici", version: "7.29.1" }),
+    );
+    fs.writeFileSync(path.join(installedUndiciPath, "index.js"), "module.exports = {};\n");
+    fs.writeFileSync(path.join(stagedAiPath, "original-marker"), "workspace package");
+    fs.writeFileSync(rootPackageJsonPath, rootPackageJson);
+
+    try {
+      const cleanup = await prepareBundledAiRuntimePackage(
+        sourceDir,
+        outputDir,
+        async () => {
+          fs.writeFileSync(path.join(outputDir, "openclaw-ai-2026.7.2.tgz"), "ai package");
+          return "";
+        },
+        {
+          extractAiRuntime: async (_tarballPath: string, destination: string) => {
+            fs.writeFileSync(
+              path.join(destination, "package.json"),
+              JSON.stringify({
+                dependencies: { "dep-a": "1.2.3", undici: "7.29.1" },
+                name: "@openclaw/ai",
+                version: "2026.7.2",
+              }),
+            );
+          },
+        },
+      );
+
+      const stagedManifest = JSON.parse(
+        fs.readFileSync(path.join(stagedAiPath, "package.json"), "utf8"),
+      ) as {
+        dependencies: Record<string, string>;
+        bundleDependencies: string[];
+      };
+      expect(stagedManifest.dependencies).toEqual({ undici: "7.29.1" });
+      expect(stagedManifest.bundleDependencies).toEqual(["undici"]);
+      expect(
+        JSON.parse(
+          fs.readFileSync(
+            path.join(stagedAiPath, "node_modules", "undici", "package.json"),
+            "utf8",
+          ),
+        ),
+      ).toMatchObject({
+        name: "undici",
+        version: "7.29.1",
+      });
+      expect(fs.readFileSync(rootPackageJsonPath, "utf8")).toContain('"undici": "8.10.2"');
+
+      await cleanup();
+      expect(fs.readFileSync(rootPackageJsonPath, "utf8")).toBe(rootPackageJson);
+      expect(fs.readFileSync(path.join(stagedAiPath, "original-marker"), "utf8")).toBe(
+        "workspace package",
+      );
+    } finally {
+      fs.rmSync(sourceDir, { recursive: true, force: true });
+      fs.rmSync(outputDir, { recursive: true, force: true });
+    }
+  });
+
   it("leaves pre-AI-workspace package sources unchanged", async () => {
     const sourceDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-docker-legacy-source-"));
     const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-docker-legacy-output-"));

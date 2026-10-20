@@ -26,6 +26,7 @@ const DEFAULT_CAPTURED_STDOUT_MAX_BYTES = 1024 * 1024;
 const MAX_TIMER_TIMEOUT_MS = 2_147_000_000;
 const AI_RUNTIME_PACKAGE = "@openclaw/ai";
 const AI_RUNTIME_BACKUP_DIR = ".openclaw-ai-package-backup";
+const AI_PRIVATE_RUNTIME_DEPENDENCY = "undici";
 const ACTIVE_CHILD_KILLERS = new Set();
 const PACKAGE_BUILD_PLUGIN_SELECTION_ENV_NAMES = [
   "OPENCLAW_EXTENSIONS",
@@ -647,16 +648,41 @@ export async function prepareBundledAiRuntimePackage(
     if (typeof stagedPackageJson.version !== "string" || !stagedPackageJson.version) {
       throw new Error("packed @openclaw/ai package must declare a version");
     }
+    const privateDependencies = {};
     for (const [name, version] of Object.entries(stagedPackageJson.dependencies ?? {})) {
-      if (packageJson.dependencies[name] !== version) {
+      if (packageJson.dependencies[name] === version) {
+        continue;
+      }
+      if (name !== AI_PRIVATE_RUNTIME_DEPENDENCY) {
         throw new Error(
           `root package.json must declare ${name}@${version} to bundle @openclaw/ai without duplicate dependencies`,
         );
       }
+      const installedPath = path.join(sourceDir, "packages", "ai", "node_modules", name);
+      const installedPackageJson = JSON.parse(
+        await fs.readFile(path.join(installedPath, "package.json"), "utf8"),
+      );
+      if (installedPackageJson.name !== name || installedPackageJson.version !== version) {
+        throw new Error(
+          `installed @openclaw/ai ${name} must match its exact dependency ${version}`,
+        );
+      }
+      await fs.mkdir(path.join(aiRuntimePath, "node_modules"), { recursive: true });
+      await fs.cp(installedPath, path.join(aiRuntimePath, "node_modules", name), {
+        recursive: true,
+        dereference: true,
+      });
+      privateDependencies[name] = version;
     }
-    // Root owns these exact dependencies. Removing them from the staged copy keeps npm from
-    // recursively bundling duplicate packages alongside the one private workspace runtime.
-    delete stagedPackageJson.dependencies;
+    // Root owns shared dependencies. Keep the one AI-private runtime dependency nested so its
+    // WebSocket path cannot silently resolve the root's different dispatcher implementation.
+    if (Object.keys(privateDependencies).length > 0) {
+      stagedPackageJson.dependencies = privateDependencies;
+      stagedPackageJson.bundleDependencies = Object.keys(privateDependencies);
+    } else {
+      delete stagedPackageJson.dependencies;
+      delete stagedPackageJson.bundleDependencies;
+    }
     await fs.writeFile(stagedPackageJsonPath, `${JSON.stringify(stagedPackageJson, null, 2)}\n`);
 
     packageJson.dependencies[AI_RUNTIME_PACKAGE] = stagedPackageJson.version;

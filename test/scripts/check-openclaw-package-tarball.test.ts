@@ -920,6 +920,67 @@ describe("check-openclaw-package-tarball", () => {
     );
   });
 
+  it.each([
+    {
+      label: "missing",
+      nestedManifest: undefined,
+      expected: "must include its private undici package",
+    },
+    {
+      label: "wrong-version",
+      nestedManifest: { name: "undici", version: "8.10.2" },
+      expected: "private undici version must be 7.29.1",
+    },
+    { label: "correct", nestedManifest: { name: "undici", version: "7.29.1" }, expected: "" },
+  ])(
+    "checks the AI-private Undici in a bundled package ($label)",
+    ({ nestedManifest, expected }) => {
+      withTarball(
+        ["dist/index.js"],
+        {
+          "dist/index.js": "export {};\n",
+          "node_modules/@openclaw/ai/package.json": JSON.stringify({
+            ...JSON.parse(AI_RUNTIME_PACKAGE_JSON),
+            dependencies: { undici: "7.29.1" },
+            bundleDependencies: ["undici"],
+          }),
+          "node_modules/@openclaw/ai/dist/index.mjs": "export {};\n",
+          "node_modules/@openclaw/ai/dist/providers.mjs": "export {};\n",
+          "node_modules/@openclaw/ai/dist/transports.mjs": "export {};\n",
+          "node_modules/@openclaw/ai/dist/internal/runtime.mjs": "export {};\n",
+          ...(nestedManifest
+            ? {
+                "node_modules/@openclaw/ai/node_modules/undici/package.json":
+                  JSON.stringify(nestedManifest),
+              }
+            : {}),
+        },
+        (tarball) => {
+          const result = spawnSync(
+            "node",
+            [CHECK_SCRIPT, "--require-bundled-workspace-deps", tarball],
+            {
+              encoding: "utf8",
+            },
+          );
+          if (expected) {
+            expect(result.status).not.toBe(0);
+            expect(result.stderr).toContain(expected);
+          } else {
+            expect(result.status, result.stderr).toBe(0);
+          }
+        },
+        "2026.7.2",
+        {
+          packageJson: {
+            dependencies: { "@openclaw/ai": "2026.6.11", undici: "8.10.2" },
+            bundleDependencies: ["@openclaw/ai"],
+          },
+        },
+      );
+    },
+  );
+
   it("accepts frozen AI runtimes that predate an optional exported subpath", () => {
     withTarball(
       ["dist/index.js"],
