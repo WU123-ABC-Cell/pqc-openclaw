@@ -13,9 +13,10 @@
 //   3. Node 22 or Node 24 without the addon (path 3) — defensive no-op
 //      with a single mlock-unavailable warn.
 
-import { describe, expect, it, beforeEach, vi } from "vitest";
+import { describe, expect, it, beforeEach } from "vitest";
+import type { LogLevel } from "../logging/levels.js";
 import { setPqcEmit, PQC_EVENT } from "../logging/pqc-log.js";
-import type { LogLevel, PqcLogPayload } from "../logging/pqc-log.js";
+import type { PqcLogPayload } from "../logging/pqc-log.js";
 import {
   isMlockActive,
   mlockKey,
@@ -100,11 +101,11 @@ describe("mlock-helper (defensive path on Node 22)", () => {
     if (!isMlockActive()) {
       const unavail = captured.filter((e) => e.event === PQC_EVENT.MlockUnavailable);
       expect(unavail.length).toBe(1);
-      expect(unavail[0].level).toBe("warn");
-      expect(unavail[0].payload.status).toBe("skipped");
+      expect(unavail[0]?.level).toBe("warn");
+      expect(unavail[0]?.payload.status).toBe("skipped");
       // 9/5 follow-up: the unavailable message should now also
       // mention the N-API fallback as a mitigation.
-      expect(unavail[0].payload.detail).toMatch(/N-API|native/);
+      expect(unavail[0]?.payload.detail).toMatch(/N-API|native/);
     }
   });
 
@@ -117,13 +118,13 @@ describe("mlock-helper (defensive path on Node 22)", () => {
       // [PQC] log is not flooded on every wrap/unwrap call.
       const ok = captured.filter((e) => e.event === PQC_EVENT.Mlock && e.payload.status === "ok");
       expect(ok.length).toBe(1);
-      expect(ok[0].level).toBe("debug");
-      expect(ok[0].payload.byteLength).toBe(32);
+      expect(ok[0]?.level).toBe("debug");
+      expect(ok[0]?.payload.byteLength).toBe(32);
       // 9/5 follow-up: provider now includes the backend tag so
       // operators can tell at a glance which path won.
-      expect(ok[0].payload.provider).toBe(`test:ok (backend=${backend})`);
+      expect(ok[0]?.payload.provider).toBe(`test:ok (backend=${backend})`);
       // Production log should include platform/arch context for debug.
-      expect(ok[0].payload.detail).toMatch(/linux|darwin|win32/);
+      expect(ok[0]?.payload.detail).toMatch(/linux|darwin|win32/);
     } else {
       const ok = captured.filter((e) => e.event === PQC_EVENT.Mlock && e.payload.status === "ok");
       expect(ok.length).toBe(0);
@@ -144,14 +145,16 @@ describe("mlock-helper (defensive path on Node 22)", () => {
         (e) => e.event === PQC_EVENT.Mlock && e.payload.status === "refused",
       );
       expect(refused.length).toBe(1);
-      expect(refused[0].payload.byteLength).toBe(2 * 1024 * 1024);
-      expect(refused[0].payload.detail).toContain("refusing");
-      expect(refused[0].payload.detail).toContain("caller bug");
+      expect(refused[0]?.payload.byteLength).toBe(2 * 1024 * 1024);
+      expect(refused[0]?.payload.detail).toContain("refusing");
+      expect(refused[0]?.payload.detail).toContain("caller bug");
     }
   });
 
   it("oversize refusal is idempotent (warned once per process)", () => {
-    if (!isMlockActive()) return; // No-op on Node 22, nothing to test.
+    if (!isMlockActive()) {
+      return; // No-op on Node 22, nothing to test.
+    }
     const huge1 = Buffer.alloc(2 * 1024 * 1024, 0xaa);
     const huge2 = Buffer.alloc(3 * 1024 * 1024, 0xbb);
     mlockKey(huge1, "test:huge1");
@@ -225,12 +228,14 @@ describe("mlock-helper N-API native addon (M6.B v2 path 2)", () => {
     mlockKey(buf, "test:native-mlock");
     const ok = captured.filter((e) => e.event === PQC_EVENT.Mlock && e.payload.status === "ok");
     expect(ok.length).toBe(1);
-    expect(ok[0].payload.provider).toBe("test:native-mlock (backend=native)");
-    expect(ok[0].payload.byteLength).toBe(32);
+    expect(ok[0]?.payload.provider).toBe("test:native-mlock (backend=native)");
+    expect(ok[0]?.payload.byteLength).toBe(32);
   });
 
   it("native munlock is a no-op on the helper side (success path)", () => {
-    if (mlockBackend() !== "native") return;
+    if (mlockBackend() !== "native") {
+      return;
+    }
     const buf = Buffer.alloc(32, 0x66);
     mlockKey(buf, "test:native-munlock");
     expect(() => munlockKey(buf, "test:native-munlock")).not.toThrow();
@@ -240,7 +245,9 @@ describe("mlock-helper N-API native addon (M6.B v2 path 2)", () => {
     // This guards the mlockKey early-return for empty input — the
     // native addon would also be a no-op (returns 0 for len==0),
     // but the helper should never reach it.
-    if (mlockBackend() !== "native") return;
+    if (mlockBackend() !== "native") {
+      return;
+    }
     const buf = Buffer.alloc(0);
     expect(() => mlockKey(buf, "test:native-empty")).not.toThrow();
     const ok = captured.filter((e) => e.event === PQC_EVENT.Mlock && e.payload.status === "ok");

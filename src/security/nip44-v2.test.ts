@@ -49,7 +49,7 @@ describe("OpenClaw PQC DM v1", () => {
 
   function mutateRaw(envelope: string, offset: number): string {
     const raw = Buffer.from(envelope.slice(OPENCLAW_PQC_DM_PREFIX.length), "base64url");
-    raw[offset] ^= 1;
+    raw.writeUInt8(raw.readUInt8(offset) ^ 1, offset);
     return `${OPENCLAW_PQC_DM_PREFIX}${raw.toString("base64url")}`;
   }
 

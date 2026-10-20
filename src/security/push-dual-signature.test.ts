@@ -13,10 +13,7 @@ import {
   deriveCanonicalEd25519PrivateKeyRaw,
   deriveCanonicalEd25519PublicKeyRaw,
 } from "../infra/ed25519-signature.js";
-import {
-  signPushPayloadDual,
-  verifyPushPayloadDual,
-} from "./push-dual-signature.js";
+import { signPushPayloadDual, verifyPushPayloadDual } from "./push-dual-signature.js";
 
 const tracked: Uint8Array[] = [];
 
@@ -24,8 +21,8 @@ function newEd25519KeyPair(): { publicKey: Uint8Array; secretKey: Uint8Array } {
   // Same primitive path as the rest of the fork (device-identity
   // and ed25519-signature use node:crypto Ed25519 keys, not @noble).
   const { publicKey, privateKey } = generateKeyPairSync("ed25519");
-  const publicKeyPem = publicKey.export({ type: "spki", format: "pem" }).toString();
-  const privateKeyPem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+  const publicKeyPem = publicKey.export({ type: "spki", format: "pem" });
+  const privateKeyPem = privateKey.export({ type: "pkcs8", format: "pem" });
   const publicKeyRaw = deriveCanonicalEd25519PublicKeyRaw(publicKeyPem);
   const privateKeyRaw = deriveCanonicalEd25519PrivateKeyRaw(privateKeyPem);
   tracked.push(publicKeyRaw, privateKeyRaw);
@@ -39,11 +36,15 @@ function newMlDsa65KeyPair(): { publicKey: Uint8Array; secretKey: Uint8Array } {
 }
 
 beforeEach(() => {
-  while (tracked.length > 0) tracked.pop();
+  while (tracked.length > 0) {
+    tracked.pop();
+  }
 });
 
 afterEach(() => {
-  while (tracked.length > 0) tracked.pop();
+  while (tracked.length > 0) {
+    tracked.pop();
+  }
 });
 
 describe("signPushPayloadDual + verifyPushPayloadDual (whitepaper 1.3)", () => {
@@ -85,8 +86,11 @@ describe("signPushPayloadDual + verifyPushPayloadDual (whitepaper 1.3)", () => {
       keyIdMldsa65: "ml",
     });
     const tamperedSig = Buffer.from(signed.envelope.ed25519_sig, "base64url");
-    tamperedSig[0] ^= 0x80;
-    const tampered = { ...signed.envelope, ed25519_sig: Buffer.from(tamperedSig).toString("base64url") };
+    tamperedSig.writeUInt8(tamperedSig.readUInt8(0) ^ 0x80, 0);
+    const tampered = {
+      ...signed.envelope,
+      ed25519_sig: Buffer.from(tamperedSig).toString("base64url"),
+    };
     expect(() =>
       verifyPushPayloadDual({
         payload: signed.payload,
@@ -108,8 +112,11 @@ describe("signPushPayloadDual + verifyPushPayloadDual (whitepaper 1.3)", () => {
       keyIdMldsa65: "ml",
     });
     const tamperedSig = Buffer.from(signed.envelope.mldsa65_sig, "base64url");
-    tamperedSig[10] ^= 0x01;
-    const tampered = { ...signed.envelope, mldsa65_sig: Buffer.from(tamperedSig).toString("base64url") };
+    tamperedSig.writeUInt8(tamperedSig.readUInt8(10) ^ 0x01, 10);
+    const tampered = {
+      ...signed.envelope,
+      mldsa65_sig: Buffer.from(tamperedSig).toString("base64url"),
+    };
     expect(() =>
       verifyPushPayloadDual({
         payload: signed.payload,
@@ -132,8 +139,8 @@ describe("signPushPayloadDual + verifyPushPayloadDual (whitepaper 1.3)", () => {
     });
     // Mutate one byte of the payload bytes. Both signatures must
     // catch the change.
-    const tamperedPayload = new Uint8Array(signed.payload);
-    tamperedPayload[5] ^= 0x01;
+    const tamperedPayload = Buffer.from(signed.payload);
+    tamperedPayload.writeUInt8(tamperedPayload.readUInt8(5) ^ 0x01, 5);
     expect(() =>
       verifyPushPayloadDual({
         payload: tamperedPayload,
@@ -236,7 +243,10 @@ describe("signPushPayloadDual + verifyPushPayloadDual (whitepaper 1.3)", () => {
       keyIdEd25519: "ed",
       keyIdMldsa65: "ml",
     });
-    const tampered = { ...signed.envelope, algorithms: ["ed25519"] as unknown as ["ed25519", "ml-dsa-65"] };
+    const tampered = {
+      ...signed.envelope,
+      algorithms: ["ed25519"] as unknown as ["ed25519", "ml-dsa-65"],
+    };
     expect(() =>
       verifyPushPayloadDual({
         payload: signed.payload,

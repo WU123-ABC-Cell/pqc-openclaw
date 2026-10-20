@@ -72,7 +72,7 @@ describe("ML-DSA-65 KAT (FIPS 204 §4, parameter set 6)", () => {
     const sig = signMlDsa65Payload(kp.secretKey, "hello pqc");
     // Flip a bit in the middle of the signature.
     const sigBytes = Buffer.from(sig, "base64url");
-    sigBytes[1500] ^= 0x01;
+    sigBytes.writeUInt8(sigBytes.readUInt8(1500) ^ 0x01, 1500);
     const tampered = sigBytes.toString("base64url");
     expect(
       verifyMlDsa65Signature({

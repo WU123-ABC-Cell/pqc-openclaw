@@ -6,6 +6,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import type { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { requireNodeSqlite } from "../infra/node-sqlite.js";
 import { ensureAdditiveStateColumns } from "./openclaw-state-db-schema-additive.js";
@@ -21,7 +22,9 @@ function createTempStateDir(): string {
 function removeTempRoots(): void {
   while (tempRoots.length > 0) {
     const dir = tempRoots.pop();
-    if (!dir) continue;
+    if (!dir) {
+      continue;
+    }
     try {
       fs.rmSync(dir, { recursive: true, force: true });
     } catch {
@@ -32,13 +35,11 @@ function removeTempRoots(): void {
 
 type ColumnInfo = { name: string; notnull: number; pk: number; type: string };
 
-function readColumns(database: ReturnType<typeof requireNodeSqlite>): ColumnInfo[] {
-  return database
-    .prepare("PRAGMA table_info(device_identities)")
-    .all() as ColumnInfo[];
+function readColumns(database: DatabaseSync): ColumnInfo[] {
+  return database.prepare("PRAGMA table_info(device_identities)").all() as ColumnInfo[];
 }
 
-function createLegacyDeviceIdentitiesTable(database: ReturnType<typeof requireNodeSqlite>): void {
+function createLegacyDeviceIdentitiesTable(database: DatabaseSync): void {
   // Mirrors the pre-M3 shipped schema. The migration should only ADD COLUMN
   // the four new fields; it must not drop or rename anything that exists.
   database.exec(`
@@ -150,11 +151,11 @@ describe("device_identities PQC columns (whitepaper 2.1.3 + 2.2.1)", () => {
     ensureAdditiveStateColumns(database);
     const columnsAfterFirstPass = readColumns(database)
       .map((row) => row.name)
-      .sort();
+      .toSorted();
     ensureAdditiveStateColumns(database);
     const columnsAfterSecondPass = readColumns(database)
       .map((row) => row.name)
-      .sort();
+      .toSorted();
 
     expect(columnsAfterFirstPass).toEqual(
       expect.arrayContaining([
