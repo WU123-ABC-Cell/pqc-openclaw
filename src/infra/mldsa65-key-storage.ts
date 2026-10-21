@@ -29,14 +29,9 @@ export const MLDSA65_MAX_MESSAGE_BYTES = 1 << 20; // 1 MiB sanity cap, generous 
 const PUBLIC_KEY_PREFIX = "MLDSA65-PUBLIC-KEY:";
 const SECRET_KEY_PREFIX = "MLDSA65-SECRET-KEY:";
 
-export type MlDsa65KeyPair = {
+type MlDsa65KeyPair = {
   publicKey: Uint8Array;
   secretKey: Uint8Array;
-};
-
-export type MlDsa65SerializedKeyPair = {
-  publicKey: string; // "MLDSA65-PUBLIC-KEY:<base64url raw bytes>"
-  secretKey: string; // "MLDSA65-SECRET-KEY:<base64url raw bytes>"
 };
 
 function asBuffer(bytes: Uint8Array): Buffer {
@@ -115,20 +110,6 @@ export function decodeMlDsa65SecretKey(encoded: string): Uint8Array {
   return decodeKey(SECRET_KEY_PREFIX, encoded, MLDSA65_SECRET_KEY_LENGTH);
 }
 
-export function serializeMlDsa65KeyPair(kp: MlDsa65KeyPair): MlDsa65SerializedKeyPair {
-  return {
-    publicKey: encodeMlDsa65PublicKey(kp.publicKey),
-    secretKey: encodeMlDsa65SecretKey(kp.secretKey),
-  };
-}
-
-export function deserializeMlDsa65KeyPair(serialized: MlDsa65SerializedKeyPair): MlDsa65KeyPair {
-  return {
-    publicKey: decodeMlDsa65PublicKey(serialized.publicKey),
-    secretKey: decodeMlDsa65SecretKey(serialized.secretKey),
-  };
-}
-
 export function isMlDsa65PublicKey(encoded: string): boolean {
   return typeof encoded === "string" && encoded.startsWith(PUBLIC_KEY_PREFIX);
 }
@@ -145,7 +126,7 @@ export function fingerprintMlDsa65PublicKey(publicKey: Uint8Array): string {
   return crypto.createHash("sha256").update(Buffer.from(publicKey)).digest("hex");
 }
 
-export type SignMlDsa65Options = {
+type SignMlDsa65Options = {
   /**
    * FIPS 204 §5.3 allows hedged signing (randomized) for side-channel resistance.
    * @noble defaults to hedged; pass `deterministic: true` (alias of `extraEntropy: false`)
@@ -178,7 +159,7 @@ function buildSignOpts(options: SignMlDsa65Options): { extraEntropy?: Uint8Array
 }
 
 /** Sign raw `message` bytes. Returns raw 3309-byte signature. */
-export function signMlDsa65(
+function signMlDsa65(
   message: Uint8Array,
   secretKey: Uint8Array,
   options: SignMlDsa65Options = {},
@@ -196,11 +177,7 @@ export function signMlDsa65(
 }
 
 /** Verify a raw 3309-byte signature. Returns false on any decode/verify failure. */
-export function verifyMlDsa65(
-  signature: Uint8Array,
-  message: Uint8Array,
-  publicKey: Uint8Array,
-): boolean {
+function verifyMlDsa65(signature: Uint8Array, message: Uint8Array, publicKey: Uint8Array): boolean {
   try {
     if (signature.length !== MLDSA65_SIGNATURE_LENGTH) {
       return false;

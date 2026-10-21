@@ -32,10 +32,10 @@ import { assertPrivateWindowsWrapKeyFile } from "./windows-wrap-key-acl.js";
 /** Stable id of a keyring entry. The wrap envelope records this id so
  *  a rotation can re-encrypt the payload with the new active key
  *  without losing the public side. */
-export type KeyId = string;
+type KeyId = string;
 
 /** 32-byte AES-256 key plus the id it was looked up under. */
-export interface ActiveWrappingKey {
+interface ActiveWrappingKey {
   key: Buffer;
   keyId: KeyId;
 }
@@ -400,7 +400,7 @@ export function preflightWrappingKeyProviderReadOnly(
  *  default keyring. Each entry's `kind` selects an implementation;
  *  the file and env variants need no extra setup. The OS variant
  *  needs `@napi-rs/keyring` and lives in `os-keyring.ts`. */
-export type KeyringConfig =
+type KeyringConfig =
   | { kind: "file"; keyPath: string; keyId?: KeyId }
   | { kind: "env"; envName: string; keyId?: KeyId }
   | { kind: "os"; service: string; account: string; keyId?: KeyId }
@@ -425,33 +425,6 @@ export function createKeyring(config: KeyringConfig): KeyringProvider {
     }
   }
 }
-
-/** Convenience for tests + a future "default config" path: return the
- *  set of stable key ids the keyring is willing to resolve. The
- *  `composite` variant returns the union of its providers' ids when
- *  each provider exposes a known static id (File and Env do, OS does
- *  not — its id is the service+account name and is opaque to us). */
-export function knownKeyIds(provider: KeyringProvider): KeyId[] {
-  if (provider instanceof FileKeyring) {
-    return [provider.getKeyPath()];
-  }
-  if (provider instanceof EnvKeyring) {
-    return [provider["envName" as keyof EnvKeyring] as unknown as KeyId];
-  }
-  if (provider instanceof CompositeKeyring) {
-    // The composite itself doesn't carry ids; recurse on its providers.
-    const out: KeyId[] = [];
-    for (const inner of (provider as unknown as { providers: KeyringProvider[] }).providers) {
-      out.push(...knownKeyIds(inner));
-    }
-    return out;
-  }
-  return [];
-}
-
-/** Re-export a couple of types the runtime (M5) already declared
- *  locally so consumers have a single import surface. */
-export type { ActiveWrappingKey as KeyringActiveKey };
 
 // Re-export the OS keyring stub so the test file (and the future
 // M6.B real implementation) can import the class from one place.
@@ -577,7 +550,7 @@ export function resetDefaultKeyringCache(): void {
 /** M6.B v2: release all mlocked buffers in the default keyring cache.
  *  Called on process shutdown by the hook installed below. Idempotent
  *  and safe to call multiple times. */
-export function releaseDefaultKeyring(): void {
+function releaseDefaultKeyring(): void {
   const keyring = cachedDefaultKeyring;
   if (!keyring) {
     return;

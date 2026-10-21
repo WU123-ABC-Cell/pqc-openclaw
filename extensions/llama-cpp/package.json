@@ -11,7 +11,8 @@
     "node-llama-cpp": "3.19.1"
   },
   "devDependencies": {
-    "@openclaw/plugin-sdk": "workspace:*"
+    "@openclaw/plugin-sdk": "workspace:*",
+    "simple-git": "4.0.2"
   },
   "openclaw": {
     "extensions": [

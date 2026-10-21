@@ -54,7 +54,7 @@ function b64urlDecode(s: string): Uint8Array {
 }
 
 /** Public input for `signPushPayloadDual`. */
-export interface PushDualSignInput {
+interface PushDualSignInput {
   /** Plain JSON payload. Will be canonicalised via `JSON.stringify`. */
   payload: unknown;
   /** 32-byte Ed25519 secret key (raw, the same shape the Ed25519
@@ -72,7 +72,7 @@ export interface PushDualSignInput {
 }
 
 /** The dual-signature envelope. */
-export interface PushDualSignature {
+interface PushDualSignature {
   algorithms: ["ed25519", "ml-dsa-65"];
   ed25519_sig: string;
   mldsa65_sig: string;
@@ -108,7 +108,10 @@ export function signPushPayloadDual(input: PushDualSignInput): {
   // module uses, so dual-signed pushes interop with the same byte
   // string as dual-signed device payloads.
   const ed25519SecretPem = ed25519PrivateKeyPemFromRaw(Buffer.from(input.ed25519SecretKey));
-  const ed25519SigB64Url = signEd25519Payload(ed25519SecretPem, Buffer.from(payload).toString("utf8"));
+  const ed25519SigB64Url = signEd25519Payload(
+    ed25519SecretPem,
+    Buffer.from(payload).toString("utf8"),
+  );
   const ed25519Sig = new Uint8Array(Buffer.from(ed25519SigB64Url, "base64url"));
 
   // ML-DSA-65 via @noble/post-quantum (FIPS 204).
@@ -127,7 +130,7 @@ export function signPushPayloadDual(input: PushDualSignInput): {
 }
 
 /** Public input for `verifyPushPayloadDual`. */
-export interface PushDualVerifyInput {
+interface PushDualVerifyInput {
   /** Canonical payload bytes (the exact bytes that were signed). */
   payload: Uint8Array;
   /** 32-byte Ed25519 public key. */

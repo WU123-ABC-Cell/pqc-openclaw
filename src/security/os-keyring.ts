@@ -16,12 +16,12 @@
 import { createRequire } from "node:module";
 import { munlockKey, protectKey } from "./mlock-helper.js";
 
-export type ActiveWrappingKey = {
+type ActiveWrappingKey = {
   key: Buffer;
   keyId: string;
 };
 
-export interface KeyringProvider {
+interface KeyringProvider {
   getActiveKey(): ActiveWrappingKey;
   getKeyById(keyId: string): Buffer | null;
 }

@@ -342,6 +342,9 @@ const ignoredTestSupportFiles = [
   // Legacy test-only owners whose filenames predate the test-support convention.
   "src/plugins/contracts/host-hook-fixture.ts",
   "src/plugins/contracts/tts-contract-suites.ts",
+  // The dual-signature push helper is a tested, unshipped candidate; no production caller exists.
+  // The full-tree companion scan still audits its real test imports and exports.
+  "src/security/push-dual-signature.ts",
 ] as const;
 
 const config = {
@@ -400,6 +403,23 @@ const config = {
     // asserted by the focused Beam mirror tests; production wires only the service.
     "extensions/beam/src/mirror.ts": ["exports", "types"],
     "src/infra/heartbeat-wake.ts": ["exports"],
+    // These PQC seams are exercised by focused tests but are not production entrypoints.
+    // The full-tree companion audit must continue to reject exports with no test consumer.
+    "extensions/nostr/src/nostr-pqc-key-announcement.ts": ["exports"],
+    "src/infra/backup-volatile-stat-cache.ts": ["exports"],
+    "src/infra/device-identity-store.ts": ["exports"],
+    "src/infra/device-identity.ts": ["exports"],
+    "src/infra/ed25519-signature.ts": ["exports"],
+    "src/infra/mldsa65-key-storage.ts": ["exports"],
+    "src/logging/pqc-log.ts": ["exports", "types"],
+    "src/security/keyring-provider.ts": ["exports", "types"],
+    "src/security/mlock-helper.ts": ["exports"],
+    "src/security/nip44-v2.ts": ["exports"],
+    "src/security/secret-wrapping.ts": ["types"],
+    "src/security/windows-wrap-key-acl.ts": ["exports"],
+    // Import/export and rotation remain test-only candidates, not registered operator commands.
+    "src/security/wrap-key-cli.ts": ["exports"],
+    "src/security/wrap-key-rotation.ts": ["exports"],
   },
   workspaces: {
     ".": {
@@ -414,6 +434,8 @@ const config = {
         // Loaded via createRequire in src/agents/utils/syntax-highlight.ts because its
         // d.ts force-includes lib.dom; knip cannot see the dynamic require.
         "highlight.js",
+        // binding.gyp resolves the native addon headers through a Node command.
+        "node-addon-api",
         "playwright-core",
         "partial-json",
         // Optional runtime imports: the native Canvas bundle falls back without Markdown,

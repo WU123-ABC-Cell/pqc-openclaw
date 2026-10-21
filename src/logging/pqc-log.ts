@@ -35,7 +35,7 @@ export const PQC_EVENT = {
   MlockUnavailable: "mlock-unavailable",
 } as const;
 
-export type PqcEventId = (typeof PQC_EVENT)[keyof typeof PQC_EVENT];
+type PqcEventId = (typeof PQC_EVENT)[keyof typeof PQC_EVENT];
 
 /** Structured payload for a PQC log event. The shape is open —
  *  fields are merged into the log record as-is. Keys whose values

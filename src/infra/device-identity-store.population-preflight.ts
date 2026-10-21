@@ -19,7 +19,7 @@ import {
 } from "./device-identity-store.crypto.js";
 import { executeSqliteQuerySync, getNodeSqliteKysely } from "./kysely-sync.js";
 
-export type DeviceIdentityPopulationRow = {
+type DeviceIdentityPopulationRow = {
   identityKey: string;
   kind: "node-v2" | "node-v1" | "node-plaintext" | "apple-seed" | "unknown";
   status: "verified" | "needs-upgrade" | "needs-native-verification" | "blocked";

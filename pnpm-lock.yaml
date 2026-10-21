@@ -343,6 +343,9 @@ importers:
       node-gyp:
         specifier: ^13.0.2
         version: 13.0.2
+      nostr-tools:
+        specifier: 2.24.1
+        version: 2.24.1(typescript@7.0.2)
       oxfmt:
         specifier: 0.60.0
         version: 0.60.0
@@ -1149,6 +1152,9 @@ importers:
       '@openclaw/plugin-sdk':
         specifier: workspace:*
         version: link:../../packages/plugin-sdk
+      simple-git:
+        specifier: 4.0.2
+        version: 4.0.2(supports-color@10.2.2)
     optionalDependencies:
       node-llama-cpp:
         specifier: 3.19.1

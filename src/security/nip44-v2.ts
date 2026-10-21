@@ -12,7 +12,7 @@ import { sha256 } from "@noble/hashes/sha2.js";
 import { ml_kem768 } from "@noble/post-quantum/ml-kem.js";
 
 export const OPENCLAW_PQC_DM_PREFIX = "ocpqc1:";
-export const OPENCLAW_PQC_DM_VERSION = 1;
+const OPENCLAW_PQC_DM_VERSION = 1;
 export const OPENCLAW_PQC_DM_EVENT_KIND = 4444;
 export const ML_KEM_768_PUBLIC_KEY_BYTES = 1184;
 export const ML_KEM_768_SECRET_KEY_BYTES = 2400;
@@ -214,7 +214,7 @@ export function decodeMlKem768SecretKey(value: string): Uint8Array {
   return key;
 }
 
-export interface OpenClawPqcDmEncryptInput {
+interface OpenClawPqcDmEncryptInput {
   classicalConversationKey: Uint8Array;
   recipientMlKemPublicKey: Uint8Array;
   senderPubkey: string;
@@ -267,7 +267,7 @@ export function encryptOpenClawPqcDmV1(input: OpenClawPqcDmEncryptInput): string
   }
 }
 
-export interface OpenClawPqcDmDecryptInput {
+interface OpenClawPqcDmDecryptInput {
   classicalConversationKey: Uint8Array;
   recipientMlKemSecretKey: Uint8Array;
   senderPubkey: string;

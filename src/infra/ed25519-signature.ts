@@ -1,9 +1,4 @@
 import crypto from "node:crypto";
-import {
-  decodeMlDsa65SecretKey,
-  signMlDsa65Payload as signMlDsa65PayloadRaw,
-  verifyMlDsa65Signature as verifyMlDsa65SignatureRaw,
-} from "./mldsa65-key-storage.js";
 
 const ED25519_RAW_KEY_LENGTH = 32;
 const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
@@ -154,10 +149,6 @@ export function deriveEd25519PrivateKeyRaw(privateKeyPem: string): Buffer {
   });
 }
 
-export function publicKeyRawBase64UrlFromEd25519Pem(publicKeyPem: string): string {
-  return base64UrlEncode(deriveEd25519PublicKeyRaw(publicKeyPem));
-}
-
 export function normalizeEd25519PublicKeyBase64Url(publicKey: string): string | null {
   try {
     const raw = publicKey.includes("BEGIN")
@@ -189,18 +180,6 @@ function createEd25519PublicKey(publicKey: string): crypto.KeyObject {
   });
 }
 
-export function verifyEd25519Signature(params: {
-  publicKey: string;
-  payload: string;
-  signatureBase64Url: string;
-}): boolean {
-  return verifyEd25519SignatureBytes({
-    publicKey: params.publicKey,
-    payload: Buffer.from(params.payload, "utf8"),
-    signatureBase64Url: params.signatureBase64Url,
-  });
-}
-
 export function verifyEd25519SignatureBytes(params: {
   publicKey: string;
   payload: Buffer;
@@ -213,79 +192,4 @@ export function verifyEd25519SignatureBytes(params: {
   } catch {
     return false;
   }
-}
-
-// ---------------------------------------------------------------------------
-// PQC bridge: dual Ed25519 + ML-DSA-65 sign/verify.
-//
-// The fork's PQC device identity is ML-DSA-65 only. The dual-sign API below
-// exists for transitional interop with older Ed25519-only peers during a
-// cutover window. New code paths should sign with ML-DSA-65 only — these
-// helpers exist purely to make the cutover ergonomic.
-//
-// The signature types differ from the raw-bytes API:
-//   - Ed25519 helpers take SPKI/PKCS8 PEM (Node native crypto).
-//   - ML-DSA-65 helpers take raw 4032-byte secret bytes (from the
-//     MLDSA65-SECRET-KEY: prefixed string produced by mldsa65-key-storage).
-// ---------------------------------------------------------------------------
-
-export type DualDeviceSignatures = {
-  ed25519?: string; // base64url Ed25519 signature (86 chars)
-  mlDsa65?: string; // base64url ML-DSA-65 signature (4412 chars)
-};
-
-export type DualDeviceSignParams = {
-  ed25519PrivateKeyPem: string; // PKCS8 PEM
-  mldsaSecretKey: string | Uint8Array; // MLDSA65-SECRET-KEY:... b64url string OR raw bytes
-  payload: string;
-};
-
-/** Sign a payload with BOTH Ed25519 and ML-DSA-65. Both signatures are returned. */
-export function signDevicePayloadDual(
-  ed25519PrivateKeyPem: string,
-  mldsaSecretKey: string | Uint8Array,
-  payload: string,
-): Required<DualDeviceSignatures> {
-  const ed25519 = signEd25519Payload(ed25519PrivateKeyPem, payload);
-  const skBytes = typeof mldsaSecretKey === "string"
-    ? decodeMlDsa65SecretKey(mldsaSecretKey)
-    : mldsaSecretKey;
-  const mlDsa65 = signMlDsa65PayloadRaw(skBytes, payload);
-  return { ed25519, mlDsa65 };
-}
-
-export type VerifyDeviceSignatureDualParams = {
-  ed25519PublicKey: string; // SPKI PEM
-  mldsaPublicKey: string | Uint8Array; // MLDSA65-PUBLIC-KEY:... b64url string OR raw bytes
-  payload: string;
-  signatures: DualDeviceSignatures;
-};
-
-/** Verify at least one of the supplied signatures matches the payload. */
-export function verifyDeviceSignatureDual(
-  params: VerifyDeviceSignatureDualParams,
-): boolean {
-  if (params.signatures.mlDsa65) {
-    if (
-      verifyMlDsa65SignatureRaw({
-        publicKey: params.mldsaPublicKey,
-        payload: params.payload,
-        signatureBase64Url: params.signatures.mlDsa65,
-      })
-    ) {
-      return true;
-    }
-  }
-  if (params.signatures.ed25519) {
-    if (
-      verifyEd25519Signature({
-        publicKey: params.ed25519PublicKey,
-        payload: params.payload,
-        signatureBase64Url: params.signatures.ed25519,
-      })
-    ) {
-      return true;
-    }
-  }
-  return false;
 }

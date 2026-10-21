@@ -114,7 +114,7 @@ export type NostrPqcTrustState =
   | "untrusted-rotation"
   | "rotation-chain-mismatch";
 
-export type NostrPqcKeyAnnouncement = {
+type NostrPqcKeyAnnouncement = {
   eventId: string;
   pubkey: string;
   createdAt: number;

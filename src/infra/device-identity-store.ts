@@ -80,10 +80,7 @@ import {
   mlDsa65KeyPairMatches,
 } from "./mldsa65-key-storage.js";
 
-export type {
-  DeviceIdentityPopulationPreflight,
-  DeviceIdentityPopulationRow,
-} from "./device-identity-store.population-preflight.js";
+export type { DeviceIdentityPopulationPreflight } from "./device-identity-store.population-preflight.js";
 
 export type DeviceIdentityStoreOptions = OpenClawStateDatabaseOptions & {
   identityKey?: string;

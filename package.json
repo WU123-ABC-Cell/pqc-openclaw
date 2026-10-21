@@ -2052,6 +2052,7 @@
     "marked": "18.0.7",
     "node-addon-api": "^8.9.2",
     "node-gyp": "^13.0.2",
+    "nostr-tools": "2.24.1",
     "oxfmt": "0.60.0",
     "oxlint": "1.75.0",
     "oxlint-tsgolint": "7.0.2001",
