@@ -38,7 +38,9 @@ it.each([
   },
 ])("emits an inferred public $name consumer declaration", ({ source, expected, forbidden }) => {
   const repoRoot = process.cwd();
-  const config = ts.readConfigFile(path.join(repoRoot, "tsconfig.json"), ts.sys.readFile);
+  const config = ts.readConfigFile(path.join(repoRoot, "tsconfig.json"), (fileName) =>
+    ts.sys.readFile(fileName),
+  );
   expect(config.error).toBeUndefined();
   const parsed = ts.parseJsonConfigFileContent(config.config, ts.sys, repoRoot);
   expect(parsed.errors).toEqual([]);

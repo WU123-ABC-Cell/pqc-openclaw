@@ -23,7 +23,7 @@ import {
   munlockKey,
   mlockBackend,
   protectKey,
-  __resetMlockCacheForTests,
+  resetMlockCacheForTests,
   MAX_MLOCK_BYTES,
 } from "./mlock-helper.js";
 import nativeAddon from "./native/mlock-addon.cjs";
@@ -37,7 +37,7 @@ interface CapturedEvent {
 let captured: CapturedEvent[] = [];
 beforeEach(() => {
   captured = [];
-  __resetMlockCacheForTests();
+  resetMlockCacheForTests();
   setPqcEmit((level, event, payload) => {
     captured.push({ level, event, payload });
   });
@@ -92,7 +92,7 @@ describe("mlock-helper (defensive path on Node 22)", () => {
   });
 
   it("mlockKey emits a single mlock-unavailable warning on Node < 24.0.0 (or no addon)", () => {
-    __resetMlockCacheForTests();
+    resetMlockCacheForTests();
     const buf = Buffer.alloc(32, 0xab);
     mlockKey(buf, "test:first");
     mlockKey(buf, "test:second");
@@ -194,9 +194,9 @@ describe("mlock-helper (defensive path on Node 22)", () => {
     expect(() => munlockKey(buf, "test:munlock-again")).not.toThrow();
   });
 
-  it("__resetMlockCacheForTests allows re-running the feature-detect", () => {
+  it("resetMlockCacheForTests allows re-running the feature-detect", () => {
     const before = isMlockActive();
-    __resetMlockCacheForTests();
+    resetMlockCacheForTests();
     const after = isMlockActive();
     expect(before).toBe(after);
   });
@@ -258,7 +258,7 @@ describe("mlock-helper N-API native addon (M6.B v2 path 2)", () => {
     // Simulate "addon not built" by resetting the backend cache and
     // stubbing the wrapper. The helper must log the
     // mlock-unavailable warn once and silently no-op.
-    __resetMlockCacheForTests();
+    resetMlockCacheForTests();
     // We can't easily un-load the addon in-process, so this test
     // asserts the contract on Node 22 only — the helper will see
     // process.mlock === undefined AND nativeAddon.isAvailable() ===

@@ -26,7 +26,7 @@ const expectedSuites = [
 const actualSuites = readdirSync(reportRoot, { withFileTypes: true })
   .filter((entry) => entry.isDirectory())
   .map((entry) => entry.name)
-  .sort();
+  .toSorted();
 
 if (JSON.stringify(actualSuites) !== JSON.stringify(expectedSuites)) {
   throw new Error(
@@ -40,7 +40,7 @@ let highestEvent = "";
 for (const suite of expectedSuites) {
   const reportPath = join(reportRoot, suite, "report.json");
   const report = JSON.parse(readFileSync(reportPath, "utf8"));
-  const eventNames = Object.keys(report.events ?? {}).sort();
+  const eventNames = Object.keys(report.events ?? {}).toSorted();
   const events = Object.entries(report.events ?? {});
 
   if (report.threshold !== threshold) {

@@ -251,7 +251,7 @@ describe("MCP OAuth authorization-server binding", () => {
         const url = new URL(input);
         requests.push({
           origin: url.origin,
-          body: String(init?.body ?? ""),
+          body: await new Response(init?.body).text(),
           authorization: new Headers(init?.headers).get("authorization"),
         });
         const json = (value: unknown) =>

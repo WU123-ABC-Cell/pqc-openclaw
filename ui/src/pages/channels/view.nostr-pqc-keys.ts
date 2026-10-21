@@ -52,6 +52,7 @@ function trustStatus(trustState: NostrPqcTrustState) {
     case "not-found":
       return { kind: "muted" as const, label: t("channels.nostr.pqcKeys.states.notFound") };
   }
+  return trustState satisfies never;
 }
 
 function renderFingerprint(label: string, value: string | null | undefined): TemplateResult {

@@ -34,7 +34,6 @@
 // The point is to raise the bar against passive attacks (cold-boot,
 // disk image after theft, kernel-privileged attacker without ptrace).
 import { pqcLog, PQC_EVENT, type PqcLogPayload } from "../logging/pqc-log.js";
-// eslint-disable-next-line @typescript-eslint/no-require-imports
 import nativeAddon from "./native/mlock-addon.cjs";
 
 /** Node version where process.mlock became stable (24.0.0). */
@@ -69,7 +68,9 @@ type MlockBackend = "process" | "native" | null;
 let backendCache: MlockBackend = null;
 
 function detectBackend(): MlockBackend {
-  if (backendCache !== null) return backendCache;
+  if (backendCache !== null) {
+    return backendCache;
+  }
   const proc = process as unknown as MlockCapableProcess;
   if (typeof proc.mlock === "function" && typeof proc.munlock === "function") {
     backendCache = "process";
@@ -86,7 +87,9 @@ function detectBackend(): MlockBackend {
 /** Runtime feature-detect: is mlock available through any path?
  *  Cached after the first call. */
 function checkMlockAvailable(): boolean {
-  if (mlockAvailableCache !== null) return mlockAvailableCache;
+  if (mlockAvailableCache !== null) {
+    return mlockAvailableCache;
+  }
   const backend = detectBackend();
   mlockAvailableCache = backend !== null;
   if (!mlockAvailableCache && !warnedUnavailable) {
@@ -124,7 +127,9 @@ function checkMlockAvailable(): boolean {
  * covers the entire lifetime of the cached buffer.
  */
 export function mlockKey(buf: Buffer | null | undefined, label: string): void {
-  if (!buf || !Buffer.isBuffer(buf) || buf.length === 0) return;
+  if (!buf || !Buffer.isBuffer(buf) || buf.length === 0) {
+    return;
+  }
   if (buf.length > MAX_MLOCK_BYTES) {
     if (!warnedOversize) {
       warnedOversize = true;
@@ -140,7 +145,9 @@ export function mlockKey(buf: Buffer | null | undefined, label: string): void {
     }
     return;
   }
-  if (!checkMlockAvailable()) return;
+  if (!checkMlockAvailable()) {
+    return;
+  }
   const backend = detectBackend();
   if (backend === null) {
     mlockAvailableCache = false;
@@ -238,8 +245,12 @@ export function protectKey(buf: Buffer, label: string): Buffer {
  * munlock does not indicate a security incident.
  */
 export function munlockKey(buf: Buffer | null | undefined, label: string): void {
-  if (!buf || !Buffer.isBuffer(buf) || buf.length === 0) return;
-  if (!checkMlockAvailable()) return;
+  if (!buf || !Buffer.isBuffer(buf) || buf.length === 0) {
+    return;
+  }
+  if (!checkMlockAvailable()) {
+    return;
+  }
   const backend = detectBackend();
   if (backend === null) {
     mlockAvailableCache = false;
@@ -284,7 +295,7 @@ export function mlockBackend(): MlockBackend {
 /** Test hook: clear the cached feature-detect result and any
  *  "warned once" flags. Production code should not need this; the
  *  cache is set once and read. */
-export function __resetMlockCacheForTests(): void {
+export function resetMlockCacheForTests(): void {
   mlockAvailableCache = null;
   backendCache = null;
   warnedUnavailable = false;

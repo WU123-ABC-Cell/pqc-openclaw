@@ -27,7 +27,6 @@ let addon = null;
 let loadError = null;
 
 try {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
   addon = require("./build/Release/mlock_addon.node");
 } catch (err) {
   loadError = err;
@@ -36,7 +35,7 @@ try {
 function notBuiltError() {
   const detail = loadError && loadError.message ? loadError.message : "unknown";
   return new Error(
-    "mlock_addon not built (run `pnpm run build:native` from repo " + "root): " + detail,
+    `mlock_addon not built (run \`pnpm run build:native\` from repo root): ${detail}`,
   );
 }
 
@@ -69,7 +68,9 @@ module.exports = {
    * @returns {number} — number of bytes mlocked
    */
   mlockSync(buf) {
-    if (!addon) throw notBuiltError();
+    if (!addon) {
+      throw notBuiltError();
+    }
     return addon.mlock(buf);
   },
 
@@ -81,7 +82,9 @@ module.exports = {
    * @returns {number} — number of bytes munlocked
    */
   munlockSync(buf) {
-    if (!addon) throw notBuiltError();
+    if (!addon) {
+      throw notBuiltError();
+    }
     return addon.munlock(buf);
   },
 
@@ -92,7 +95,9 @@ module.exports = {
    * @returns {Buffer}
    */
   secureCopySync(buf) {
-    if (!addon) throw notBuiltError();
+    if (!addon) {
+      throw notBuiltError();
+    }
     return addon.secureCopy(buf);
   },
 
@@ -101,7 +106,9 @@ module.exports = {
    * @returns {number}
    */
   secureZeroSync(buf) {
-    if (!addon) throw notBuiltError();
+    if (!addon) {
+      throw notBuiltError();
+    }
     return addon.secureMemzero(buf);
   },
 };

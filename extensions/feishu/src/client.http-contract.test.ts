@@ -38,45 +38,49 @@ describe("Feishu SDK HTTP response contract (real loopback transport)", () => {
       vi.stubEnv(key, undefined);
     }
     resetFeishuProxyAgentForTest();
-    server = createServer(async (req, res) => {
-      const chunks: Buffer[] = [];
-      for await (const chunk of req) {
-        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-      }
-      received.push({
-        method: req.method,
-        url: req.url,
-        body: Buffer.concat(chunks).toString("utf8"),
-        authorization: req.headers.authorization,
-        userAgent: req.headers["user-agent"],
+    server = createServer((req, res) => {
+      void (async () => {
+        const chunks: Buffer[] = [];
+        for await (const chunk of req) {
+          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        }
+        received.push({
+          method: req.method,
+          url: req.url,
+          body: Buffer.concat(chunks).toString("utf8"),
+          authorization: req.headers.authorization,
+          userAgent: req.headers["user-agent"],
+        });
+        res.setHeader("x-contract", "loopback");
+        if (req.url === "/timeout") {
+          return; // Deliberately leave the response pending until Axios aborts.
+        }
+        if (req.url === "/text") {
+          res.setHeader("content-type", "text/plain");
+          res.end("原样返回");
+          return;
+        }
+        if (req.url === "/bytes") {
+          res.setHeader("content-type", "application/octet-stream");
+          res.end(Buffer.from([0, 1, 255]));
+          return;
+        }
+        res.setHeader("content-type", "application/json");
+        if (req.url === "/open-apis/auth/v3/tenant_access_token/internal") {
+          res.end(
+            JSON.stringify({ code: 0, tenant_access_token: "local-bootstrap-token", expire: 7200 }),
+          );
+          return;
+        }
+        if (req.url === "/error") {
+          res.statusCode = 503;
+          res.end(JSON.stringify({ code: 503, msg: "local rejection" }));
+          return;
+        }
+        res.end(JSON.stringify(payload));
+      })().catch((error: unknown) => {
+        res.destroy(error instanceof Error ? error : new Error(String(error)));
       });
-      res.setHeader("x-contract", "loopback");
-      if (req.url === "/timeout") {
-        return; // Deliberately leave the response pending until Axios aborts.
-      }
-      if (req.url === "/text") {
-        res.setHeader("content-type", "text/plain");
-        res.end("原样返回");
-        return;
-      }
-      if (req.url === "/bytes") {
-        res.setHeader("content-type", "application/octet-stream");
-        res.end(Buffer.from([0, 1, 255]));
-        return;
-      }
-      res.setHeader("content-type", "application/json");
-      if (req.url === "/open-apis/auth/v3/tenant_access_token/internal") {
-        res.end(
-          JSON.stringify({ code: 0, tenant_access_token: "local-bootstrap-token", expire: 7200 }),
-        );
-        return;
-      }
-      if (req.url === "/error") {
-        res.statusCode = 503;
-        res.end(JSON.stringify({ code: 503, msg: "local rejection" }));
-        return;
-      }
-      res.end(JSON.stringify(payload));
     });
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
