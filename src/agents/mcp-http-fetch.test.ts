@@ -324,7 +324,9 @@ describe("MCP HTTP fetch helpers", () => {
       body: new URLSearchParams({ code: "secret" }),
     });
 
-    await expect(fetch(request)).rejects.toThrow("Redirect target blocked");
+    // FetchLike exposes only string | URL, but the wrapper also accepts Request at runtime.
+    const fetchWithRequestInput = fetch as (input: Request) => Promise<Response>;
+    await expect(fetchWithRequestInput(request)).rejects.toThrow("Redirect target blocked");
     expect(fetchCalls).toHaveLength(1);
     expect(fetchCalls[0]?.url).toBe("https://auth.example.com/token");
   });
