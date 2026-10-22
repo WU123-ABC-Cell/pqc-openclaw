@@ -1,7 +1,9 @@
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { parseErrorResponse } from "@modelcontextprotocol/sdk/client/auth.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { FetchLike } from "@modelcontextprotocol/sdk/shared/transport.js";
+import { fetchWithinOrigin } from "@modelcontextprotocol/sdk/shared/transport.js";
 /**
  * Regression coverage for MCP HTTP fetch wrappers.
  * Verifies SSRF-guarded fetch, scoped dispatcher behavior, and same-origin headers.
@@ -227,7 +229,7 @@ describe("MCP HTTP fetch helpers", () => {
     expect(getDispatcher(fetchCalls[1]?.init)).toBeInstanceOf(TestEnvHttpProxyAgent);
   });
 
-  it("uses configured env proxy for redirected targets after a NO_PROXY first hop", async () => {
+  it("blocks a cross-origin redirect but permits a direct auth-server request via proxy", async () => {
     vi.stubEnv("https_proxy", "http://proxy.example:8080");
     vi.stubEnv("no_proxy", "mcp.example.com");
     testGlobal[TEST_UNDICI_RUNTIME_DEPS_KEY] = {
@@ -245,10 +247,86 @@ describe("MCP HTTP fetch helpers", () => {
       resourceUrl: "https://mcp.example.com/mcp",
     });
 
-    await fetch("https://mcp.example.com/token");
+    await expect(fetch("https://mcp.example.com/token")).rejects.toThrow("Redirect target blocked");
+    expect(fetchCalls).toHaveLength(1);
+    await fetch("https://auth.example.com/token");
 
     expect(getDispatcher(fetchCalls[0]?.init)).toBeInstanceOf(TestAgent);
     expect(getDispatcher(fetchCalls[1]?.init)).toBeInstanceOf(TestEnvHttpProxyAgent);
+  });
+
+  it("prevents real SDK fetchWithinOrigin from replaying an OAuth form POST cross-origin", async () => {
+    testGlobal[TEST_UNDICI_RUNTIME_DEPS_KEY] = {
+      Agent: TestAgent,
+      EnvHttpProxyAgent: TestEnvHttpProxyAgent,
+      ProxyAgent: TestProxyAgent,
+      fetch: async (url: string | URL | Request, init?: unknown) => {
+        fetchCalls.push({ url, init });
+        return redirectResponse("https://other.example/collect", 307);
+      },
+    };
+    const sdkFetch = fetchWithinOrigin(
+      buildMcpHttpFetch({ resourceUrl: "https://mcp.example.com/mcp" }),
+    );
+    const body = new URLSearchParams({ grant_type: "refresh_token", refresh_token: "secret" });
+
+    await expect(
+      sdkFetch("https://auth.example.com/token", {
+        method: "POST",
+        body,
+      }),
+    ).rejects.toThrow("Redirect target blocked");
+
+    expect(fetchCalls).toHaveLength(1);
+    expect(fetchCalls[0]?.url).toBe("https://auth.example.com/token");
+    expect((fetchCalls[0]?.init as RequestInit).body).toBe(body);
+  });
+
+  it("blocks cross-origin replay from a real SDK Streamable HTTP transport", async () => {
+    testGlobal[TEST_UNDICI_RUNTIME_DEPS_KEY] = {
+      Agent: TestAgent,
+      EnvHttpProxyAgent: TestEnvHttpProxyAgent,
+      ProxyAgent: TestProxyAgent,
+      fetch: async (url: string | URL | Request, init?: unknown) => {
+        fetchCalls.push({ url, init });
+        return redirectResponse("https://other.example/collect", 307);
+      },
+    };
+    const transport = new StreamableHTTPClientTransport(new URL("https://mcp.example.com/mcp"), {
+      fetch: buildMcpHttpFetch({ resourceUrl: "https://mcp.example.com/mcp" }),
+    });
+    await transport.start();
+    try {
+      await expect(transport.send({ jsonrpc: "2.0", id: 1, method: "ping" })).rejects.toThrow(
+        "Redirect target blocked",
+      );
+      expect(fetchCalls).toHaveLength(1);
+      expect(fetchCalls[0]?.url).toBe("https://mcp.example.com/mcp");
+      expect((fetchCalls[0]?.init as RequestInit).method).toBe("POST");
+    } finally {
+      await transport.close();
+    }
+  });
+
+  it("blocks cross-origin replay when the input is a Request with a streamed body", async () => {
+    testGlobal[TEST_UNDICI_RUNTIME_DEPS_KEY] = {
+      Agent: TestAgent,
+      EnvHttpProxyAgent: TestEnvHttpProxyAgent,
+      ProxyAgent: TestProxyAgent,
+      fetch: async (url: string | URL | Request, init?: unknown) => {
+        fetchCalls.push({ url, init });
+        return redirectResponse("https://other.example/collect", 308);
+      },
+    };
+    const fetch = buildMcpHttpFetch({ resourceUrl: "https://mcp.example.com/mcp" });
+    const request = new Request("https://auth.example.com/token", {
+      method: "POST",
+      body: new URLSearchParams({ code: "secret" }),
+    });
+
+    await expect(fetch(request)).rejects.toThrow("Redirect target blocked");
+    expect(fetchCalls).toHaveLength(1);
+    expect(fetchCalls[0]?.url).toBe("https://auth.example.com/token");
   });
 
   it("removes static Authorization headers for OAuth-backed runtime requests", () => {

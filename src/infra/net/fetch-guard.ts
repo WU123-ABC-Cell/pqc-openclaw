@@ -74,6 +74,8 @@ export type GuardedFetchOptions = {
         sensitiveRequestHeaderNames?: readonly string[];
       };
   maxRedirects?: number;
+  /** Classify redirect trust before sending the next request. */
+  classifyRedirect?: (from: URL, to: URL) => "trusted" | "untrusted" | "blocked";
   /**
    * Allow replaying unsafe request methods and bodies across cross-origin redirects.
    * Sensitive cross-origin headers (for example Authorization/Cookie) are still stripped.
@@ -690,13 +692,21 @@ async function fetchWithSsrFGuardInternal(
         }
         const nextParsedUrl = new URL(location, parsedUrl);
         const nextUrl = nextParsedUrl.toString();
+        const redirectTrust =
+          params.classifyRedirect?.(parsedUrl, nextParsedUrl) ??
+          (nextParsedUrl.origin === parsedUrl.origin ? "trusted" : "untrusted");
+        if (redirectTrust === "blocked") {
+          void response.body?.cancel().catch(() => undefined);
+          await release(dispatcher);
+          throw new Error("Redirect target blocked; configure the final URL directly");
+        }
         const retainedAuthorization = resolveRetainedAuthorizationForRedirect({
           init: currentInit,
           nextUrl: nextParsedUrl,
           hostnameAllowlist: params.retainAuthorizationRedirectHostnameAllowlist,
         });
         currentInit = rewriteRedirectInitForMethod({ init: currentInit, status: response.status });
-        if (nextParsedUrl.origin !== parsedUrl.origin) {
+        if (redirectTrust === "untrusted") {
           currentInit = rewriteRedirectInitForCrossOrigin({
             init: currentInit,
             allowUnsafeReplay: params.allowCrossOriginUnsafeRedirectReplay === true,

@@ -127,12 +127,8 @@ describe("resolveMcpTransport", () => {
     sseTransportConstructorMock.mockClear();
   });
 
-  it("scrubs custom headers when streamable HTTP follows a cross-origin redirect", async () => {
-    // Cross-origin redirects keep safe protocol headers but drop operator
-    // secrets such as API keys before following the Location target.
-    runtimeFetchMock
-      .mockResolvedValueOnce(redirectResponse("https://redirect.example/next"))
-      .mockResolvedValueOnce(new Response("ok"));
+  it("blocks a cross-origin streamable HTTP redirect before forwarding headers", async () => {
+    runtimeFetchMock.mockResolvedValueOnce(redirectResponse("https://redirect.example/next"));
 
     resolveMcpTransport("probe", {
       url: "https://mcp.example.com/mcp",
@@ -150,28 +146,23 @@ describe("resolveMcpTransport", () => {
     });
     expect(options.fetch).toBeTypeOf("function");
 
-    await options.fetch?.("https://mcp.example.com/mcp", {
-      method: "GET",
-      headers: {
-        accept: "application/json, text/event-stream",
-        "user-agent": "node",
-        "x-api-key": "secret",
-      },
-    });
+    await expect(
+      options.fetch?.("https://mcp.example.com/mcp", {
+        method: "GET",
+        headers: {
+          accept: "application/json, text/event-stream",
+          "user-agent": "node",
+          "x-api-key": "secret",
+        },
+      }),
+    ).rejects.toThrow("Redirect target blocked");
 
-    expect(runtimeFetchMock).toHaveBeenCalledTimes(2);
+    expect(runtimeFetchMock).toHaveBeenCalledTimes(1);
     expect(runtimeFetchCall(0)?.[0]).toBe("https://mcp.example.com/mcp");
     expect(runtimeFetchCall(0)?.[1]?.redirect).toBe("manual");
-    expect(runtimeFetchCall(1)?.[0]).toBe("https://redirect.example/next");
-    expect(runtimeFetchCall(1)?.[1]?.redirect).toBe("manual");
-
-    const redirectedHeaders = new Headers(runtimeFetchCall(1)?.[1]?.headers);
-    expect(redirectedHeaders.get("x-api-key")).toBeNull();
-    expect(redirectedHeaders.get("accept")).toBe("application/json, text/event-stream");
-    expect(redirectedHeaders.get("user-agent")).toBe("node");
   });
 
-  it("blocks streamable HTTP redirects to private network targets", async () => {
+  it("blocks a private-network redirect before a second request", async () => {
     runtimeFetchMock.mockResolvedValueOnce(redirectResponse("http://169.254.169.254/latest"));
 
     resolveMcpTransport("probe", {
@@ -180,18 +171,16 @@ describe("resolveMcpTransport", () => {
     });
 
     await expect(latestStreamableFetch()("https://mcp.example.com/mcp")).rejects.toThrow(
-      "Blocked hostname or private/internal/special-use IP address",
+      "Redirect target blocked",
     );
 
     expect(runtimeFetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("preserves replayable request bodies for cross-origin streamable HTTP redirects", async () => {
-    // 307/308 redirects preserve method/body, while custom auth headers are
-    // still stripped when the destination origin changes.
-    runtimeFetchMock
-      .mockResolvedValueOnce(redirectResponse("https://redirect.example/mcp", 307))
-      .mockResolvedValueOnce(new Response("ok"));
+  it.each([307, 308])("does not replay an MCP POST body across a %i redirect", async (status) => {
+    runtimeFetchMock.mockResolvedValueOnce(
+      redirectResponse("https://redirect.example/mcp", status),
+    );
 
     resolveMcpTransport("probe", {
       url: "https://mcp.example.com/mcp",
@@ -204,23 +193,126 @@ describe("resolveMcpTransport", () => {
     const options = latestStreamableTransportOptions();
     const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" });
 
-    await options.fetch?.("https://mcp.example.com/mcp", {
+    await expect(
+      options.fetch?.("https://mcp.example.com/mcp", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-api-key": "secret",
+        },
+        body,
+      }),
+    ).rejects.toThrow("Redirect target blocked");
+
+    expect(runtimeFetchMock).toHaveBeenCalledTimes(1);
+    expect(runtimeFetchCall(0)?.[1]?.body).toBe(body);
+  });
+
+  it("preserves an MCP POST body on a same-origin 307 redirect", async () => {
+    runtimeFetchMock
+      .mockResolvedValueOnce(redirectResponse("https://mcp.example.com/next", 307))
+      .mockResolvedValueOnce(new Response("ok"));
+
+    resolveMcpTransport("probe", {
+      url: "https://mcp.example.com/mcp",
+      transport: "streamable-http",
+      headers: { "X-Api-Key": "secret" },
+    });
+
+    const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" });
+    await latestStreamableFetch()("https://mcp.example.com/mcp", {
       method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-api-key": "secret",
-      },
+      headers: { "content-type": "application/json", "x-api-key": "secret" },
       body,
     });
 
     expect(runtimeFetchMock).toHaveBeenCalledTimes(2);
-    expect(runtimeFetchCall(1)?.[0]).toBe("https://redirect.example/mcp");
+    expect(runtimeFetchCall(1)?.[0]).toBe("https://mcp.example.com/next");
     expect(runtimeFetchCall(1)?.[1]?.method).toBe("POST");
     expect(runtimeFetchCall(1)?.[1]?.body).toBe(body);
+    expect(new Headers(runtimeFetchCall(1)?.[1]?.headers).get("x-api-key")).toBe("secret");
+  });
 
-    const redirectedHeaders = new Headers(runtimeFetchCall(1)?.[1]?.headers);
-    expect(redirectedHeaders.get("x-api-key")).toBeNull();
-    expect(redirectedHeaders.get("content-type")).toBe("application/json");
+  it("allows a default-port HTTP to HTTPS upgrade", async () => {
+    runtimeFetchMock
+      .mockResolvedValueOnce(redirectResponse("https://mcp.example.com/mcp", 307))
+      .mockResolvedValueOnce(new Response("ok"));
+
+    resolveMcpTransport("probe", {
+      url: "http://mcp.example.com/mcp",
+      transport: "streamable-http",
+      headers: { "X-Api-Key": "secret" },
+    });
+
+    const body = "sensitive request body";
+    await latestStreamableFetch()("http://mcp.example.com/mcp", {
+      method: "POST",
+      headers: { "content-type": "text/plain", "x-api-key": "secret" },
+      body,
+    });
+
+    expect(runtimeFetchMock).toHaveBeenCalledTimes(2);
+    expect(runtimeFetchCall(1)?.[0]).toBe("https://mcp.example.com/mcp");
+    expect(runtimeFetchCall(1)?.[1]?.method).toBe("POST");
+    expect(runtimeFetchCall(1)?.[1]?.body).toBe(body);
+    expect(new Headers(runtimeFetchCall(1)?.[1]?.headers).get("x-api-key")).toBe("secret");
+  });
+
+  it("rejects a same-origin redirect that adds URL userinfo", async () => {
+    runtimeFetchMock.mockResolvedValueOnce(
+      redirectResponse("https://operator@mcp.example.com/next", 307),
+    );
+
+    resolveMcpTransport("probe", {
+      url: "https://mcp.example.com/mcp",
+      transport: "streamable-http",
+    });
+
+    await expect(latestStreamableFetch()("https://mcp.example.com/mcp")).rejects.toThrow(
+      "Redirect target blocked",
+    );
+    expect(runtimeFetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("blocks an OAuth token POST body from crossing auth-server origins", async () => {
+    runtimeFetchMock.mockResolvedValueOnce(
+      redirectResponse("https://redirect.example/collect", 307),
+    );
+
+    resolveMcpTransport("probe", {
+      url: "https://mcp.example.com/mcp",
+      transport: "streamable-http",
+      auth: "oauth",
+    });
+
+    const body = new URLSearchParams({ grant_type: "refresh_token", refresh_token: "secret" });
+    await expect(
+      latestStreamableFetch()("https://auth.example.com/token", {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body,
+      }),
+    ).rejects.toThrow("Redirect target blocked");
+
+    expect(runtimeFetchMock).toHaveBeenCalledTimes(1);
+    expect(runtimeFetchCall(0)?.[0]).toBe("https://auth.example.com/token");
+    expect(runtimeFetchCall(0)?.[1]?.body).toBe(body);
+  });
+
+  it("blocks a cross-origin SSE event-stream redirect", async () => {
+    runtimeFetchMock.mockResolvedValueOnce(redirectResponse("https://other.example/events", 307));
+
+    resolveMcpTransport("probe", {
+      url: "https://mcp.example.com/sse",
+      transport: "sse",
+    });
+
+    await expect(
+      latestSseEventSourceFetch()("https://mcp.example.com/sse", {
+        headers: { accept: "text/event-stream" },
+      }),
+    ).rejects.toThrow("Redirect target blocked");
+    expect(runtimeFetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("allows same-url redirects when the request method changes", async () => {

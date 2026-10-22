@@ -27,6 +27,20 @@ const fetchWithUndiciGuard = async (
 
 const MCP_HTTP_MAX_REDIRECTS = 20;
 
+function classifyMcpRedirect(from: URL, to: URL): "trusted" | "blocked" {
+  const addsUserinfo =
+    (to.username || to.password) &&
+    (to.username !== from.username || to.password !== from.password);
+  const sameOrigin = from.origin === to.origin;
+  const defaultPortHttpsUpgrade =
+    from.protocol === "http:" &&
+    to.protocol === "https:" &&
+    from.hostname === to.hostname &&
+    from.port === "" &&
+    to.port === "";
+  return !addsUserinfo && (sameOrigin || defaultPortHttpsUpgrade) ? "trusted" : "blocked";
+}
+
 function resolveFetchRequest(input: RequestInfo | URL, init?: RequestInit) {
   if (input instanceof Request) {
     const request = new Request(input, init);
@@ -127,7 +141,9 @@ export function buildMcpHttpFetch(params: {
       init: request.init,
       fetchImpl: fetchWithUndiciGuard,
       maxRedirects: MCP_HTTP_MAX_REDIRECTS,
-      allowCrossOriginUnsafeRedirectReplay: true,
+      // The SDK cannot inspect hops followed by this guard, so enforce its
+      // same-origin/default-port HTTPS-upgrade boundary before each next hop.
+      classifyRedirect: classifyMcpRedirect,
       auditContext: "mcp-http",
       useEnvProxyForEligibleUrls: true,
       ...(request.signal ? { signal: request.signal } : {}),

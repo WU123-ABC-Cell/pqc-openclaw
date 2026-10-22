@@ -113,6 +113,10 @@ openclaw mcp login <name>
 
 Follow the printed authorization URL and rerun with `--code` when prompted.
 
+### An HTTP server reports a blocked redirect
+
+MCP HTTP requests do not follow redirects to a different origin. If the server or OAuth authorization server redirects to another host or port, configure its final URL directly instead. Same-origin redirects and default-port HTTP-to-HTTPS upgrades remain supported.
+
 ### Changes do not reach an active agent
 
 `openclaw mcp reload` refreshes runtimes owned by the current CLI process. A Gateway or agent running elsewhere needs its own reload, config publish, or restart.
