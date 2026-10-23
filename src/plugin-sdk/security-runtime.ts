@@ -92,6 +92,7 @@ export {
 export { resolvePreferredOpenClawTmpDir } from "../infra/tmp-openclaw-dir.js";
 export { redactSensitiveText } from "../logging/redact.js";
 export { safeEqualSecret } from "../security/secret-equal.js";
+export type { OpenClawPqcDmDecryptInput, OpenClawPqcDmEncryptInput } from "../security/nip44-v2.js";
 export const openClawPqcDm = {
   decodeMlKem768PublicKey,
   decodeMlKem768SecretKey,

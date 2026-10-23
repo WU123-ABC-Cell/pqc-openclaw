@@ -214,7 +214,7 @@ export function decodeMlKem768SecretKey(value: string): Uint8Array {
   return key;
 }
 
-interface OpenClawPqcDmEncryptInput {
+export interface OpenClawPqcDmEncryptInput {
   classicalConversationKey: Uint8Array;
   recipientMlKemPublicKey: Uint8Array;
   senderPubkey: string;
@@ -267,7 +267,7 @@ export function encryptOpenClawPqcDmV1(input: OpenClawPqcDmEncryptInput): string
   }
 }
 
-interface OpenClawPqcDmDecryptInput {
+export interface OpenClawPqcDmDecryptInput {
   classicalConversationKey: Uint8Array;
   recipientMlKemSecretKey: Uint8Array;
   senderPubkey: string;

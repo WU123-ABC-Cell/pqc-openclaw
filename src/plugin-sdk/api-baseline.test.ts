@@ -28,6 +28,7 @@ const TEST_ENTRYPOINTS = [
   "provider-selection-runtime",
   "provider-web-search-config-contract",
   "realtime-voice",
+  "security-runtime",
   "sqlite-runtime-testing",
 ] as const;
 
@@ -196,6 +197,19 @@ describe("Plugin SDK API baseline", () => {
     );
     expect(rendered.json).not.toContain('"line":');
     expect(rendered.jsonl).not.toContain('"sourceLine":');
+  });
+
+  it("keeps PQC message input types importable from the security runtime", () => {
+    const securityRuntime = rendered.baseline.modules.find(
+      (moduleSurface) => moduleSurface.entrypoint === "security-runtime",
+    );
+    const exportedNames = new Set(securityRuntime?.exports.map((entry) => entry.exportName));
+
+    expect(exportedNames.has("OpenClawPqcDmEncryptInput")).toBe(true);
+    expect(exportedNames.has("OpenClawPqcDmDecryptInput")).toBe(true);
+    const pqcDm = securityRuntime?.exports.find((entry) => entry.exportName === "openClawPqcDm");
+    expect(pqcDm?.declaration).toContain("OpenClawPqcDmEncryptInput");
+    expect(pqcDm?.declaration).toContain("OpenClawPqcDmDecryptInput");
   });
 
   it("renders snapshots independently of entrypoint discovery order", () => {
