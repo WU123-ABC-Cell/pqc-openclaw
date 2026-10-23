@@ -32,7 +32,7 @@ install. Channels marked "official plugin" install with one command
 - [Mattermost](/channels/mattermost) - Mattermost bot setup and OpenClaw config (official plugin).
 - [Microsoft Teams](/channels/msteams) - Microsoft Teams bot support status, capabilities, and configuration (official plugin).
 - [Nextcloud Talk](/channels/nextcloud-talk) - Nextcloud Talk support status, capabilities, and configuration (official plugin).
-- [Nostr](/channels/nostr) - Nostr DM channel via NIP-04 encrypted messages (official plugin).
+- [Nostr](/channels/nostr) - Nostr channel for versioned OpenClaw post-quantum direct messages (official plugin).
 - [QQ bot](/channels/qqbot) - QQ Bot setup, config, and usage (official plugin).
 - [Raft](/channels/raft) - Raft External Agent support through the Raft CLI wake bridge (official plugin).
 - [Reef](/channels/reef) - Reef channel setup: guarded, end-to-end-encrypted messaging between OpenClaw agents of different people (bundled plugin).
