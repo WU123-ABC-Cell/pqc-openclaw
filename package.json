@@ -2066,7 +2066,7 @@
     "tsdown": "0.22.1",
     "tsx": "4.23.1",
     "unrun": "0.3.1",
-    "vite": "8.1.5",
+    "vite": "8.1.6",
     "vitest": "4.1.10"
   },
   "optionalDependencies": {

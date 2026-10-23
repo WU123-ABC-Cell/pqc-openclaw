@@ -24,7 +24,7 @@
     "@openclaw/slack": "workspace:*",
     "@openclaw/whatsapp": "workspace:*",
     "openclaw": "workspace:*",
-    "vite": "8.1.5"
+    "vite": "8.1.6"
   },
   "peerDependencies": {
     "openclaw": ">=2026.7.2"
