@@ -555,6 +555,15 @@ describe("device bootstrap tokens", () => {
         publicKey: rawPublicKey,
       }),
     ).resolves.toEqual({ ok: true });
+    const otherIdentity = loadOrCreateDeviceIdentity({
+      path: path.join(baseDir, "other-device.sqlite"),
+    });
+    await expect(
+      verifyBootstrapToken(baseDir, issued.token, {
+        deviceId: identity.deviceId,
+        publicKey: publicKeyRawBase64UrlFromPem(otherIdentity.publicKeyPem),
+      }),
+    ).resolves.toEqual({ ok: false, reason: "bootstrap_token_invalid" });
     await expect(
       getBoundDeviceBootstrapProfile({
         token: issued.token,

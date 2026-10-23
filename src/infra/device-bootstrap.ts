@@ -167,11 +167,8 @@ function normalizeBootstrapPublicKey(publicKey: string): string {
   if (!trimmed) {
     return "";
   }
-  // PEM/base64/base64url encodings for the same key must bind to one token identity.
-  if (trimmed.includes("BEGIN") || /[+/=]/.test(trimmed)) {
-    return normalizeDevicePublicKeyBase64Url(trimmed) ?? trimmed;
-  }
-  return trimmed;
+  // Stored and wire-format encodings of the same key bind to one token identity.
+  return normalizeDevicePublicKeyBase64Url(trimmed) ?? trimmed;
 }
 
 async function loadState(baseDir?: string): Promise<DeviceBootstrapStateFile> {
