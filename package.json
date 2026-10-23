@@ -2048,7 +2048,7 @@
     "jsdom": "29.1.1",
     "lit": "3.3.3",
     "lit-analyzer": "2.0.3",
-    "markdown-it": "14.3.0",
+    "markdown-it": "14.3.3",
     "marked": "18.0.7",
     "node-addon-api": "^8.9.2",
     "node-gyp": "^13.0.2",
