@@ -123,7 +123,7 @@ describe("agent audit lifecycle generations", () => {
       terminalSettleMs: 0,
     });
     const runId = "run-reused-across-generations";
-    const occurredAt = 1_786_000_000_000;
+    const occurredAt = Date.now();
     const firstGeneration = getAgentEventLifecycleGeneration();
 
     recorder.record(
@@ -194,7 +194,7 @@ describe("agent audit lifecycle generations", () => {
       terminalSettleMs: 0,
     });
     const runId = "run-reused-tool-registry";
-    const occurredAt = 1_786_000_000_000;
+    const occurredAt = Date.now();
     const firstGeneration = getAgentEventLifecycleGeneration();
     registerAgentRunContext(runId, {
       lifecycleGeneration: firstGeneration,
@@ -242,7 +242,7 @@ describe("agent audit lifecycle generations", () => {
       terminalSettleMs: 0,
     });
     const runId = "run-reused-persisted";
-    const occurredAt = 1_786_000_000_000;
+    const occurredAt = Date.now();
     const firstGeneration = getAgentEventLifecycleGeneration();
 
     recorder.record(
@@ -937,7 +937,7 @@ describe("agent audit lifecycle generations", () => {
       terminalSettleMs: 0,
     });
     const runId = "run-reused-generationless-terminal";
-    const occurredAt = 1_786_000_000_000;
+    const occurredAt = Date.now();
     const firstGeneration = getAgentEventLifecycleGeneration();
 
     recorder.record(

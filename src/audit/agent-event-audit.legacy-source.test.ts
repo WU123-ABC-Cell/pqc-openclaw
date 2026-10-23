@@ -45,7 +45,7 @@ describe("agent audit legacy source ids", () => {
   it("keeps a shipped legacy row immutable while separating later generations", async () => {
     const database = createDatabaseOptions();
     const runId = "run-shipped-legacy-replay";
-    const occurredAt = 1_786_000_000_000;
+    const occurredAt = Date.now();
     const legacySourceId = `${runId}:1:${occurredAt}:agent.run.started`;
     recordAuditEvent(
       {
@@ -128,7 +128,7 @@ describe("agent audit legacy source ids", () => {
   it("deduplicates a generation-qualified replay against equivalent shipped provenance", () => {
     const database = createDatabaseOptions();
     const runId = "run-equivalent-shipped-replay";
-    const occurredAt = 1_786_000_000_000;
+    const occurredAt = Date.now();
     const legacySourceId = `${runId}:1:${occurredAt}:agent.run.started`;
     const provenance = {
       sourceSequence: 1,
