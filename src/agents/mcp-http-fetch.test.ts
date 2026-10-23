@@ -279,7 +279,7 @@ describe("MCP HTTP fetch helpers", () => {
 
     expect(fetchCalls).toHaveLength(1);
     expect(fetchCalls[0]?.url).toBe("https://auth.example.com/token");
-    expect((fetchCalls[0]?.init as RequestInit).body).toBe(body);
+    expect((fetchCalls[0]?.init as RequestInit | undefined)?.body).toBe(body);
   });
 
   it("blocks cross-origin replay from a real SDK Streamable HTTP transport", async () => {
@@ -302,7 +302,7 @@ describe("MCP HTTP fetch helpers", () => {
       );
       expect(fetchCalls).toHaveLength(1);
       expect(fetchCalls[0]?.url).toBe("https://mcp.example.com/mcp");
-      expect((fetchCalls[0]?.init as RequestInit).method).toBe("POST");
+      expect((fetchCalls[0]?.init as RequestInit | undefined)?.method).toBe("POST");
     } finally {
       await transport.close();
     }
@@ -325,7 +325,7 @@ describe("MCP HTTP fetch helpers", () => {
     });
 
     // FetchLike exposes only string | URL, but the wrapper also accepts Request at runtime.
-    const fetchWithRequestInput = fetch as (input: Request) => Promise<Response>;
+    const fetchWithRequestInput = fetch as unknown as (input: Request) => Promise<Response>;
     await expect(fetchWithRequestInput(request)).rejects.toThrow("Redirect target blocked");
     expect(fetchCalls).toHaveLength(1);
     expect(fetchCalls[0]?.url).toBe("https://auth.example.com/token");
