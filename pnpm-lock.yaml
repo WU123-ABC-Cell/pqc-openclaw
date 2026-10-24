@@ -12,6 +12,7 @@ overrides:
   '@anthropic-ai/sdk': 0.115.0
   '@opentelemetry/core': 2.10.0
   '@opentelemetry/propagator-jaeger': 2.10.0
+  '@azure/msal-node': 7.1.0
   '@aws-sdk/core': 3.977.1
   '@aws-sdk/credential-provider-node': 3.972.72
   '@aws-sdk/xml-builder': 3.972.37
@@ -2764,8 +2765,12 @@ packages:
     resolution: {integrity: sha512-yDhtBOGDCdK9ipQ9g3+wmlMEPnZx2pXaDicDd9jYyR1L+7lEbvEohTDmF5qejZDutZY3m9pWPxeYxzNC701A2w==}
     engines: {node: '>=0.8.0'}
 
-  '@azure/msal-node@5.4.2':
-    resolution: {integrity: sha512-fnqOpGYAV+i0RH4W5HB6Oy1IhqGZoCdnp7Y2Sa9k18FlT8aBkCA7L8Hv19hUHLDUK6kVjUO29AfnGX6wgAHyNg==}
+  '@azure/msal-common@16.14.2':
+    resolution: {integrity: sha512-HOBR0Gfo39TMrkxNG8k6cfjRkrRjXZc3JQs3ebMWQc9S4cihuknMYra3sgmzbZB752oQBqBN9+WF7c826p2vIQ==}
+    engines: {node: '>=0.8.0'}
+
+  '@azure/msal-node@7.1.0':
+    resolution: {integrity: sha512-s1O6hSY/C/dmqykTmmeHY6GhSkDuY8N1gxyhuLyaCwbY7N+UBvU2Wu4flas7+NxZiAPcXNPVpgt3n/HP/5yL+w==}
     engines: {node: '>=20'}
 
   '@babel/code-frame@7.29.7':
@@ -10104,7 +10109,7 @@ snapshots:
       '@azure/core-util': 1.14.0(supports-color@10.2.2)
       '@azure/logger': 1.4.0(supports-color@10.2.2)
       '@azure/msal-browser': 5.17.1
-      '@azure/msal-node': 5.4.2
+      '@azure/msal-node': 7.1.0
       open: 10.2.0
       tslib: 2.8.1
     transitivePeerDependencies:
@@ -10123,9 +10128,11 @@ snapshots:
 
   '@azure/msal-common@16.11.2': {}
 
-  '@azure/msal-node@5.4.2':
+  '@azure/msal-common@16.14.2': {}
+
+  '@azure/msal-node@7.1.0':
     dependencies:
-      '@azure/msal-common': 16.11.2
+      '@azure/msal-common': 16.14.2
       jsonwebtoken: 9.0.3
 
   '@babel/code-frame@7.29.7':
@@ -11357,7 +11364,7 @@ snapshots:
 
   '@microsoft/teams.apps@2.0.14(debug@4.4.3(supports-color@10.2.2))(supports-color@10.2.2)':
     dependencies:
-      '@azure/msal-node': 5.4.2
+      '@azure/msal-node': 7.1.0
       '@microsoft/teams.api': 2.0.14(debug@4.4.3(supports-color@10.2.2))(supports-color@10.2.2)
       '@microsoft/teams.common': 2.0.14(debug@4.4.3(supports-color@10.2.2))(supports-color@10.2.2)
       '@microsoft/teams.graph': 2.0.14(debug@4.4.3(supports-color@10.2.2))(supports-color@10.2.2)
