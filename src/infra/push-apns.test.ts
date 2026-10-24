@@ -8,6 +8,12 @@ import { MAX_TIMER_TIMEOUT_MS } from "@openclaw/normalization-core/number-coerci
 import { createRequireRecord } from "openclaw/plugin-sdk/test-fixtures";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../test-utils/deferred.js";
+import { deriveDeviceIdFromPublicKey, publicKeyRawBase64UrlFromPem } from "./device-identity.js";
+import {
+  encodeMlDsa65PublicKey,
+  encodeMlDsa65SecretKey,
+  generateMlDsa65KeyPair,
+} from "./mldsa65-key-storage.js";
 import { startProxy, stopProxy, type ProxyHandle } from "./net/proxy/proxy-lifecycle.js";
 import {
   appendApnsResponseBodyCapture,
@@ -26,6 +32,16 @@ import {
 const testAuthPrivateKey = generateKeyPairSync("ec", {
   namedCurve: "prime256v1",
 }).privateKey.export({ format: "pem", type: "pkcs8" });
+
+const testRelayGatewayIdentity = (() => {
+  const { publicKey, secretKey } = generateMlDsa65KeyPair();
+  const publicKeyRaw = publicKeyRawBase64UrlFromPem(encodeMlDsa65PublicKey(publicKey));
+  const deviceId = deriveDeviceIdFromPublicKey(publicKeyRaw);
+  if (!deviceId) {
+    throw new Error("failed to derive test relay gateway device id");
+  }
+  return { deviceId, privateKeyPem: encodeMlDsa65SecretKey(secretKey) };
+})();
 
 const testApnsServerKey = `-----BEGIN PRIVATE KEY-----`; // pragma: allowlist secret
 const testApnsServerKeyPem = `${testApnsServerKey}
@@ -144,10 +160,7 @@ function createRelayApnsSendFixture(params: {
       baseUrl: "https://relay.openclaw.test",
       timeoutMs: 2_500,
     },
-    gatewayIdentity: {
-      deviceId: "gateway-device-1",
-      privateKeyPem: testAuthPrivateKey,
-    },
+    gatewayIdentity: testRelayGatewayIdentity,
   };
 }
 
@@ -919,7 +932,7 @@ describe("push APNs send semantics", () => {
       relayConfig,
       sendGrant: "send-grant-123",
       relayHandle: "relay-handle-12345678",
-      gatewayDeviceId: "gateway-device-1",
+      gatewayDeviceId: gatewayIdentity.deviceId,
       pushType: "alert",
       priority: "10",
     });
@@ -967,7 +980,7 @@ describe("push APNs send semantics", () => {
       relayConfig,
       sendGrant: "send-grant-123",
       relayHandle: "relay-handle-12345678",
-      gatewayDeviceId: "gateway-device-1",
+      gatewayDeviceId: gatewayIdentity.deviceId,
       pushType: "background",
       priority: "5",
     });
