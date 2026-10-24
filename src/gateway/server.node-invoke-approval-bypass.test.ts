@@ -10,6 +10,11 @@ import {
   publicKeyRawBase64UrlFromPem,
   signDevicePayload,
 } from "../infra/device-identity.js";
+import {
+  encodeMlDsa65PublicKey,
+  encodeMlDsa65SecretKey,
+  generateMlDsa65KeyPair,
+} from "../infra/mldsa65-key-storage.js";
 import { GATEWAY_CLIENT_MODES, GATEWAY_CLIENT_NAMES } from "../utils/message-channel.js";
 import { GatewayClient } from "./client.js";
 import { buildDeviceAuthPayload } from "./device-auth.js";
@@ -32,9 +37,9 @@ const NODE_CONNECT_TIMEOUT_MS = 10_000;
 const CONNECT_REQ_TIMEOUT_MS = 2_000;
 
 function createDeviceKeyMaterial(label: string): DeviceIdentity & { publicKeyRaw: string } {
-  const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
-  const publicKeyPem = publicKey.export({ type: "spki", format: "pem" });
-  const privateKeyPem = privateKey.export({ type: "pkcs8", format: "pem" });
+  const { publicKey, secretKey } = generateMlDsa65KeyPair();
+  const publicKeyPem = encodeMlDsa65PublicKey(publicKey);
+  const privateKeyPem = encodeMlDsa65SecretKey(secretKey);
   const publicKeyRaw = publicKeyRawBase64UrlFromPem(publicKeyPem);
   const deviceId = requireNonEmptyString(deriveDeviceIdFromPublicKey(publicKeyRaw), label);
   return {
