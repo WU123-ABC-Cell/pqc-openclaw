@@ -537,7 +537,7 @@ describe("package-openclaw-for-docker", () => {
     const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-docker-ai-undici-output-"));
     const rootPackageJsonPath = path.join(sourceDir, "package.json");
     const rootPackageJson = JSON.stringify({
-      dependencies: { "@openclaw/ai": "workspace:*", "dep-a": "1.2.3", undici: "8.10.2" },
+      dependencies: { "@openclaw/ai": "workspace:*", "dep-a": "1.2.3", undici: "8.12.2" },
       name: "openclaw",
       version: "2026.7.2",
     });
@@ -549,7 +549,7 @@ describe("package-openclaw-for-docker", () => {
     fs.writeFileSync(path.join(aiWorkspacePath, "package.json"), "{}\n");
     fs.writeFileSync(
       path.join(installedUndiciPath, "package.json"),
-      JSON.stringify({ name: "undici", version: "7.29.1" }),
+      JSON.stringify({ name: "undici", version: "7.30.1" }),
     );
     fs.writeFileSync(path.join(installedUndiciPath, "index.js"), "module.exports = {};\n");
     fs.writeFileSync(path.join(stagedAiPath, "original-marker"), "workspace package");
@@ -568,7 +568,7 @@ describe("package-openclaw-for-docker", () => {
             fs.writeFileSync(
               path.join(destination, "package.json"),
               JSON.stringify({
-                dependencies: { "dep-a": "1.2.3", undici: "7.29.1" },
+                dependencies: { "dep-a": "1.2.3", undici: "7.30.1" },
                 name: "@openclaw/ai",
                 version: "2026.7.2",
               }),
@@ -583,7 +583,7 @@ describe("package-openclaw-for-docker", () => {
         dependencies: Record<string, string>;
         bundleDependencies: string[];
       };
-      expect(stagedManifest.dependencies).toEqual({ undici: "7.29.1" });
+      expect(stagedManifest.dependencies).toEqual({ undici: "7.30.1" });
       expect(stagedManifest.bundleDependencies).toEqual(["undici"]);
       expect(
         JSON.parse(
@@ -594,9 +594,9 @@ describe("package-openclaw-for-docker", () => {
         ),
       ).toMatchObject({
         name: "undici",
-        version: "7.29.1",
+        version: "7.30.1",
       });
-      expect(fs.readFileSync(rootPackageJsonPath, "utf8")).toContain('"undici": "8.10.2"');
+      expect(fs.readFileSync(rootPackageJsonPath, "utf8")).toContain('"undici": "8.12.2"');
 
       await cleanup();
       expect(fs.readFileSync(rootPackageJsonPath, "utf8")).toBe(rootPackageJson);

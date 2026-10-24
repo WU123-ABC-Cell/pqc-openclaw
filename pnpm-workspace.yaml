@@ -139,7 +139,7 @@ overrides:
   fast-uri: 4.1.5
   proxy-addr: 2.0.8
   simple-git: 4.0.2
-  "undici@7": 7.29.1
+  "undici@7": 7.30.1
   follow-redirects: 1.16.1
   defu: 6.1.7
   fast-xml-parser: 5.10.1

@@ -928,10 +928,10 @@ describe("check-openclaw-package-tarball", () => {
     },
     {
       label: "wrong-version",
-      nestedManifest: { name: "undici", version: "8.10.2" },
-      expected: "private undici version must be 7.29.1",
+      nestedManifest: { name: "undici", version: "8.12.2" },
+      expected: "private undici version must be 7.30.1",
     },
-    { label: "correct", nestedManifest: { name: "undici", version: "7.29.1" }, expected: "" },
+    { label: "correct", nestedManifest: { name: "undici", version: "7.30.1" }, expected: "" },
   ])(
     "checks the AI-private Undici in a bundled package ($label)",
     ({ nestedManifest, expected }) => {
@@ -941,7 +941,7 @@ describe("check-openclaw-package-tarball", () => {
           "dist/index.js": "export {};\n",
           "node_modules/@openclaw/ai/package.json": JSON.stringify({
             ...JSON.parse(AI_RUNTIME_PACKAGE_JSON),
-            dependencies: { undici: "7.29.1" },
+            dependencies: { undici: "7.30.1" },
             bundleDependencies: ["undici"],
           }),
           "node_modules/@openclaw/ai/dist/index.mjs": "export {};\n",
@@ -973,7 +973,7 @@ describe("check-openclaw-package-tarball", () => {
         "2026.7.2",
         {
           packageJson: {
-            dependencies: { "@openclaw/ai": "2026.6.11", undici: "8.10.2" },
+            dependencies: { "@openclaw/ai": "2026.6.11", undici: "8.12.2" },
             bundleDependencies: ["@openclaw/ai"],
           },
         },
