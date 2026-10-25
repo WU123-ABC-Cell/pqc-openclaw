@@ -3,6 +3,7 @@
 import { expectDefined } from "@openclaw/normalization-core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { PluginManifestRecord, PluginManifestRegistry } from "../plugins/manifest-registry.js";
+import { collectRawBundledChannelConfigIssues } from "./validation-channel-rules.js";
 import {
   validateConfigObjectRawWithPlugins,
   validateConfigObjectWithPlugins,
@@ -574,6 +575,29 @@ describe("validateConfigObjectWithPlugins DM policy warnings", () => {
 });
 
 describe("validateConfigObjectRawWithPlugins channel metadata", () => {
+  it.each([
+    ["https://open.feishu.cn", true],
+    ["https://", false],
+    ["https://not a url", false],
+    ["http://open.feishu.cn", false],
+  ])("keeps generated Feishu URL validation for %s", (domain, valid) => {
+    const issues = collectRawBundledChannelConfigIssues({
+      channels: { feishu: { domain, accounts: { main: { domain } } } },
+    });
+    const domainIssues = issues.filter((issue) => issue.path.includes("domain"));
+    expect(domainIssues.length === 0).toBe(valid);
+  });
+
+  it("accepts string and numeric sender IDs but rejects objects in generated allowFrom", () => {
+    const issuesFor = (allowFrom: Array<string | number>) =>
+      collectRawBundledChannelConfigIssues({ channels: { feishu: { allowFrom } } }).filter(
+        (issue) => issue.path.includes("allowFrom"),
+      );
+
+    expect(issuesFor(["ou_a", 123])).toEqual([]);
+    expect(issuesFor([{ bad: true }] as unknown as Array<string | number>)).not.toEqual([]);
+  });
+
   it("still injects channel AJV defaults even in raw mode — persistence safety is handled by io.ts", () => {
     // Channel and plugin AJV validation always runs with applyDefaults: true
     // (hardcoded) to avoid breaking schemas that mark defaulted fields as

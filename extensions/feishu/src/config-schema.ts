@@ -26,7 +26,8 @@ const FeishuGroupPolicySchema = z.union([
 ]);
 const FeishuDomainSchema = z.union([
   z.enum(["feishu", "lark"]),
-  z.string().url().startsWith("https://"),
+  // Keep `uri` in generated JSON Schema while retaining the HTTPS prefix pattern.
+  z.string().startsWith("https://").url(),
 ]);
 const FeishuConnectionModeSchema = z.enum(["websocket", "webhook"]);
 const FeishuWebhookPathSchema = z
