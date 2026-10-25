@@ -10,6 +10,7 @@ import { createLazyRuntimeModule } from "openclaw/plugin-sdk/lazy-runtime";
 import { definePluginEntry, type AnyAgentTool } from "openclaw/plugin-sdk/plugin-entry";
 import { validateSupportedA2UIJsonl } from "./src/a2ui-jsonl.js";
 import { canvasConfigSchema, isCanvasHostEnabled } from "./src/config.js";
+import { assertA2UIMessageLimits } from "./src/host/a2ui-app/message-limits.js";
 import { A2UI_PATH, CANVAS_HOST_PATH, CANVAS_WS_PATH } from "./src/host/a2ui-shared.js";
 import { CanvasToolSchema } from "./src/tool-schema.js";
 
@@ -136,6 +137,16 @@ export default definePluginEntry({
             return {
               ok: false,
               code: "INVALID_A2UI_JSONL",
+              message: formatErrorMessage(error),
+            };
+          }
+        } else if (ctx.command === "canvas.a2ui.push" && Array.isArray(params.messages)) {
+          try {
+            assertA2UIMessageLimits(params.messages);
+          } catch (error) {
+            return {
+              ok: false,
+              code: "INVALID_A2UI_MESSAGES",
               message: formatErrorMessage(error),
             };
           }

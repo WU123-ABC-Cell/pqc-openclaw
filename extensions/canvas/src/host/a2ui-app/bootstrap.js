@@ -8,6 +8,7 @@ import { themeContext } from "@openclaw/a2ui-theme-context";
 import { html, css, LitElement, unsafeCSS } from "lit";
 import "@a2ui/lit/ui";
 import { repeat } from "lit/directives/repeat.js";
+import { assertA2UIMessageLimits } from "./message-limits.ts";
 
 const modalStyles = css`
   dialog {
@@ -538,9 +539,7 @@ class OpenClawA2UIHost extends LitElement {
   }
 
   applyMessages(messages) {
-    if (!Array.isArray(messages)) {
-      throw new Error("A2UI: expected messages array");
-    }
+    assertA2UIMessageLimits(messages);
     this.#processor.processMessages(messages);
     this.#syncSurfaces();
     if (this.pendingAction?.phase === "sent") {

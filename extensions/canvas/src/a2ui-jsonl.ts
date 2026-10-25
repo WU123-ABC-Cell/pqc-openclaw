@@ -1,6 +1,8 @@
 /**
  * A2UI JSONL helpers for Canvas text rendering and validation.
  */
+import { assertA2UIMessageLimits } from "./host/a2ui-app/message-limits.js";
+
 const A2UI_ACTION_KEYS = [
   "beginRendering",
   "surfaceUpdate",
@@ -8,6 +10,8 @@ const A2UI_ACTION_KEYS = [
   "deleteSurface",
   "createSurface",
 ] as const;
+const MAX_A2UI_JSONL_BYTES = 16 * 1024 * 1024;
+const MAX_A2UI_MESSAGES = 1024;
 
 /** A2UI message dialects recognized by the Canvas validator. */
 type A2UIVersion = "v0.8" | "v0.9";
@@ -42,11 +46,15 @@ export function buildA2UITextJsonl(text: string) {
 
 /** Validates A2UI JSONL and returns the detected dialect/version metadata. */
 function validateA2UIJsonl(jsonl: string) {
+  if (Buffer.byteLength(jsonl, "utf8") > MAX_A2UI_JSONL_BYTES) {
+    throw new Error("Invalid A2UI JSONL: payload exceeds 16 MiB");
+  }
   const lines = jsonl.split(/\r?\n/);
   const errors: string[] = [];
   let sawV08 = false;
   let sawV09 = false;
   let messageCount = 0;
+  const messages: unknown[] = [];
 
   lines.forEach((line, idx) => {
     const trimmed = line.trim();
@@ -54,6 +62,9 @@ function validateA2UIJsonl(jsonl: string) {
       return;
     }
     messageCount += 1;
+    if (messageCount > MAX_A2UI_MESSAGES) {
+      throw new Error("Invalid A2UI JSONL: too many messages");
+    }
     let obj: unknown;
     try {
       obj = JSON.parse(trimmed) as unknown;
@@ -61,6 +72,7 @@ function validateA2UIJsonl(jsonl: string) {
       errors.push(`line ${idx + 1}: ${String(err)}`);
       return;
     }
+    messages.push(obj);
     if (!obj || typeof obj !== "object" || Array.isArray(obj)) {
       errors.push(`line ${idx + 1}: expected JSON object`);
       return;
@@ -100,6 +112,11 @@ function validateA2UIJsonl(jsonl: string) {
   }
   if (errors.length > 0) {
     throw new Error(`Invalid A2UI JSONL:\n- ${errors.join("\n- ")}`);
+  }
+  try {
+    assertA2UIMessageLimits(messages);
+  } catch (error) {
+    throw new Error(`Invalid A2UI JSONL: ${String(error)}`, { cause: error });
   }
 
   const version: A2UIVersion = sawV09 ? "v0.9" : "v0.8";

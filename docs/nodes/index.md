@@ -588,6 +588,7 @@ Notes:
 
 - Mobile and Linux desktop nodes use a bundled app-owned A2UI page for action-capable rendering.
 - Only A2UI v0.8 JSONL is supported (v0.9/createSurface is rejected).
+- A push accepts up to 1,024 messages. JSONL is limited to 16 MiB of UTF-8. The renderer also rejects batches with more than 4,096 array entries across nested collections, more than 16,384 values, over 32 levels of nesting, or over 16 MiB of string data. Split larger updates into smaller pushes.
 - iOS and Android render remote Gateway Canvas pages, but A2UI button actions are dispatched only from the bundled app-owned A2UI page. Gateway-hosted HTTP/HTTPS A2UI pages are render-only on those mobile clients.
 - macOS can dispatch actions from the exact capability-scoped Gateway A2UI page selected by the app. Other HTTP/HTTPS pages remain render-only.
 - Linux dispatches actions only from the bundled A2UI page. Other HTTP/HTTPS pages remain render-only, and a headless Linux node without the desktop app does not advertise Canvas.

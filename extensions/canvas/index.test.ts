@@ -324,7 +324,7 @@ describe("Canvas plugin entry", () => {
     expect(invokeNode).toHaveBeenCalledWith();
   });
 
-  it("leaves canonical A2UI message arrays to the native node", async () => {
+  it("forwards canonical A2UI message arrays after checking their limits", async () => {
     const { nodeInvokePolicies } = registerCanvas();
     const policy = nodeInvokePolicies[0];
     if (!policy) {
@@ -347,4 +347,38 @@ describe("Canvas plugin entry", () => {
     expect(invokeNode).toHaveBeenCalledTimes(1);
     expect(invokeNode).toHaveBeenCalledWith();
   });
+
+  it.each([
+    [
+      "JSONL",
+      "canvas.a2ui.pushJSONL",
+      {
+        jsonl: JSON.stringify({
+          dataModelUpdate: { surfaceId: "main", contents: Array(4096).fill(null) },
+        }),
+      },
+      "INVALID_A2UI_JSONL",
+    ],
+    [
+      "message arrays",
+      "canvas.a2ui.push",
+      { messages: [{ dataModelUpdate: { surfaceId: "main", contents: Array(4096).fill(null) } }] },
+      "INVALID_A2UI_MESSAGES",
+    ],
+  ])(
+    "rejects oversized nested %s before native invocation",
+    async (_label, command, params, code) => {
+      const { nodeInvokePolicies } = registerCanvas();
+      const policy = nodeInvokePolicies[0];
+      if (!policy) {
+        throw new Error("Canvas node invoke policy was not registered");
+      }
+      const invokeNode = vi.fn(async () => ({ ok: true as const }));
+
+      const result = await policy.handle(createNodeInvokeContext({ command, params, invokeNode }));
+
+      expect(result).toMatchObject({ ok: false, code });
+      expect(invokeNode).not.toHaveBeenCalled();
+    },
+  );
 });
