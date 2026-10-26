@@ -3,8 +3,13 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { pathToFileURL } from "node:url";
+import { build as esbuild } from "esbuild";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { buildDiscordActivitySdk } from "../../scripts/build-discord-activity-sdk.mjs";
+import {
+  buildDiscordActivitySdk,
+  createDiscordZod4Plugin,
+} from "../../scripts/build-discord-activity-sdk.mjs";
 import {
   listStaleGeneratedPluginAssets,
   parseBundledPluginAssetArgs,
@@ -71,6 +76,76 @@ describe("bundled plugin assets", () => {
         write: false,
       }),
     );
+  });
+
+  it("builds Discord SDK schemas with Zod 4 and retains unknown-scope fallback", async () => {
+    const rootDir = tempDirs.make("openclaw-discord-zod4-");
+    const assetPath = path.join(rootDir, "embedded-app-sdk.mjs");
+    await expect(buildDiscordActivitySdk({ outputPath: assetPath })).resolves.toBe(true);
+    const sdk = await import(pathToFileURL(assetPath).href);
+    expect(sdk.DiscordSDK).toBeTypeOf("function");
+
+    const migration = await createDiscordZod4Plugin();
+    const schemaPath = path.join(rootDir, "schemas.mjs");
+    const result = await esbuild({
+      entryPoints: [
+        path.join(
+          process.cwd(),
+          "node_modules/@discord/embedded-app-sdk/output/generated/schemas.mjs",
+        ),
+      ],
+      bundle: true,
+      platform: "node",
+      format: "esm",
+      outfile: schemaPath,
+      write: false,
+      metafile: true,
+      plugins: [migration.plugin],
+    });
+    const inputs = Object.keys(result.metafile.inputs);
+    expect(inputs.some((input) => input.includes("/lib/zod/"))).toBe(false);
+    expect(inputs.some((input) => input.includes("/zod/v4/"))).toBe(true);
+    expect(migration.counts()).toMatchObject({ fallbacks: 1 });
+    const output = result.outputFiles[0];
+    if (!output) {
+      throw new Error("esbuild did not produce a Discord SDK schema bundle");
+    }
+    fs.writeFileSync(schemaPath, output.text);
+    const { AuthenticateResponseSchema } = await import(pathToFileURL(schemaPath).href);
+    const parsed = AuthenticateResponseSchema.safeParse({
+      access_token: "token",
+      user: { username: "u", discriminator: "0", id: "1", public_flags: 0 },
+      scopes: ["unknown"],
+      expires: "2026-10-25T00:00:00Z",
+      application: { description: "test", icon: null, id: "1", name: "test" },
+    });
+    expect(parsed.success).toBe(true);
+    expect(parsed.data.scopes).toEqual([-1]);
+  });
+
+  it("accepts all four supported A2UI v0.8 messages with Zod 4", async () => {
+    const schemaPath = path.join(
+      process.cwd(),
+      "node_modules/@a2ui/web_core/src/v0_8/schema/server-to-client.js",
+    );
+    const { A2uiMessageSchema } = await import(pathToFileURL(schemaPath).href);
+    const messages = [
+      { beginRendering: { surfaceId: "main", root: "text" } },
+      {
+        surfaceUpdate: {
+          surfaceId: "main",
+          components: [{ id: "text", component: { Text: { text: { literalString: "hello" } } } }],
+        },
+      },
+      { dataModelUpdate: { surfaceId: "main", contents: [{ key: "value", valueString: "hi" }] } },
+      { deleteSurface: { surfaceId: "main" } },
+    ];
+    for (const message of messages) {
+      expect(A2uiMessageSchema.safeParse(message).success).toBe(true);
+    }
+    expect(
+      A2uiMessageSchema.safeParse({ deleteSurface: { surfaceId: "main" }, extra: true }).success,
+    ).toBe(false);
   });
 
   it("discovers the Discord Embedded App SDK build hook", async () => {
