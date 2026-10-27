@@ -674,9 +674,18 @@ function exactVersionFromOverrideSpec(spec) {
 function exactOverrideRulesFromOverrides(overrides) {
   return Object.fromEntries(
     Object.entries(normalizeOverrides(overrides))
-      .map(([name, spec]) => [name, exactVersionFromOverrideSpec(spec)])
-      .filter((entry) => entry[1] !== null),
+      .map(([name, spec]) => [
+        name,
+        isPlainObject(spec)
+          ? exactOverrideRulesFromOverrides(spec)
+          : exactVersionFromOverrideSpec(spec),
+      ])
+      .filter((entry) => entry[1] !== null && !isEmptyObject(entry[1])),
   );
+}
+
+function isEmptyObject(value) {
+  return isPlainObject(value) && Object.keys(value).length === 0;
 }
 
 function parseLockPackagePath(lockPath) {
@@ -712,7 +721,26 @@ function collectOverrideViolations(lockfile, overrideRules) {
   for (const [lockPath, metadata] of Object.entries(packages)) {
     const packagePath = parseLockPackagePath(lockPath);
     const packageName = packagePath.at(-1)?.name;
-    const expectedVersion = packageName ? overrideRules[packageName] : undefined;
+    const scopes = [overrideRules];
+    for (const ancestor of packagePath.slice(0, -1)) {
+      const version = packages[ancestor.path]?.version;
+      const existingScopes = scopes.length;
+      for (let index = 0; index < existingScopes; index++) {
+        const scope = scopes[index];
+        for (const selector of [ancestor.name, version && `${ancestor.name}@${version}`]) {
+          if (selector && isPlainObject(scope[selector])) {
+            scopes.push(scope[selector]);
+          }
+        }
+      }
+    }
+    const expectedVersion = packageName
+      ? scopes
+          .toReversed()
+          .map((scope) => scope[packageName])
+          .map((spec) => (isPlainObject(spec) ? spec["."] : spec))
+          .find((spec) => spec !== undefined)
+      : undefined;
     if (!expectedVersion || metadata?.version === expectedVersion) {
       continue;
     }

@@ -266,6 +266,40 @@ describe("generate-npm-package-lock", () => {
     ).toBeUndefined();
   });
 
+  it("checks the scoped qs override under body-parser without applying it elsewhere", () => {
+    const lockfile = {
+      packages: {
+        "": {},
+        "node_modules/body-parser": { version: "2.4.0" },
+        "node_modules/body-parser/node_modules/qs": { version: "6.16.1" },
+        "node_modules/qs": { version: "6.15.3" },
+      },
+    };
+    const rules = exactOverrideRulesFromOverrides({
+      "body-parser@2.4.0>qs": "6.16.1",
+      qs: "6.15.3",
+    });
+
+    expect(collectOverrideViolations(lockfile, rules)).toEqual([]);
+
+    lockfile.packages["node_modules/body-parser/node_modules/qs"].version = "6.15.3";
+    expect(collectOverrideViolations(lockfile, rules)).toEqual([
+      expect.objectContaining({
+        path: "node_modules/body-parser/node_modules/qs",
+        expectedVersion: "6.16.1",
+      }),
+    ]);
+
+    lockfile.packages["node_modules/body-parser/node_modules/qs"].version = "6.16.1";
+    lockfile.packages["node_modules/body-parser"].version = "2.3.0";
+    expect(collectOverrideViolations(lockfile, rules)).toEqual([
+      expect.objectContaining({
+        path: "node_modules/body-parser/node_modules/qs",
+        expectedVersion: "6.15.3",
+      }),
+    ]);
+  });
+
   it("detects npm package-lock entries that bypass the pnpm lock", () => {
     const lockfile = {
       packages: {
