@@ -6,10 +6,8 @@ import { setTimeout as delay } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 import { build as esbuild } from "esbuild";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import {
-  buildDiscordActivitySdk,
-  createDiscordZod4Plugin,
-} from "../../scripts/build-discord-activity-sdk.mjs";
+import { createDiscordZod4Plugin } from "../../extensions/discord/scripts/discord-zod4-plugin.mjs";
+import { buildDiscordActivitySdk } from "../../scripts/build-discord-activity-sdk.mjs";
 import {
   listStaleGeneratedPluginAssets,
   parseBundledPluginAssetArgs,
