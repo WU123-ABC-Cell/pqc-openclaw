@@ -148,7 +148,8 @@ const defaultPublicDeprecatedExportsByEntrypointBudget = Object.freeze({
   "messaging-targets": 12,
   "provider-auth": 19,
   "telegram-account": 3,
-  zod: 282,
+  // +21: public Zod 4.6.6 re-exports after the security upgrade.
+  zod: 303,
 });
 
 export function readPluginSdkSurfaceBudgets(env = process.env) {
@@ -224,7 +225,9 @@ export function readPluginSdkSurfaceBudgets(env = process.env) {
       // +1: shared channel interactive dispatcher with canonical binding authorization.
       // +1: namespaced OpenClaw PQC DM runtime for the Nostr channel.
       // +1: name the existing SecretRef setup command type for consumer declarations.
-      4836,
+      // +2: public PQC message encrypt/decrypt input types.
+      // +21: public Zod 4.6.6 re-exports after the security upgrade.
+      4859,
       env,
     ),
     publicFunctionExports: readPluginSdkSurfaceBudgetEnv(
@@ -274,7 +277,8 @@ export function readPluginSdkSurfaceBudgets(env = process.env) {
       // +1: auth-profile preservation decision for native model pickers.
       // +2: shared channel question-reaction store and preflight-audio factories.
       // +1: shared channel interactive dispatcher with canonical binding authorization.
-      2911,
+      // +14: callable Zod 4.6.6 re-exports after the security upgrade.
+      2925,
       env,
     ),
     publicDeprecatedExports: readPluginSdkSurfaceBudgetEnv(
@@ -286,7 +290,8 @@ export function readPluginSdkSurfaceBudgets(env = process.env) {
       // +1: flushLogger projected through the deprecated text-runtime barrel.
       // +1: shared ingress error factory projected through channel-message.
       // +1: shared ingress retention defaults projected through channel-message.
-      1703,
+      // +21: Zod 4.6.6 exports projected through the deprecated Zod facade.
+      1724,
       env,
     ),
     publicWildcardReexports: readPluginSdkSurfaceBudgetEnv(
