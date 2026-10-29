@@ -7,6 +7,8 @@ export {
   formatPermissionDetail,
   formatPermissionRemediation,
   inspectPathPermissions,
+  readOwnerAndDacl,
+  type OwnerAndDaclResult,
   safeStat,
   type PermissionCheck,
   type PermissionCheckOptions,

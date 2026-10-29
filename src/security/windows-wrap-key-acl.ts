@@ -1,6 +1,6 @@
 import { lstatSync } from "node:fs";
 import { dirname } from "node:path";
-import { readOwnerAndDacl, type OwnerAndDaclResult } from "@openclaw/fs-safe/permissions";
+import { readOwnerAndDacl, type OwnerAndDaclResult } from "../infra/permissions.js";
 
 type WindowsAclFacts = Extract<OwnerAndDaclResult, { status: "supported" }>;
 
