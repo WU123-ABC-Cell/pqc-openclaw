@@ -1,5 +1,4 @@
 import { Buffer } from "node:buffer";
-import { generateKeyPairSync } from "node:crypto";
 // Gateway client tests cover WebSocket protocol negotiation, auth persistence,
 // proxy bypass setup, command dispatch, reconnect, and error handling.
 import { createRequireRecord } from "openclaw/plugin-sdk/test-fixtures";
@@ -8,8 +7,14 @@ import {
   MIN_CLIENT_PROTOCOL_VERSION,
   PROTOCOL_VERSION,
 } from "../../packages/gateway-protocol/src/index.js";
-import type { DeviceIdentity } from "../infra/device-identity.js";
+import { verifyDeviceSignature, type DeviceIdentity } from "../infra/device-identity.js";
+import {
+  encodeMlDsa65PublicKey,
+  encodeMlDsa65SecretKey,
+  generateMlDsa65KeyPair,
+} from "../infra/mldsa65-key-storage.js";
 import { captureEnv } from "../test-utils/env.js";
+import { buildDeviceAuthPayloadV3 } from "./device-auth.js";
 
 function waitForFast<T>(
   callback: () => T | Promise<T>,
@@ -249,11 +254,11 @@ function createClientWithIdentity(
   onClose: (code: number, reason: string) => void,
   overrides: Partial<ConstructorParameters<typeof GatewayClient>[0]> = {},
 ) {
-  const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+  const { secretKey, publicKey } = generateMlDsa65KeyPair();
   const identity: DeviceIdentity = {
     deviceId,
-    privateKeyPem: privateKey.export({ type: "pkcs8", format: "pem" }),
-    publicKeyPem: publicKey.export({ type: "spki", format: "pem" }),
+    privateKeyPem: encodeMlDsa65SecretKey(secretKey),
+    publicKeyPem: encodeMlDsa65PublicKey(publicKey),
   };
   return new GatewayClient({
     url: "ws://127.0.0.1:18789",
@@ -588,9 +593,11 @@ describe("GatewayClient request errors", () => {
         payload: { nonce: "nonce-1", ts: 1_777_777_777_000 },
       }),
     );
-    const connectFrame = JSON.parse(
-      ws.sent.find((frame) => frame.includes('"method":"connect"')) ?? "{}",
-    ) as { id?: string };
+    const connectRaw = ws.sent.find((frame) => frame.includes('"method":"connect"'));
+    if (!connectRaw) {
+      throw new Error("missing connect frame before testing request errors");
+    }
+    const connectFrame = JSON.parse(connectRaw) as { id: string };
     ws.emitMessage(
       JSON.stringify({
         type: "res",
@@ -1165,7 +1172,11 @@ describe("GatewayClient connect auth payload", () => {
         agentRuntimeIdentityToken?: string;
       };
       device?: {
-        signedAt?: number;
+        id: string;
+        publicKey: string;
+        signature: string;
+        signedAt: number;
+        nonce: string;
       };
     };
   };
@@ -1218,18 +1229,57 @@ describe("GatewayClient connect auth payload", () => {
   it("signs device proof with Gateway time instead of client wall-clock time", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2040-01-01T00:00:00.000Z"));
-    const client = createClientWithIdentity("device-gateway-time", vi.fn());
+    const client = createClientWithIdentity("device-gateway-time", vi.fn(), {
+      clientName: "gateway-client",
+      mode: "backend",
+      role: "operator",
+      scopes: ["operator.read"],
+      platform: "linux",
+    });
     const challengeTs = 1_700_000_000_123;
 
-    client.start();
-    const ws = getLatestWs();
-    ws.emitOpen();
-    emitConnectChallenge(ws, "nonce-clock-skew", challengeTs);
-    const connect = connectRequestFrom(ws);
+    try {
+      client.start();
+      const ws = getLatestWs();
+      ws.emitOpen();
+      emitConnectChallenge(ws, "nonce-clock-skew", challengeTs);
+      const device = connectRequestFrom(ws).params?.device;
+      if (!device) {
+        throw new Error("missing signed device proof");
+      }
 
-    expect(connect.params?.device?.signedAt).toBe(challengeTs);
-    client.stop();
-    vi.useRealTimers();
+      expect(device.id).toBe("device-gateway-time");
+      expect(device.nonce).toBe("nonce-clock-skew");
+      expect(device.signedAt).toBe(challengeTs);
+      expect(Buffer.from(device.publicKey, "base64url")).toHaveLength(1952);
+      expect(Buffer.from(device.signature, "base64url")).toHaveLength(3309);
+      const payload = {
+        deviceId: "device-gateway-time",
+        clientId: "gateway-client",
+        clientMode: "backend",
+        role: "operator",
+        scopes: ["operator.read"],
+        nonce: "nonce-clock-skew",
+        platform: "linux",
+      };
+      expect(
+        verifyDeviceSignature(
+          device.publicKey,
+          buildDeviceAuthPayloadV3({ ...payload, signedAtMs: challengeTs }),
+          device.signature,
+        ),
+      ).toBe(true);
+      expect(
+        verifyDeviceSignature(
+          device.publicKey,
+          buildDeviceAuthPayloadV3({ ...payload, signedAtMs: Date.now() }),
+          device.signature,
+        ),
+      ).toBe(false);
+    } finally {
+      client.stop();
+      vi.useRealTimers();
+    }
   });
 
   it("fails closed when a device challenge omits its Gateway timestamp", () => {
