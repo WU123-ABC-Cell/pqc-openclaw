@@ -15,16 +15,17 @@ describe("zod default locale", () => {
     vi.resetModules();
   });
 
-  it("restores real issue messages when the bundled locale registration was tree-shaken", async () => {
+  it("restores real issue messages when the locale is absent before config import", async () => {
     vi.resetModules();
     const { z } = await import("zod");
     const previousLocaleError = z.config().localeError;
 
     try {
-      // Simulate a built dist: zod@4 is sideEffects:false, so its implicit
-      // locale registration can be dropped by bundling.
+      // Zod 4.6.6 installs English when constructing a schema, so clear the
+      // locale after construction to exercise the missing-locale fallback.
+      const degradedSchema = z.object({ expected: z.string() }).strict();
       z.config({ localeError: undefined });
-      const degraded = z.object({ expected: z.string() }).strict().safeParse({ unexpected: true });
+      const degraded = degradedSchema.safeParse({ unexpected: true });
       expect(firstIssueMessage(degraded)).toBe("Invalid input");
 
       const { OpenClawSchema } = await import("./zod-schema.js");
