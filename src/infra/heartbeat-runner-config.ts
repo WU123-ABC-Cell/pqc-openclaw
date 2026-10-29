@@ -24,7 +24,10 @@ import { createSubsystemLogger } from "../logging/subsystem.js";
 import { getActivePluginChannelRegistry } from "../plugins/runtime.js";
 import { normalizeAgentId } from "../routing/session-key.js";
 import { readStoredDeviceIdentityReadOnly } from "./device-identity-store.js";
-import { loadOrCreateDeviceIdentity } from "./device-identity.js";
+import {
+  loadOrCreateDeviceIdentity,
+  resolveDeviceIdentityWrappingOptions,
+} from "./device-identity.js";
 import { resolveActiveHoursTimezone } from "./heartbeat-active-hours.js";
 import { resolveHeartbeatIntervalMs } from "./heartbeat-summary.js";
 import type { HeartbeatWakeSource } from "./heartbeat-wake.js";
@@ -115,7 +118,7 @@ export function resolveHeartbeatSchedulerSeed(
   const env = options.env ?? process.env;
   try {
     const identity = options.readOnly
-      ? readStoredDeviceIdentityReadOnly({ env })
+      ? readStoredDeviceIdentityReadOnly(resolveDeviceIdentityWrappingOptions({ env }, false))
       : loadOrCreateDeviceIdentity({ env });
     if (identity) {
       return identity.deviceId;
