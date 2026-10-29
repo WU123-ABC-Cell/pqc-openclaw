@@ -362,21 +362,27 @@ describe("backup commands", () => {
     try {
       const runtime = createBackupTestRuntime();
       await mockStateOnlyBackupPlan(stateDir);
-      tarCreateMock.mockImplementationOnce(
-        (options: { filter?: (entryPath: string) => boolean }, entryPaths: string[]) =>
-          createMockTarStream({
-            beforeRead: () => {
-              const manifestPath = entryPaths[0];
-              const stateRoot = entryPaths[1];
-              if (!manifestPath || !stateRoot) {
-                throw new Error("backup test expected manifest and state entries");
-              }
-              expect(options.filter?.(manifestPath)).toBe(true);
-              expect(
-                options.filter?.(path.join(stateRoot, "agents", "main", "sessions", "s.jsonl")),
-              ).toBe(false);
-            },
-          }),
+      const sessionsDir = path.join(stateDir, "agents", "main", "sessions");
+      await fs.mkdir(sessionsDir, { recursive: true });
+      await fs.writeFile(path.join(sessionsDir, "s.jsonl"), "live session\n", "utf8");
+      tarCreateMock.mockImplementationOnce((_options: unknown, entryPaths: string[]) =>
+        createMockTarStream({
+          beforeRead: async () => {
+            const manifestPath = entryPaths[0];
+            const stateRoot = entryPaths[1];
+            if (!manifestPath || !stateRoot) {
+              throw new Error("backup test expected manifest and state entries");
+            }
+            expect(JSON.parse(await fs.readFile(manifestPath, "utf8"))).toHaveProperty(
+              "schemaVersion",
+              1,
+            );
+            expect(await fs.readFile(path.join(stateRoot, "openclaw.json"), "utf8")).toBe("{}");
+            await expect(
+              fs.access(path.join(stateRoot, "agents", "main", "sessions", "s.jsonl")),
+            ).rejects.toMatchObject({ code: "ENOENT" });
+          },
+        }),
       );
 
       const result = await backupCreateCommand(runtime, {
