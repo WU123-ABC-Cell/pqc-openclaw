@@ -24,6 +24,15 @@ const streamMocks = vi.hoisted(() => ({
   anthropicVertex: vi.fn(),
 }));
 
+// Node transport loads the pinned Undici constructor rather than the global.
+// The AI handshake suite separately covers the real constructor dependency.
+vi.mock("undici", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("undici")>()),
+  get WebSocket() {
+    return globalThis.WebSocket;
+  },
+}));
+
 vi.mock("../anthropic-vertex-stream.js", () => ({
   createAnthropicVertexStreamFnForModel: streamMocks.anthropicVertex,
 }));
@@ -388,7 +397,7 @@ describe("resolveEmbeddedAgentStreamFn", () => {
       );
       const result = await stream.result();
 
-      expect(result.stopReason).toBe("stop");
+      expect(result.stopReason, result.errorMessage).toBe("stop");
       expect(fetchSpy).not.toHaveBeenCalled();
       expect(boundaryStreamFactory.mock.calls.slice(initialBoundaryCalls)).toEqual([]);
       expect(handshakes).toHaveLength(1);
