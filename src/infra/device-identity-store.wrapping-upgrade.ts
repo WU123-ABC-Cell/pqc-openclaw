@@ -19,6 +19,7 @@ import {
   type StoredDeviceIdentity,
 } from "./device-identity-store.crypto.js";
 import { inspectIdentityPopulationRow } from "./device-identity-store.population-preflight.js";
+import { identityRowForWrite } from "./device-identity-write-generation.js";
 import { executeSqliteQuerySync, getNodeSqliteKysely } from "./kysely-sync.js";
 import { decodeMlDsa65SecretKey } from "./mldsa65-key-storage.js";
 
@@ -181,20 +182,28 @@ export function upgradeStoredIdentityPopulation(
             "Identity population changed during Doctor planning; retry.",
           );
         }
+        const written = new Map<string, Row>();
         for (const [identityKey, row] of planned) {
+          const previous = rows.find((entry) => entry.identity_key === identityKey);
+          if (!previous) {
+            throw new DeviceIdentityStorageError("Doctor identity disappeared during upgrade.");
+          }
+          const next = identityRowForWrite(db, row, previous);
           executeSqliteQuerySync(
             db,
-            sql.updateTable("device_identities").set(row).where("identity_key", "=", identityKey),
+            sql.updateTable("device_identities").set(next).where("identity_key", "=", identityKey),
           );
+          written.set(identityKey, next);
         }
         if (newPrimary) {
+          newPrimary = identityRowForWrite(db, newPrimary);
           executeSqliteQuerySync(db, sql.insertInto("device_identities").values(newPrimary));
         }
         const after = executeSqliteQuerySync(
           db,
           sql.selectFrom("device_identities").selectAll().orderBy("identity_key"),
         ).rows;
-        const expected = snapshot.rows.map((row) => planned.get(row.identity_key) ?? row);
+        const expected = snapshot.rows.map((row) => written.get(row.identity_key) ?? row);
         if (newPrimary) {
           expected.push(newPrimary);
         }

@@ -7,7 +7,6 @@ import {
   hasCanonicalAuditEventsSchema,
 } from "./openclaw-state-db-audit-migration.js";
 import {
-  OPENCLAW_STATE_SCHEMA_VERSION,
   OPENCLAW_STATE_STRICT_SCHEMA_VERSION,
   type OpenClawStateDatabaseOptions,
   type OpenClawStateDatabaseSchemaMigration,
@@ -110,14 +109,14 @@ export function repairLegacyGatewayRestartHandoffsForStrictMigration(db: Databas
 
 export function markCurrentStateSchemaVersion(
   db: DatabaseSync,
-  options: { createMetadataIfMissing?: boolean } = {},
+  options: { createMetadataIfMissing?: boolean; targetVersion: 6 | 7 },
 ): void {
   // Pre-v2 databases can legitimately predate the audit table. Leave their
   // version untouched so normal open can create the complete v2 schema first.
   if (!tableExists(db, "audit_events")) {
     return;
   }
-  db.exec(`PRAGMA user_version = ${OPENCLAW_STATE_SCHEMA_VERSION};`);
+  db.exec(`PRAGMA user_version = ${options.targetVersion};`);
   if (
     tableExists(db, "schema_meta") &&
     ["meta_key", "schema_version", "updated_at"].every((column) =>
@@ -136,12 +135,12 @@ export function markCurrentStateSchemaVersion(
          ON CONFLICT(meta_key) DO UPDATE SET
            schema_version = excluded.schema_version,
            updated_at = excluded.updated_at`,
-      ).run(OPENCLAW_STATE_SCHEMA_VERSION, now, now);
+      ).run(options.targetVersion, now, now);
       return;
     }
     db.prepare(
       "UPDATE schema_meta SET schema_version = ?, updated_at = ? WHERE meta_key = 'primary'",
-    ).run(OPENCLAW_STATE_SCHEMA_VERSION, now);
+    ).run(options.targetVersion, now);
   }
 }
 

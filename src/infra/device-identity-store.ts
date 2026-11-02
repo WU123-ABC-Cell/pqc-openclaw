@@ -63,6 +63,7 @@ import {
   inspectStoredIdentityPopulation,
   upgradeStoredIdentityPopulation,
 } from "./device-identity-store.wrapping-upgrade.js";
+import { identityRowForWrite } from "./device-identity-write-generation.js";
 import {
   executeSqliteQuerySync,
   executeSqliteQueryTakeFirstSync,
@@ -94,7 +95,7 @@ type DeviceIdentityDatabase = Pick<OpenClawStateKyselyDatabase, "device_identiti
 type DeviceIdentityRow = Selectable<DeviceIdentityDatabase["device_identities"]>;
 
 /** Failure to authenticate/decrypt is not proof that the identity may be replaced. */
-class DeviceIdentityKeyAccessError extends DeviceIdentityStorageError {}
+export class DeviceIdentityKeyAccessError extends DeviceIdentityStorageError {}
 
 function identityKeyAccessError(
   identityKey: string,
@@ -114,7 +115,7 @@ function identityKeyAccessError(
  *  the keyring, while the read path is the single place that talks to it.
  *  If the wrapped form is present but the keyring is missing or the
  *  keyId is unknown, the row is treated as invalid (caller runs Doctor). */
-function rowToStoredIdentity(
+export function rowToStoredIdentity(
   row: DeviceIdentityRow,
   expectedIdentityKey: string,
   wrappingKeyProvider?: WrappingKeyProvider,
@@ -446,6 +447,8 @@ function storedIdentityToRow(
       ? new TextEncoder().encode(stored.mldsaPrivateKeyWrapped)
       : null,
     mldsa_private_key_wrap_key_id: stored.mldsaPrivateKeyWrapKeyId,
+    write_generation: 0,
+    write_revision: 0,
   };
 }
 
@@ -592,7 +595,7 @@ export function insertStoredDeviceIdentityIfAbsent(
           db,
           kysely
             .insertInto("device_identities")
-            .values(storedIdentityToRow(resolved.identityKey, candidate))
+            .values(identityRowForWrite(db, storedIdentityToRow(resolved.identityKey, candidate)))
             .onConflict((conflict) => conflict.column("identity_key").doNothing()),
         );
       }
@@ -623,8 +626,6 @@ export function repairInvalidStoredDeviceIdentity(
   validateStoredDeviceIdentity(candidate, resolved.identityKey);
   return runOpenClawStateWriteTransaction(
     ({ db }) => {
-      let repaired = false;
-      let rotated = false;
       let existingRow: DeviceIdentityRow | null = null;
       try {
         existingRow = readStoredIdentityRowFromDatabase({ db }, resolved.identityKey);
@@ -633,7 +634,7 @@ export function repairInvalidStoredDeviceIdentity(
           : null;
         if (existing) {
           validateStoredDeviceIdentity(existing, resolved.identityKey);
-          return { identity: existing, repaired, rotated };
+          return { identity: existing, repaired: false, rotated: false };
         }
       } catch (error) {
         if (error instanceof DeviceIdentityKeyAccessError) {
@@ -655,7 +656,13 @@ export function repairInvalidStoredDeviceIdentity(
             db,
             getNodeSqliteKysely<DeviceIdentityDatabase>(db)
               .updateTable("device_identities")
-              .set(storedIdentityToRow(resolved.identityKey, salvaged, candidate.createdAtMs))
+              .set(
+                identityRowForWrite(
+                  db,
+                  storedIdentityToRow(resolved.identityKey, salvaged, candidate.createdAtMs),
+                  existingRow,
+                ),
+              )
               .where("identity_key", "=", resolved.identityKey),
           );
           const authoritative = readStoredIdentityFromDatabase(
@@ -669,28 +676,35 @@ export function repairInvalidStoredDeviceIdentity(
             );
           }
           validateStoredDeviceIdentity(authoritative, resolved.identityKey);
-          return { identity: authoritative, repaired: true, rotated };
+          return { identity: authoritative, repaired: true, rotated: false };
         }
+        // Doctor replaces an invalid identity by UPDATE, retaining its row revision.
         executeSqliteQuerySync(
           db,
           getNodeSqliteKysely<DeviceIdentityDatabase>(db)
-            .deleteFrom("device_identities")
+            .updateTable("device_identities")
+            .set(
+              identityRowForWrite(
+                db,
+                storedIdentityToRow(resolved.identityKey, candidate),
+                existingRow,
+              ),
+            )
             .where("identity_key", "=", resolved.identityKey),
         );
       }
 
       // An absent row after an invalid-row detection still means identity continuity was lost.
       // Report the generated winner so Doctor always surfaces the required re-approval.
-      repaired = true;
-      rotated = true;
-
-      executeSqliteQuerySync(
-        db,
-        getNodeSqliteKysely<DeviceIdentityDatabase>(db)
-          .insertInto("device_identities")
-          .values(storedIdentityToRow(resolved.identityKey, candidate))
-          .onConflict((conflict) => conflict.column("identity_key").doNothing()),
-      );
+      if (!existingRow) {
+        executeSqliteQuerySync(
+          db,
+          getNodeSqliteKysely<DeviceIdentityDatabase>(db)
+            .insertInto("device_identities")
+            .values(identityRowForWrite(db, storedIdentityToRow(resolved.identityKey, candidate)))
+            .onConflict((conflict) => conflict.column("identity_key").doNothing()),
+        );
+      }
       const authoritative = readStoredIdentityFromDatabase(
         { db },
         resolved.identityKey,
@@ -702,7 +716,7 @@ export function repairInvalidStoredDeviceIdentity(
         );
       }
       validateStoredDeviceIdentity(authoritative, resolved.identityKey);
-      return { identity: authoritative, repaired, rotated };
+      return { identity: authoritative, repaired: true, rotated: true };
     },
     { env: options.env, path: resolved.databasePath },
     { operationLabel: "device-identity.doctor-repair" },
@@ -766,7 +780,13 @@ export function ensureStoredDeviceIdentityWrapped(options: DeviceIdentityStoreOp
           db,
           getNodeSqliteKysely<DeviceIdentityDatabase>(db)
             .updateTable("device_identities")
-            .set(storedIdentityToRow(resolved.identityKey, canonical, Date.now()))
+            .set(
+              identityRowForWrite(
+                db,
+                storedIdentityToRow(resolved.identityKey, canonical, Date.now()),
+                row,
+              ),
+            )
             .where("identity_key", "=", resolved.identityKey),
         );
       } finally {

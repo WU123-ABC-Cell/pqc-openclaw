@@ -554,7 +554,87 @@ CREATE TABLE IF NOT EXISTS device_identities (
   mldsa_private_key_pem TEXT,
   mldsa_private_key_wrapped BLOB,
   mldsa_private_key_wrap_key_id TEXT
+  -- BEGIN IDENTITY_WRITE_V7_COLUMNS
+  -- Dormant until the operator activates the identity write generation.
+  , write_generation INTEGER NOT NULL DEFAULT 0
+  , write_revision INTEGER NOT NULL DEFAULT 0
+  -- END IDENTITY_WRITE_V7_COLUMNS
 ) STRICT;
+
+-- BEGIN IDENTITY_WRITE_V7_OBJECTS
+-- This metadata is non-secret. It is populated only by explicit rotation activation.
+CREATE TABLE IF NOT EXISTS identity_write_generation (
+  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+  generation INTEGER NOT NULL CHECK (generation > 0),
+  new_write_key_id TEXT NOT NULL CHECK (length(new_write_key_id) > 0)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS identity_write_receipts (
+  receipt_id TEXT PRIMARY KEY,
+  generation INTEGER NOT NULL,
+  new_write_key_id TEXT NOT NULL CHECK (length(new_write_key_id) > 0)
+) STRICT;
+
+-- These triggers are inert until an explicit activation inserts the singleton.
+CREATE TRIGGER IF NOT EXISTS identity_write_insert BEFORE INSERT ON device_identities
+    WHEN EXISTS (SELECT 1 FROM identity_write_generation WHERE singleton = 1) BEGIN
+    SELECT CASE WHEN NEW.write_generation IS NOT (
+      SELECT generation FROM identity_write_generation WHERE singleton = 1
+    ) OR NEW.write_revision != 0 THEN RAISE(ABORT, 'identity-write-fence') END;
+    SELECT CASE WHEN EXISTS (
+      SELECT 1 FROM device_identities WHERE identity_key = NEW.identity_key
+    ) THEN RAISE(ABORT, 'identity-write-fence') END;
+    SELECT CASE WHEN NEW.identity_key NOT IN (
+      'apple-mldsa65-primary', 'apple-mldsa65-node', 'apple-mldsa65-shareExtension'
+    ) AND (
+      NEW.mldsa_private_key_wrapped IS NULL OR
+      length(NEW.mldsa_private_key_wrapped) = 0 OR
+      NEW.mldsa_private_key_wrap_key_id IS NULL OR
+      NEW.mldsa_private_key_wrap_key_id IS NOT (
+        SELECT new_write_key_id FROM identity_write_generation WHERE singleton = 1
+      )
+    ) THEN RAISE(ABORT, 'identity-write-fence') END;
+  END;
+  CREATE TRIGGER IF NOT EXISTS identity_write_update BEFORE UPDATE ON device_identities
+    WHEN EXISTS (SELECT 1 FROM identity_write_generation WHERE singleton = 1) BEGIN
+    SELECT CASE WHEN NEW.identity_key != OLD.identity_key OR
+      NEW.write_generation IS NOT (
+        SELECT generation FROM identity_write_generation WHERE singleton = 1
+      ) OR NEW.write_revision != OLD.write_revision + 1
+    THEN RAISE(ABORT, 'identity-write-fence') END;
+    SELECT CASE WHEN NEW.identity_key NOT IN (
+      'apple-mldsa65-primary', 'apple-mldsa65-node', 'apple-mldsa65-shareExtension'
+    ) AND (
+      NEW.mldsa_private_key_wrapped IS NULL OR
+      length(NEW.mldsa_private_key_wrapped) = 0 OR
+      NEW.mldsa_private_key_wrap_key_id IS NULL OR
+      (NEW.mldsa_private_key_wrap_key_id IS NOT OLD.mldsa_private_key_wrap_key_id AND
+        NEW.mldsa_private_key_wrapped IS OLD.mldsa_private_key_wrapped) OR
+      ((NEW.mldsa_private_key_wrap_key_id IS NOT OLD.mldsa_private_key_wrap_key_id OR
+        NEW.mldsa_private_key_wrapped IS NOT OLD.mldsa_private_key_wrapped) AND
+        NEW.mldsa_private_key_wrap_key_id IS NOT (
+          SELECT new_write_key_id FROM identity_write_generation WHERE singleton = 1
+        ))
+    ) THEN RAISE(ABORT, 'identity-write-fence') END;
+  END;
+  CREATE TRIGGER IF NOT EXISTS identity_write_delete BEFORE DELETE ON device_identities
+    WHEN EXISTS (SELECT 1 FROM identity_write_generation WHERE singleton = 1) BEGIN
+    SELECT RAISE(ABORT, 'identity-write-fence');
+  END;
+  CREATE TRIGGER IF NOT EXISTS identity_generation_no_insert BEFORE INSERT ON identity_write_generation
+    WHEN EXISTS (SELECT 1 FROM identity_write_generation WHERE singleton = 1) BEGIN
+    SELECT RAISE(ABORT, 'identity-write-fence');
+  END;
+  CREATE TRIGGER IF NOT EXISTS identity_generation_advance BEFORE UPDATE ON identity_write_generation BEGIN
+    SELECT CASE WHEN NEW.generation != OLD.generation + 1 OR
+      length(NEW.new_write_key_id) = 0
+    THEN RAISE(ABORT, 'identity-write-fence') END;
+  END;
+  CREATE TRIGGER IF NOT EXISTS identity_generation_no_delete BEFORE DELETE ON identity_write_generation BEGIN
+    SELECT RAISE(ABORT, 'identity-write-fence');
+  END;
+-- END IDENTITY_WRITE_V7_OBJECTS
+
 
 CREATE INDEX IF NOT EXISTS idx_device_identities_device
   ON device_identities(device_id, updated_at_ms DESC);

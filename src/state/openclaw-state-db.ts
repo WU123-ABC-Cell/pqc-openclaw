@@ -51,6 +51,7 @@ import {
   LAZY_ADDITIVE_STATE_INDEXES,
   LAZY_ADDITIVE_STATE_TABLES,
   OPENCLAW_SQLITE_BUSY_TIMEOUT_MS,
+  OPENCLAW_STATE_DEFAULT_SCHEMA_VERSION,
   OPENCLAW_STATE_SCHEMA_VERSION,
   OPENCLAW_STATE_STRICT_SCHEMA_VERSION,
   type OpenClawStateDatabase,
@@ -77,7 +78,10 @@ import {
 } from "./openclaw-state-db-schema-repair.js";
 import * as sessionWatchMigration from "./openclaw-state-db-session-watch-migration.js";
 import type { DB as OpenClawStateKyselyDatabase } from "./openclaw-state-db.generated.js";
-import { OPENCLAW_STATE_SCHEMA_SQL } from "./openclaw-state-schema.js";
+import {
+  canonicalStateSchemaSqlForVersion,
+  ordinaryStateSchemaVersion,
+} from "./openclaw-state-schema-versioned.js";
 
 export {
   OPENCLAW_DATABASE_SCHEMA_DOCS_URL,
@@ -201,10 +205,11 @@ const stateDbLog = createSubsystemLogger("state/db");
 
 function canonicalStateSchemaForRuntime(options: {
   includeVersionLazyAdditiveTables: boolean;
+  schemaVersion: 6 | 7;
 }): string {
   // Current-version databases may lack lazy additive tables. First-use tables
   // remain absent on every schema path so only their feature owner can create them.
-  let eagerSchema = OPENCLAW_STATE_SCHEMA_SQL;
+  let eagerSchema = canonicalStateSchemaSqlForVersion(options.schemaVersion);
   const omittedTables = options.includeVersionLazyAdditiveTables
     ? FIRST_USE_STATE_TABLES
     : LAZY_ADDITIVE_STATE_TABLES;
@@ -235,7 +240,7 @@ function canonicalStateSchemaForRuntime(options: {
 
 function executeCanonicalStateSchema(
   database: DatabaseSync,
-  options: { includeVersionLazyAdditiveTables: boolean },
+  options: { includeVersionLazyAdditiveTables: boolean; schemaVersion: 6 | 7 },
 ): void {
   database.exec(canonicalStateSchemaForRuntime(options));
 }
@@ -261,15 +266,17 @@ export function repairOpenClawStateDatabaseSchema(options: OpenClawStateDatabase
       () => {
         const applied: string[] = [];
         const previousVersion = readSqliteUserVersion(db);
-        if (previousVersion === OPENCLAW_STATE_SCHEMA_VERSION) {
-          for (const name of repairCanonicalSqliteIndexes(db, pathname, OPENCLAW_STATE_SCHEMA_SQL, {
+        const targetVersion = ordinaryStateSchemaVersion(db);
+        const schemaSql = canonicalStateSchemaSqlForVersion(targetVersion);
+        if (previousVersion === targetVersion) {
+          for (const name of repairCanonicalSqliteIndexes(db, pathname, schemaSql, {
             allowMissingColumns: true,
           })) {
             rebuiltIndexNames.add(name);
           }
           // Current-schema doctor repair may normalize recognized columns or
           // table options, but it must never recreate a missing table empty.
-          assertSqliteSchemaTablesPresent(db, pathname, OPENCLAW_STATE_SCHEMA_SQL, {
+          assertSqliteSchemaTablesPresent(db, pathname, schemaSql, {
             allowedMissingTables: LAZY_ADDITIVE_STATE_TABLES,
           });
         }
@@ -296,9 +303,10 @@ export function repairOpenClawStateDatabaseSchema(options: OpenClawStateDatabase
         }
         assertCanonicalStateSchemaShape(db, pathname);
         if (tableExists(db, "audit_events")) {
-          ensureAdditiveStateColumns(db);
+          ensureAdditiveStateColumns(db, targetVersion);
           executeCanonicalStateSchema(db, {
-            includeVersionLazyAdditiveTables: previousVersion !== OPENCLAW_STATE_SCHEMA_VERSION,
+            includeVersionLazyAdditiveTables: previousVersion !== targetVersion,
+            schemaVersion: targetVersion,
           });
           if (previousVersion < OPENCLAW_STATE_STRICT_SCHEMA_VERSION) {
             repairLegacyGatewayRestartHandoffsForStrictMigration(db);
@@ -306,7 +314,8 @@ export function repairOpenClawStateDatabaseSchema(options: OpenClawStateDatabase
           const strictMigration = migrateSqliteSchemaToStrictInTransaction(
             db,
             canonicalStateSchemaForRuntime({
-              includeVersionLazyAdditiveTables: previousVersion !== OPENCLAW_STATE_SCHEMA_VERSION,
+              includeVersionLazyAdditiveTables: previousVersion !== targetVersion,
+              schemaVersion: targetVersion,
             }),
             { databaseLabel: pathname },
           );
@@ -315,16 +324,17 @@ export function repairOpenClawStateDatabaseSchema(options: OpenClawStateDatabase
               `Migrated shared state tables to SQLite STRICT typing (${strictMigration.migratedTables.length})`,
             );
           }
-          for (const name of repairCanonicalSqliteIndexes(db, pathname, OPENCLAW_STATE_SCHEMA_SQL, {
+          for (const name of repairCanonicalSqliteIndexes(db, pathname, schemaSql, {
             verifyPhysicalIntegrity: false,
           })) {
             rebuiltIndexNames.add(name);
           }
         }
         markCurrentStateSchemaVersion(db, {
-          createMetadataIfMissing: previousVersion < OPENCLAW_STATE_SCHEMA_VERSION,
+          createMetadataIfMissing: previousVersion < targetVersion,
+          targetVersion,
         });
-        if (readSqliteUserVersion(db) === OPENCLAW_STATE_SCHEMA_VERSION) {
+        if (readSqliteUserVersion(db) === targetVersion) {
           assertCurrentStateRuntimeSchema(db, pathname);
         }
         if (rebuiltIndexNames.size > 0) {
@@ -387,7 +397,7 @@ export function repairOpenClawStateDatabaseSchemaIfNeeded(
     database = openNodeSqliteDatabase(pathname, { readOnly: true });
     assertSupportedSchemaVersion(database, pathname);
     needsRepair =
-      readSqliteUserVersion(database) !== OPENCLAW_STATE_SCHEMA_VERSION ||
+      readSqliteUserVersion(database) !== ordinaryStateSchemaVersion(database) ||
       detectOpenClawStateDatabaseSchemaMigrationsFromDatabase(database, pathname).length > 0;
     if (!needsRepair) {
       assertCurrentStateRuntimeSchema(database, pathname);
@@ -415,8 +425,10 @@ function ensureSchema(db: DatabaseSync, pathname: string): void {
       () => {
         assertSupportedSchemaVersion(db, pathname);
         const previousVersion = readSqliteUserVersion(db);
-        if (previousVersion === OPENCLAW_STATE_SCHEMA_VERSION) {
-          repairCanonicalSqliteIndexes(db, pathname, OPENCLAW_STATE_SCHEMA_SQL, {
+        const targetVersion = ordinaryStateSchemaVersion(db);
+        const schemaSql = canonicalStateSchemaSqlForVersion(targetVersion);
+        if (previousVersion === targetVersion) {
+          repairCanonicalSqliteIndexes(db, pathname, schemaSql, {
             verifyPhysicalIntegrity: false,
           });
           assertCurrentStateRuntimeSchema(db, pathname);
@@ -424,11 +436,12 @@ function ensureSchema(db: DatabaseSync, pathname: string): void {
           assertOpenClawStateDatabaseV5ForMigration(db, { pathname });
         }
         dropLegacyStateTables(db);
-        ensureAdditiveStateColumns(db);
+        ensureAdditiveStateColumns(db, targetVersion);
         sessionWatchMigration.migrateSessionWatchCursorProvenance(db);
         assertCanonicalStateSchemaShape(db, pathname);
         executeCanonicalStateSchema(db, {
-          includeVersionLazyAdditiveTables: previousVersion !== OPENCLAW_STATE_SCHEMA_VERSION,
+          includeVersionLazyAdditiveTables: previousVersion !== targetVersion,
+          schemaVersion: targetVersion,
         });
         migrateLegacyCronRunLogsToTaskRuns(db);
         if (previousVersion < OPENCLAW_STATE_STRICT_SCHEMA_VERSION) {
@@ -436,15 +449,16 @@ function ensureSchema(db: DatabaseSync, pathname: string): void {
           migrateSqliteSchemaToStrictInTransaction(
             db,
             canonicalStateSchemaForRuntime({
-              includeVersionLazyAdditiveTables: previousVersion !== OPENCLAW_STATE_SCHEMA_VERSION,
+              includeVersionLazyAdditiveTables: previousVersion !== targetVersion,
+              schemaVersion: targetVersion,
             }),
             { databaseLabel: pathname },
           );
         }
-        repairCanonicalSqliteIndexes(db, pathname, OPENCLAW_STATE_SCHEMA_SQL, {
+        repairCanonicalSqliteIndexes(db, pathname, schemaSql, {
           verifyPhysicalIntegrity: false,
         });
-        db.exec(`PRAGMA user_version = ${OPENCLAW_STATE_SCHEMA_VERSION};`);
+        db.exec(`PRAGMA user_version = ${targetVersion};`);
         executeSqliteQuerySync(
           db,
           kysely
@@ -452,7 +466,7 @@ function ensureSchema(db: DatabaseSync, pathname: string): void {
             .values({
               meta_key: "primary",
               role: "global",
-              schema_version: OPENCLAW_STATE_SCHEMA_VERSION,
+              schema_version: targetVersion,
               agent_id: null,
               app_version: VERSION,
               created_at: now,
@@ -461,7 +475,7 @@ function ensureSchema(db: DatabaseSync, pathname: string): void {
             .onConflict((conflict) =>
               conflict.column("meta_key").doUpdateSet({
                 role: "global",
-                schema_version: OPENCLAW_STATE_SCHEMA_VERSION,
+                schema_version: targetVersion,
                 agent_id: null,
                 app_version: VERSION,
                 updated_at: now,
@@ -504,7 +518,7 @@ export async function openExistingOpenClawStateDatabaseReadOnly(
     db.exec(`PRAGMA busy_timeout = ${OPENCLAW_SQLITE_BUSY_TIMEOUT_MS};`);
     assertSupportedSchemaVersion(db, pathname);
     assertSqliteIntegrity(db, pathname);
-    if (readSqliteUserVersion(db) === OPENCLAW_STATE_SCHEMA_VERSION) {
+    if (readSqliteUserVersion(db) >= OPENCLAW_STATE_DEFAULT_SCHEMA_VERSION) {
       assertOpenClawStateDatabaseForMaintenance(db, { pathname });
     }
   } catch (error) {
@@ -555,29 +569,34 @@ function assertStateDatabaseIntegrityBeforeMutation(
 ): void {
   database.exec(`PRAGMA busy_timeout = ${OPENCLAW_SQLITE_BUSY_TIMEOUT_MS};`);
   const userVersion = readSqliteUserVersion(database);
+  const targetVersion = ordinaryStateSchemaVersion(database);
   const hasApplicationSchema = database
     .prepare("SELECT 1 FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' LIMIT 1")
     .get();
   const migrationPending =
-    (userVersion === 0 && hasApplicationSchema) ||
-    (userVersion > 0 && userVersion < OPENCLAW_STATE_SCHEMA_VERSION);
+    (userVersion === 0 && hasApplicationSchema) || (userVersion > 0 && userVersion < targetVersion);
   if (migrationPending) {
     stateDbLog.info("state database schema migration pending; verifying integrity first", {
       fromVersion: userVersion,
       path: pathname,
-      toVersion: OPENCLAW_STATE_SCHEMA_VERSION,
+      toVersion: targetVersion,
     });
   }
-  if (userVersion === OPENCLAW_STATE_SCHEMA_VERSION) {
-    verifyAndRepairCanonicalSqliteIndexes(database, pathname, OPENCLAW_STATE_SCHEMA_SQL, {
-      allowMissingColumns: true,
-      validateAfterRepair: () => assertCurrentStateRuntimeSchema(database, pathname),
-    });
+  if (userVersion === targetVersion) {
+    verifyAndRepairCanonicalSqliteIndexes(
+      database,
+      pathname,
+      canonicalStateSchemaSqlForVersion(targetVersion),
+      {
+        allowMissingColumns: true,
+        validateAfterRepair: () => assertCurrentStateRuntimeSchema(database, pathname),
+      },
+    );
   } else {
     // Every physical open proves the full file before schema mutation or exposure.
     assertSqliteIntegrity(database, pathname);
   }
-  if (userVersion === OPENCLAW_STATE_SCHEMA_VERSION) {
+  if (userVersion === targetVersion) {
     assertCurrentStateRuntimeSchema(database, pathname);
   }
 }

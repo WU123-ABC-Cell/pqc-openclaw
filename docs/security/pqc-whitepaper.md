@@ -2,9 +2,9 @@
 
 Author: 吴昊天 (Wu Haotian)
 
-Status updated: 2026-09-21
+Status updated: 2026-11-02 (v7 review candidate)
 
-Implementation baseline: `0c273072acc724edafbf516eaa38c9dd0195d9d1`
+Public baseline: `4e14148cfcab123ffc7497211cd570ed50152a1a`. This branch also contains an unshipped v7 key-rotation candidate.
 
 ## Status and scope
 
@@ -83,9 +83,9 @@ the wrapping key and protected data are not both available to the attacker.
 | Gateway device proof | `src/infra/device-identity.ts`; `src/gateway/server/ws-connection/handshake-auth-helpers.ts`                          | ML-DSA-65-only proof verification, not the previously described Ed25519-first dual-signature fallback                                                                                                               |
 | Native client proof  | Android `DeviceIdentityStore.kt`; shared Swift `DeviceIdentity.swift`                                                 | ML-DSA-65 wire keys/signatures. Android uses Bouncy Castle; Apple uses CryptoKit on iOS/macOS/watchOS 26 and keeps seed-backed keys in Apple-specific SQLite rows. Legacy Ed25519 authorization is not transferred. |
 | Nostr messages       | `extensions/nostr/src/nostr-bus.ts`; `extensions/nostr/src/nostr-pqc-key-announcement.ts`; `src/security/nip44-v2.ts` | Production uses the custom OpenClaw PQC DM v1 profile with kind `4444`, signed untrusted key discovery, explicit peer-key pinning and no live NIP-04 fallback; old kind `4` is queue-recovery-only                  |
-| Identity encryption  | `src/infra/device-identity-store.ts`; `src/security/secret-wrapping.ts`                                               | Wrapped identity storage exists, but length checks do not prove keypair correspondence and envelopes lack identity-context AAD                                                                                      |
-| Key selection        | `src/security/keyring-provider.ts`                                                                                    | File, environment, OS and composite providers exist; incomplete configuration, backend failure and global-cache isolation require repair                                                                            |
-| Key lifecycle        | `src/security/wrap-key-cli.ts`; `src/security/wrap-key-rotation.ts`                                                   | Auxiliary APIs exist; operator CLI registration and a verified persistent lifecycle are not established                                                                                                             |
+| Identity encryption  | `src/infra/device-identity-store.ts`; `src/security/secret-wrapping.ts`                                               | Wrapped identity rows use v2 identity-context AAD; the v7 candidate adds a write-generation fence, pending native and operational acceptance.                                                                       |
+| Key selection        | `src/security/keyring-provider.ts`                                                                                    | File, environment, OS and composite providers exist; partial OS configuration fails closed, and a failed active provider does not silently select another.                                                          |
+| Key lifecycle        | `src/cli/wrap-key-cli.ts`; `src/commands/wrap-key-offline.ts`                                                         | The v7 candidate registers offline file-key `prepare`, `activate`, `rotate` and `recover`; it remains unshipped pending native and deployment validation. Import/export are not registered.                         |
 | Logging              | `src/logging/pqc-log.ts`                                                                                              | PQC events use the canonical file/diagnostic transports with ordinary level filtering and redaction, not command stdout/stderr; there is no independent audit sink                                                  |
 | Deployment settings  | `docker-compose.pqc.yml`                                                                                              | Audit/level/require-lock variables are declared, but no corresponding production readers were found                                                                                                                 |
 
@@ -103,8 +103,11 @@ cannot safely fall back to another algorithm.
 ### Backup and recovery
 
 The default wrapping key is stored as `wrap-key.b64` in the state directory.
-The built-in backup includes state and does not exclude this file at the baseline;
-the separate shell backup does exclude it. These are different policies.
+Current built-in and shell backups exclude that file. The v7 candidate also
+places prepared keys in a private sibling `<state-directory>.wrap-keys` vault;
+the built-in backup excludes the vault and its aliases. The shell backup archives
+the state directory only, so an external backup of its parent must exclude the
+vault separately.
 
 Treat existing built-in archives as secret-bearing. Excluding one key file does
 not protect other credentials in an archive. Keep recovery keys independently
@@ -125,10 +128,12 @@ forensic preservation or delete a live database's sidecars to prepare a query.
 Normal configured logging may create or append log files; identity/key/schema
 read-only guarantees do not imply a write-free logging transport.
 
-`openclaw wrap-key import`, `export` and `rotate` are still unregistered. Do not
-copy old whitepaper command examples as an operational procedure. A usable restore
-and transactional persistent rotation flow, bounded imports and failure cleanup
-must be implemented and verified before claiming lifecycle support.
+`openclaw wrap-key import` and `export` remain unregistered. The v7 candidate's
+`prepare`, `activate`, `rotate` and `recover` commands are for review only: they
+require an offline operator handoff, support one active file key, and cannot prove
+that a running gateway has restarted with the new key. No Mac native acceptance
+has been performed. Do not run them against production state or treat a receipt
+alone as proof that the signing identity is usable.
 
 ### Migration and compatibility
 

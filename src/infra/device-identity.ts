@@ -21,24 +21,32 @@ import {
   preflightWrappingKeyProviderReadOnly,
   type WrappingKeyProviderPreflight,
 } from "../security/keyring-provider.js";
+import type { WrappingKeyProvider } from "../security/secret-wrapping.js";
 import {
   assertPrivateWindowsWrapKeyDirectory,
   assertPrivateWindowsWrapKeyFile,
 } from "../security/windows-wrap-key-acl.js";
 import { acquireDeviceIdentityCoordinator } from "./device-identity-coordinator.js";
 import {
+  activateStoredIdentityWriteGeneration,
+  readIdentityWriteReceipt,
+} from "./device-identity-store.activation.js";
+import {
+  DeviceIdentityKeyAccessError,
   generateStoredDeviceIdentity,
   insertStoredDeviceIdentityIfAbsent,
   PRIMARY_DEVICE_IDENTITY_KEY,
   preflightDeviceIdentityPopulationReadOnly,
   readStoredDeviceIdentity,
   readStoredDeviceIdentityReadOnly,
+  rowToStoredIdentity,
   resolveDeviceIdentityStore,
   type DeviceIdentity,
   type DeviceIdentityPopulationPreflight,
   type DeviceIdentityStoreOptions,
   type StoredDeviceIdentity,
 } from "./device-identity-store.js";
+import { rotateStoredIdentityWriteGeneration } from "./device-identity-store.rotation.js";
 import { pruneMapToMaxSize } from "./map-size.js";
 import {
   decodeMlDsa65PublicKey,
@@ -229,6 +237,73 @@ export async function preflightDeviceIdentityReadinessReadOnly(
     population: await preflightDeviceIdentityPopulationReadOnly(resolvedOptions),
     provider,
   };
+}
+
+/** Operator-triggered activation; stop other runtimes before changing shared schema. */
+export function activateDeviceIdentityWriteGeneration(
+  receiptId: string,
+  options: Omit<DeviceIdentityStoreOptions, "identityKey"> = {},
+): { generation: 1; replayed: boolean; databaseState: "current" | "superseded" } {
+  return withDeviceIdentityCoordinator(options, (_resolved, resolvedOptions) => {
+    const receipt = readIdentityWriteReceipt(_resolved.databasePath, receiptId);
+    if (receipt?.generation === 1) {
+      return { generation: 1, replayed: true, databaseState: receipt.databaseState };
+    }
+    if (receipt) {
+      throw new Error("Identity write receipt belongs to another generation.");
+    }
+    assertNoPendingLegacyIdentity(resolvedOptions);
+    const wrappingOptions = resolveDeviceIdentityWrappingOptions(resolvedOptions, false);
+    const result = activateStoredIdentityWriteGeneration(
+      _resolved.databasePath,
+      wrappingOptions,
+      receiptId,
+      rowToStoredIdentity,
+      (error) => error instanceof DeviceIdentityKeyAccessError,
+    );
+    return { ...result, databaseState: "current" };
+  });
+}
+
+/** Rotate only after the new key is installed separately and the old keys remain available.
+ * `databaseState` describes the commit snapshot, not external key availability. */
+export function rotateDeviceIdentityWrappingKey(params: {
+  receiptId: string;
+  targetKeyId: string;
+  oldKeyring: WrappingKeyProvider;
+  newKeyring: WrappingKeyProvider;
+  options?: Omit<DeviceIdentityStoreOptions, "identityKey" | "wrappingKeyProvider">;
+}): {
+  generation: number;
+  replayed: boolean;
+  databaseState: "current" | "superseded";
+} {
+  const options = params.options ?? {};
+  return withDeviceIdentityCoordinator(options, (resolved, resolvedOptions) => {
+    const receipt = readIdentityWriteReceipt(resolved.databasePath, params.receiptId);
+    if (receipt) {
+      if (receipt.newWriteKeyId !== params.targetKeyId || receipt.generation < 2) {
+        throw new Error("Identity rotation receipt belongs to a different target or operation.");
+      }
+      return {
+        generation: receipt.generation,
+        replayed: true,
+        databaseState: receipt.databaseState,
+      };
+    }
+    assertNoPendingLegacyIdentity(resolvedOptions);
+    const result = rotateStoredIdentityWriteGeneration({
+      databasePath: resolved.databasePath,
+      options: resolvedOptions,
+      receiptId: params.receiptId,
+      targetKeyId: params.targetKeyId,
+      oldKeyring: params.oldKeyring,
+      newKeyring: params.newKeyring,
+      readRow: rowToStoredIdentity,
+      isKeyAccessError: (error) => error instanceof DeviceIdentityKeyAccessError,
+    });
+    return { ...result, databaseState: "current" };
+  });
 }
 
 function loadOrCreateDeviceIdentityOwned(options: DeviceIdentityStoreOptions): DeviceIdentity {

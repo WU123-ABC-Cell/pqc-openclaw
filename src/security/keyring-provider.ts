@@ -23,7 +23,7 @@
 // default keyring", whitepaper 2.2.5.A): try the active source, fall
 // back to the others in order.
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { munlockKey, protectKey } from "./mlock-helper.js";
 import { OsKeyring } from "./os-keyring.js";
@@ -154,6 +154,34 @@ export class FileKeyring implements KeyringProvider {
     return this.cachedKey;
   }
 
+  /** Offline rotation guard: a cached key must still be the private file on disk. */
+  assertCachedKeyStillInstalled(): void {
+    const cached = this.cachedKey;
+    if (!cached) {
+      throw new Error("FileKeyring: no key has been loaded for rotation verification");
+    }
+    const entry = lstatSync(this.keyPath);
+    const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+    if (
+      !entry.isFile() ||
+      entry.isSymbolicLink() ||
+      entry.nlink !== 1 ||
+      (uid !== undefined && entry.uid !== uid) ||
+      (process.platform !== "win32" && (entry.mode & 0o077) !== 0)
+    ) {
+      throw new Error("FileKeyring: cached rotation key is no longer a private file");
+    }
+    assertPrivateWindowsWrapKeyFile(this.keyPath);
+    const fresh = decodeBase64UrlKey(readFileSync(this.keyPath, "utf8").trim(), "rotation file");
+    try {
+      if (!timingSafeEqual(cached, fresh)) {
+        throw new Error("FileKeyring: rotation key changed on disk");
+      }
+    } finally {
+      fresh.fill(0);
+    }
+  }
+
   /** Drop the in-memory cache. Used by M7 rotation after the file
    *  has been swapped on disk. */
   invalidate(): void {
@@ -251,6 +279,16 @@ export class CompositeKeyring implements KeyringProvider {
 
   getActiveKey(): ActiveWrappingKey {
     return this.providers[0]!.getActiveKey();
+  }
+
+  /** Only the active source creates new envelopes. */
+  assertActiveFileKeyStillInstalled(): void {
+    const active = this.providers[0]!;
+    if (active instanceof FileKeyring) {
+      active.assertCachedKeyStillInstalled();
+    } else if (active instanceof CompositeKeyring) {
+      active.assertActiveFileKeyStillInstalled();
+    }
   }
 
   getKeyById(keyId: KeyId): Buffer | null {

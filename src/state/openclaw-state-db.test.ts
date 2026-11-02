@@ -18,7 +18,10 @@ import { readSqliteNumberPragma } from "../infra/sqlite-pragma.test-support.js";
 import { loadTaskRegistryStateFromSqlite } from "../tasks/task-registry.store.sqlite.js";
 import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
 import { VERSION } from "../version.js";
-import { FIRST_USE_STATE_TABLES } from "./openclaw-state-db-contract.js";
+import {
+  FIRST_USE_STATE_TABLES,
+  OPENCLAW_STATE_DEFAULT_SCHEMA_VERSION,
+} from "./openclaw-state-db-contract.js";
 import {
   findOpenClawStateDatabaseSchemaMigrationRequiredError,
   OpenClawStateDatabaseSchemaMigrationRequiredError,
@@ -32,16 +35,16 @@ import {
   OPENCLAW_SQLITE_BUSY_TIMEOUT_MS,
   openExistingOpenClawStateDatabaseReadOnly,
   openOpenClawStateDatabase,
-  OPENCLAW_STATE_SCHEMA_VERSION,
+  OPENCLAW_STATE_SCHEMA_VERSION as OPENCLAW_STATE_MAX_SUPPORTED_SCHEMA_VERSION,
   repairOpenClawStateDatabaseSchema,
   repairOpenClawStateDatabaseSchemaIfNeeded,
   runOpenClawStateWriteTransaction,
   withOpenClawStateStartupMigrationCheckpointDatabase,
 } from "./openclaw-state-db.js";
 import { resolveOpenClawStateSqlitePath } from "./openclaw-state-db.paths.js";
+import { canonicalStateSchemaSqlForVersion } from "./openclaw-state-schema-versioned.js";
 import {
   collectSqliteSchemaShape,
-  createSqliteSchemaShapeFromSql,
   normalizeSqliteSchemaShapeSql,
   replaceNamedIndexesWithNoncanonicalIndexes,
 } from "./sqlite-schema-shape.test-support.js";
@@ -52,6 +55,8 @@ type StateDbTestDatabase = Pick<
 >;
 
 const stateDbTempDirs: string[] = [];
+// These cases exercise ordinary opens, which intentionally remain at v6.
+const OPENCLAW_STATE_SCHEMA_VERSION = OPENCLAW_STATE_DEFAULT_SCHEMA_VERSION;
 let canonicalStateDatabaseTemplatePath: string | undefined;
 
 function createTempStateDir(): string {
@@ -59,9 +64,11 @@ function createTempStateDir(): string {
 }
 
 function createInitialStateSchemaShape() {
-  const shape = createSqliteSchemaShapeFromSql(
-    new URL("./openclaw-state-schema.sql", import.meta.url),
-  );
+  const { DatabaseSync } = requireNodeSqlite();
+  const database = new DatabaseSync(":memory:");
+  database.exec(canonicalStateSchemaSqlForVersion(OPENCLAW_STATE_DEFAULT_SCHEMA_VERSION));
+  const shape = collectSqliteSchemaShape(database);
+  database.close();
   for (const tableName of FIRST_USE_STATE_TABLES) {
     delete shape[tableName];
   }
@@ -4075,7 +4082,7 @@ INSERT INTO macos_port_guardian_records VALUES (4242, 18789, '/usr/bin/ssh', 're
     createUnsafeIndexDrift(databasePath);
     const { DatabaseSync } = requireNodeSqlite();
     const db = new DatabaseSync(databasePath);
-    db.exec(`PRAGMA user_version = ${OPENCLAW_STATE_SCHEMA_VERSION + 1};`);
+    db.exec(`PRAGMA user_version = ${OPENCLAW_STATE_MAX_SUPPORTED_SCHEMA_VERSION + 1};`);
     db.close();
 
     let firstFailure: unknown;

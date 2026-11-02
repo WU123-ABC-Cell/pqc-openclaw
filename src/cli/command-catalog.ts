@@ -482,8 +482,8 @@ export const cliCommandCatalog: readonly CliCommandCatalogEntry[] = [
   { commandPath: ["secrets"], policy: { configGuard: "skip", networkProxy: "bypass" } },
   {
     commandPath: ["wrap-key"],
-    // Local read-only diagnostics must not migrate config/state or initialize
-    // plugin, shell-path, or network policy before inspecting a broken identity.
+    // Local diagnostics and independent key preparation must avoid config
+    // migration, plugins, shell-path changes and network startup.
     policy: {
       configGuard: "skip",
       loadPlugins: "never",

@@ -345,11 +345,43 @@ enum DeviceIdentitySQLiteStore {
         material: DeviceIdentityMaterial,
         updatedAtMs: Int64) throws
     {
-        let statement = try database.prepare("""
-        INSERT INTO device_identities (
-          identity_key, device_id, public_key_pem, private_key_pem, created_at_ms, updated_at_ms
-        ) VALUES (?, ?, ?, ?, ?, ?)
-        """)
+        let schemaVersion = try database.scalarInt64("PRAGMA user_version")
+        let statement: OpenClawNativeStateSQLiteStatement
+        if schemaVersion >= 7 {
+            // The caller holds BEGIN IMMEDIATE, so the owner cannot advance before this INSERT.
+            let owner = try database.prepare("""
+            SELECT generation, new_write_key_id
+            FROM identity_write_generation WHERE singleton = 1
+            """)
+            let generation: Int64
+            if try owner.step() == .row {
+                guard owner.valueType(at: 0) == .integer,
+                      owner.int64(at: 0) > 0,
+                      !((try owner.requiredText(at: 1, field: "new_write_key_id")).isEmpty)
+                else {
+                    throw DeviceIdentityStore.storageError("Invalid identity write generation")
+                }
+                generation = owner.int64(at: 0)
+                guard try owner.step() == .done else {
+                    throw DeviceIdentityStore.storageError("Duplicate identity write generation")
+                }
+            } else {
+                generation = 0
+            }
+            statement = try database.prepare("""
+            INSERT INTO device_identities (
+              identity_key, device_id, public_key_pem, private_key_pem, created_at_ms, updated_at_ms,
+              write_generation, write_revision
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+            """)
+            try statement.bindInt64(generation, at: 7)
+        } else {
+            statement = try database.prepare("""
+            INSERT INTO device_identities (
+              identity_key, device_id, public_key_pem, private_key_pem, created_at_ms, updated_at_ms
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """)
+        }
         try statement.bindText(key, at: 1)
         try statement.bindText(material.identity.deviceId, at: 2)
         try statement.bindText(material.publicKeyPEM, at: 3)

@@ -74,6 +74,62 @@ private func deviceAuthEntry(
 @Suite(.serialized)
 struct DeviceIdentityStoreTests {
     @Test
+    func `version seven native identity insert uses active write generation`() throws {
+        let fixture = DeviceIdentityMigrationFixture()
+        try FileManager.default.createDirectory(
+            at: fixture.databaseURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Self.execute(fixture.databaseURL, """
+        CREATE TABLE schema_meta (
+          meta_key TEXT NOT NULL PRIMARY KEY, role TEXT NOT NULL, schema_version INTEGER NOT NULL
+        ) STRICT;
+        INSERT INTO schema_meta VALUES ('primary', 'global', 7);
+        CREATE TABLE device_identities (
+          identity_key TEXT NOT NULL PRIMARY KEY,
+          device_id TEXT NOT NULL,
+          public_key_pem TEXT NOT NULL,
+          private_key_pem TEXT NOT NULL,
+          created_at_ms INTEGER NOT NULL,
+          updated_at_ms INTEGER NOT NULL,
+          mldsa_public_key_pem TEXT,
+          mldsa_private_key_pem TEXT,
+          mldsa_private_key_wrapped BLOB,
+          mldsa_private_key_wrap_key_id TEXT,
+          write_generation INTEGER NOT NULL DEFAULT 0,
+          write_revision INTEGER NOT NULL DEFAULT 0
+        ) STRICT;
+        CREATE INDEX idx_device_identities_device
+          ON device_identities(device_id, updated_at_ms DESC);
+        CREATE TABLE identity_write_generation (
+          singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+          generation INTEGER NOT NULL CHECK (generation > 0),
+          new_write_key_id TEXT NOT NULL CHECK (length(new_write_key_id) > 0)
+        ) STRICT;
+        INSERT INTO identity_write_generation VALUES (1, 1, 'key-B');
+        CREATE TRIGGER identity_write_insert BEFORE INSERT ON device_identities BEGIN
+          SELECT CASE WHEN NEW.write_generation != 1 OR NEW.write_revision != 0
+            THEN RAISE(ABORT, 'identity-write-fence') END;
+        END;
+        PRAGMA user_version = 7;
+        """)
+
+        let identity = try fixture.load()
+        #expect(try Self.scalarInt(
+            fixture.databaseURL,
+            "SELECT write_generation FROM device_identities WHERE identity_key = 'apple-mldsa65-primary'") == 1)
+        #expect(try Self.scalarInt(
+            fixture.databaseURL,
+            "SELECT write_revision FROM device_identities WHERE identity_key = 'apple-mldsa65-primary'") == 0)
+        #expect(try fixture.load().deviceId == identity.deviceId)
+        #expect(throws: NSError.self) {
+            try Self.execute(fixture.databaseURL, """
+            INSERT INTO device_identities (
+              identity_key, device_id, public_key_pem, private_key_pem, created_at_ms, updated_at_ms
+            ) VALUES ('apple-mldsa65-node', 'old', 'public', 'seed', 1, 1)
+            """)
+        }
+    }
+
+    @Test
     func `task scoped state directories isolate concurrent identity stores`() async throws {
         let fixture = DeviceIdentityMigrationFixture()
         let root = fixture.root

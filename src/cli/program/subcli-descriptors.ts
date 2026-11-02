@@ -225,7 +225,7 @@ const subCliCommandCatalog = defineCommandDescriptorCatalog([
   },
   {
     name: "wrap-key",
-    description: "Inspect device wrapping-key health",
+    description: "Inspect and prepare device wrapping keys",
     hasSubcommands: true,
     parentDefaultHelp: true,
   },

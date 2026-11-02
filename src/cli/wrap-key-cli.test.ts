@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { Command } from "commander";
@@ -6,6 +7,7 @@ import { PRIMARY_DEVICE_IDENTITY_KEY } from "../infra/device-identity-store.js";
 import { loadOrCreateDeviceIdentity } from "../infra/device-identity.js";
 import { defaultRuntime } from "../runtime.js";
 import { resetDefaultKeyringCache } from "../security/keyring-provider.js";
+import { resolveWrappingKeyVaultPath } from "../security/wrap-key-file-install.js";
 import { closeOpenClawStateDatabaseForTest } from "../state/openclaw-state-db.js";
 import { withStateDirEnv } from "../test-helpers/state-dir-env.js";
 import { resolveCliCommandPathPolicy } from "./command-path-policy.js";
@@ -55,19 +57,185 @@ describe("wrap-key operator boundary", () => {
     });
   });
 
-  it("registers lazy help without creating state and rejects unavailable mutations", async () => {
+  it("registers lazy help without creating state and rejects unavailable import/export", async () => {
     await withStateDirEnv("wrap-key-help-", async ({ stateDir }) => {
       const help = vi.fn();
       await expect(runWrapKey(["status", "--help"], help)).rejects.toMatchObject({
         code: "commander.helpDisplayed",
       });
       expect(help.mock.calls.flat().join("")).toContain("--identity-key <key>");
-      for (const command of ["import", "export", "rotate"]) {
+      await expect(runWrapKey(["prepare", "--help"], help)).rejects.toMatchObject({
+        code: "commander.helpDisplayed",
+      });
+      expect(help.mock.calls.flat().join("")).toContain("--key-id <id>");
+      for (const command of ["import", "export"]) {
         await expect(runWrapKey([command])).rejects.toMatchObject({
           exitCode: 1,
         });
       }
       expect(fs.readdirSync(stateDir)).toEqual([]);
+    });
+  });
+
+  it("activates and rotates offline, then reopens every identity with the new persisted key", async () => {
+    await withStateDirEnv("wrap-key-offline-", async ({ stateDir }) => {
+      const original = loadOrCreateDeviceIdentity();
+      closeOpenClawStateDatabaseForTest();
+      const oldPath = path.join(stateDir, "wrap-key.b64");
+      const oldBytes = fs.readFileSync(oldPath);
+      const output = vi.spyOn(defaultRuntime, "writeJson").mockImplementation(() => undefined);
+      const exit = vi.spyOn(defaultRuntime, "exit").mockImplementation(() => undefined);
+
+      await runWrapKey(["activate", "--receipt-id", "activate-1", "--json"]);
+      expect(output).toHaveBeenLastCalledWith(
+        expect.objectContaining({ ok: false, operation: "activate" }),
+      );
+      expect(exit).toHaveBeenCalledWith(1, { resetStream: process.stderr });
+      exit.mockClear();
+
+      await runWrapKey(["activate", "--receipt-id", "activate-1", "--offline", "--json"]);
+      expect(output).toHaveBeenLastCalledWith(
+        expect.objectContaining({ ok: true, databaseState: "current", generation: 1 }),
+      );
+      fs.renameSync(oldPath, `${oldPath}.held`);
+      await runWrapKey(["activate", "--receipt-id", "activate-1", "--offline", "--json"]);
+      expect(output).toHaveBeenLastCalledWith(
+        expect.objectContaining({ ok: false, databaseState: "current", generation: 1 }),
+      );
+      fs.renameSync(`${oldPath}.held`, oldPath);
+      exit.mockClear();
+      await runWrapKey(["prepare", "--key-id", "key-new", "--json"]);
+      const newPath = path.join(resolveWrappingKeyVaultPath(stateDir), "key-new.b64");
+      await runWrapKey([
+        "rotate",
+        "--receipt-id",
+        "rotate-2",
+        "--key-id",
+        "key-new",
+        "--offline",
+        "--json",
+      ]);
+      expect(output).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          ok: true,
+          operation: "rotate",
+          databaseState: "current",
+          generation: 2,
+          keyId: "key-new",
+          allRowsVerified: true,
+          checkedRows: 1,
+          cliKeySelected: false,
+          gatewayRestartUnverified: true,
+        }),
+      );
+      expect(fs.readFileSync(oldPath)).toEqual(oldBytes);
+      expect(exit).not.toHaveBeenCalled();
+
+      await runWrapKey([
+        "recover",
+        "--receipt-id",
+        "rotate-2",
+        "--key-id",
+        "key-new",
+        "--offline",
+        "--json",
+      ]);
+      expect(output).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          ok: false,
+          operation: "recover",
+          databaseState: "current",
+          cliKeySelected: false,
+          gatewayRestartUnverified: true,
+        }),
+      );
+      expect(exit).toHaveBeenCalledWith(1, { resetStream: process.stderr });
+      exit.mockClear();
+
+      vi.stubEnv("OPENCLAW_WRAP_KEY_FILE", newPath);
+      vi.stubEnv("OPENCLAW_WRAP_KEY_ID", "key-new");
+      resetDefaultKeyringCache();
+      closeOpenClawStateDatabaseForTest();
+      expect(loadOrCreateDeviceIdentity().deviceId).toBe(original.deviceId);
+      closeOpenClawStateDatabaseForTest();
+      const restarted = spawnSync(
+        process.execPath,
+        [
+          "--import",
+          "tsx",
+          "--input-type=module",
+          "-e",
+          'import { loadDeviceIdentityIfPresent } from "./src/infra/device-identity.ts"; const identity = loadDeviceIdentityIfPresent(); if (!identity) process.exit(2); console.log(identity.deviceId);',
+        ],
+        { cwd: process.cwd(), env: process.env, encoding: "utf8", timeout: 30_000 },
+      );
+      expect(restarted.status, restarted.stderr).toBe(0);
+      expect(restarted.stdout.trim()).toBe(original.deviceId);
+      await runWrapKey([
+        "recover",
+        "--receipt-id",
+        "rotate-2",
+        "--key-id",
+        "key-new",
+        "--offline",
+        "--json",
+      ]);
+      expect(output).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          ok: true,
+          operation: "recover",
+          databaseState: "current",
+          allRowsVerified: true,
+          checkedRows: 1,
+          cliKeySelected: true,
+          gatewayRestartUnverified: true,
+        }),
+      );
+      expect(exit).not.toHaveBeenCalled();
+      fs.renameSync(newPath, `${newPath}.held`);
+      await runWrapKey([
+        "recover",
+        "--receipt-id",
+        "rotate-2",
+        "--key-id",
+        "key-new",
+        "--offline",
+        "--json",
+      ]);
+      expect(output).toHaveBeenLastCalledWith(
+        expect.objectContaining({ ok: false, databaseState: "current", generation: 2 }),
+      );
+      fs.renameSync(`${newPath}.held`, newPath);
+      exit.mockClear();
+      expect(JSON.stringify(output.mock.calls)).not.toContain(oldBytes.toString());
+      expect(JSON.stringify(output.mock.calls)).not.toContain(fs.readFileSync(newPath, "utf8"));
+    });
+  });
+
+  it("prepares a separate key once without switching the active identity", async () => {
+    await withStateDirEnv("wrap-key-prepare-", async ({ stateDir }) => {
+      const original = loadOrCreateDeviceIdentity();
+      closeOpenClawStateDatabaseForTest();
+      const oldPath = path.join(stateDir, "wrap-key.b64");
+      const oldKey = fs.readFileSync(oldPath);
+      const output = vi.spyOn(defaultRuntime, "writeJson").mockImplementation(() => undefined);
+      const exit = vi.spyOn(defaultRuntime, "exit").mockImplementation(() => undefined);
+      await runWrapKey(["prepare", "--key-id", "key-new", "--json"]);
+      const keyPath = path.join(resolveWrappingKeyVaultPath(stateDir), "key-new.b64");
+      expect(output).toHaveBeenLastCalledWith({
+        ok: true,
+        keyId: "key-new",
+        keyPath,
+        active: false,
+      });
+      expect(fs.readFileSync(oldPath)).toEqual(oldKey);
+      expect(loadOrCreateDeviceIdentity().deviceId).toBe(original.deviceId);
+      expect(JSON.stringify(output.mock.calls)).not.toContain(oldKey.toString());
+      expect(JSON.stringify(output.mock.calls)).not.toContain(fs.readFileSync(keyPath, "utf8"));
+      expect(exit).not.toHaveBeenCalled();
+      await runWrapKey(["prepare", "--key-id", "key-new", "--json"]);
+      expect(output).toHaveBeenLastCalledWith({ ok: false, error: "wrapping-key-prepare-failed" });
+      expect(exit).toHaveBeenCalledWith(1, { resetStream: process.stderr });
     });
   });
 

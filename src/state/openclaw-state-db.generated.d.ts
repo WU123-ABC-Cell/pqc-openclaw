@@ -572,6 +572,8 @@ export interface DeviceIdentities {
   private_key_pem: string;
   public_key_pem: string;
   updated_at_ms: number;
+  write_generation: Generated<number>;
+  write_revision: Generated<number>;
 }
 
 export interface DevicePairingPaired {
@@ -747,6 +749,18 @@ export interface GatewayRestartSentinel {
   ts: number;
   updated_at_ms: number;
   version: number;
+}
+
+export interface IdentityWriteGeneration {
+  generation: number;
+  new_write_key_id: string;
+  singleton: Generated<number>;
+}
+
+export interface IdentityWriteReceipts {
+  generation: number;
+  new_write_key_id: string;
+  receipt_id: string;
 }
 
 export interface InstalledPluginIndex {
@@ -1615,6 +1629,8 @@ export interface DB {
   gateway_restart_handoff: GatewayRestartHandoff;
   gateway_restart_intent: GatewayRestartIntent;
   gateway_restart_sentinel: GatewayRestartSentinel;
+  identity_write_generation: IdentityWriteGeneration;
+  identity_write_receipts: IdentityWriteReceipts;
   installed_plugin_index: InstalledPluginIndex;
   macos_port_guardian_records: MacosPortGuardianRecords;
   managed_outgoing_image_records: ManagedOutgoingImageRecords;

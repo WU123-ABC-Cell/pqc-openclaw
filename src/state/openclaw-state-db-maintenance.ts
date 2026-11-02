@@ -12,11 +12,12 @@ import {
 import {
   OPENCLAW_DATABASE_SCHEMA_DOCS_URL,
   LAZY_ADDITIVE_STATE_TABLES,
+  OPENCLAW_STATE_DEFAULT_SCHEMA_VERSION,
   OPENCLAW_STATE_SCHEMA_VERSION,
   type OpenClawStateDatabaseOptions,
 } from "./openclaw-state-db-contract.js";
 import { resolveOpenClawStateSqlitePath } from "./openclaw-state-db.paths.js";
-import { OPENCLAW_STATE_SCHEMA_SQL } from "./openclaw-state-schema.js";
+import { canonicalStateSchemaSqlForVersion } from "./openclaw-state-schema-versioned.js";
 
 const OPENCLAW_STATE_MAINTENANCE_SCHEMA_COMPATIBILITY = {
   allowedMissingTables: LAZY_ADDITIVE_STATE_TABLES,
@@ -136,7 +137,10 @@ export function assertOpenClawStateDatabaseForMaintenance(
       OPENCLAW_STATE_SCHEMA_VERSION,
     );
   }
-  if (userVersion !== OPENCLAW_STATE_SCHEMA_VERSION) {
+  if (
+    userVersion !== OPENCLAW_STATE_DEFAULT_SCHEMA_VERSION &&
+    userVersion !== OPENCLAW_STATE_SCHEMA_VERSION
+  ) {
     throw new Error(
       `OpenClaw state database ${options.pathname} uses schema version ${userVersion}; run openclaw doctor --fix before compacting it.`,
     );
@@ -146,17 +150,17 @@ export function assertOpenClawStateDatabaseForMaintenance(
   const metadata = database
     .prepare("SELECT schema_version FROM schema_meta WHERE meta_key = 'primary' LIMIT 1")
     .get() as { schema_version?: unknown } | undefined;
-  if (metadata?.schema_version !== OPENCLAW_STATE_SCHEMA_VERSION) {
+  if (metadata?.schema_version !== userVersion) {
     const schemaVersion =
       typeof metadata?.schema_version === "number" ? metadata.schema_version : "invalid";
     throw new Error(
-      `OpenClaw state database ${options.pathname} metadata schema version ${schemaVersion} does not match ${OPENCLAW_STATE_SCHEMA_VERSION}; run openclaw doctor --fix before compacting it.`,
+      `OpenClaw state database ${options.pathname} metadata schema version ${schemaVersion} does not match ${userVersion}; run openclaw doctor --fix before compacting it.`,
     );
   }
   assertSqliteSchemaContains(
     database,
     options.pathname,
-    OPENCLAW_STATE_SCHEMA_SQL,
+    canonicalStateSchemaSqlForVersion(userVersion),
     OPENCLAW_STATE_MAINTENANCE_SCHEMA_COMPATIBILITY,
   );
 }
@@ -183,9 +187,14 @@ export function assertOpenClawStateDatabaseV5ForMigration(
       `OpenClaw state database ${options.pathname} metadata schema version ${schemaVersion} does not match 5; repair the ownership metadata before migrating it.`,
     );
   }
-  assertSqliteSchemaTablesPresent(database, options.pathname, OPENCLAW_STATE_SCHEMA_SQL, {
-    allowedMissingTables: STATE_V5_ADDITIVE_TABLES,
-  });
+  assertSqliteSchemaTablesPresent(
+    database,
+    options.pathname,
+    canonicalStateSchemaSqlForVersion(OPENCLAW_STATE_DEFAULT_SCHEMA_VERSION),
+    {
+      allowedMissingTables: STATE_V5_ADDITIVE_TABLES,
+    },
+  );
 }
 
 export function resolveDatabasePath(options: OpenClawStateDatabaseOptions = {}): string {

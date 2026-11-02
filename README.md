@@ -12,37 +12,36 @@
 A fork of [OpenClaw](https://github.com/openclaw/openclaw), maintained independently
 by [@WU123-ABC-Cell](https://github.com/WU123-ABC-Cell).
 
-## Current capabilities and release blockers
+## Security status and release blockers
 
-Status is based on static review of revision
-`0c273072acc724edafbf516eaa38c9dd0195d9d1`. It is not a runtime acceptance report.
+This review branch is an unshipped v7 key-rotation candidate based on public
+`master` commit `4e14148cfcab123ffc7497211cd570ed50152a1a`. It has no Mac native
+acceptance and is not a runtime or production release report. The historical
+table below originated from review of `0c273072acc724edafbf516eaa38c9dd0195d9d1`;
+its older integration descriptions must not be read as this branch's current code.
 
-The table below describes that committed baseline. Local repair candidates dated
-2026-09-17 add known wrapping-key alias exclusion to both backup paths and fix
-default-keyring environment/configuration reuse and silent provider downgrade.
-Focused Linux checks are not release acceptance; required submission review and
-cloud CI remain pending. See the [security status](docs/security/pqc-whitepaper.md)
-for the changed key-selection contract and remaining blockers.
+The table combines public-baseline behavior with changes in this review candidate;
+it is not release acceptance. See the [security status](docs/security/pqc-whitepaper.md)
+for remaining validation gates.
 
-| Surface                    | Actual integration and limitations                                                                                                                                                                                                                      |
-| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Device signatures          | Gateway and bundled mobile clients use ML-DSA-65 wire keys/signatures (1952/3309 bytes). Apple clients require OS 26; upgraded Ed25519 clients receive a new device ID and must pair again. No Ed25519 fallback exists.                                 |
-| Identity storage           | AES-256-GCM wrapping and file/environment/OS keyring providers exist. Keypair validation, legacy migration, provider isolation and error handling remain repair targets. Encryption does not protect against a thief who also obtains the wrapping key. |
-| Backups                    | Built-in state backup does not currently exclude the default wrapping-key file. The separate `scripts/backup-pqc.sh` excludes it. Treat existing archives as sensitive and retain independent recovery keys; neither policy alone makes a backup safe.  |
-| Nostr                      | The production plugin still calls NIP-04. The custom `src/security/nip44-v2.ts` helper has no observed production caller and has unresolved protocol defects. Do not enable or treat it as compliant NIP-44 or delivered PQC messaging.                 |
-| Key lifecycle              | Read-only `openclaw wrap-key status` is registered. Import/export/rotation remain helper APIs, not operator commands; persistent lifecycle acceptance is pending. See the diagnostic scope below.                                                       |
-| Audit and required locking | Compose no longer advertises unsupported PQC logging or required-mlock switches. PQC events use the ordinary gateway log stream; there is no separate audit-file sink or fail-closed memory-locking policy.                                             |
-| Secure-memory helpers      | A native secure-memory implementation and tests exist. Availability is build/platform-dependent and fallback is best-effort. This is not complete process-memory protection; immutable JS strings and runtime copies remain outside the guarantee.      |
-| TLS and push               | This repository does not establish an accepted end-to-end hybrid TLS or dual-signature push deployment. Helper presence is not proof of native-client or external-service support.                                                                      |
-| Test evidence              | Module tests and historical timing reports exist. Product-boundary coverage is incomplete, and random sign/verify roundtrips are not official known-answer tests. Historical results do not certify this revision.                                      |
+| Surface                    | Actual integration and limitations                                                                                                                                                                                                                            |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Device signatures          | Gateway and bundled mobile clients use ML-DSA-65 wire keys/signatures (1952/3309 bytes). Apple clients require OS 26; upgraded Ed25519 clients receive a new device ID and must pair again. No Ed25519 fallback exists.                                       |
+| Identity storage           | ML-DSA identity rows use AES-256-GCM wrapping with identity-context AAD and file/environment/OS key providers. The v7 candidate adds a write-generation fence; native and operational acceptance remain open. A stolen wrapping key still exposes ciphertext. |
+| Backups                    | Built-in backup excludes the default and configured wrapping-key files; this candidate also excludes its sibling key vault and aliases. External archives must exclude recovery keys separately. Treat older archives as sensitive.                           |
+| Nostr                      | The production plugin uses the custom OpenClaw PQC DM v1 profile with explicit peer-key pinning, not standard NIP-44 interoperability. Live NIP-04 fallback is disabled.                                                                                      |
+| Key lifecycle              | `wrap-key status` is shipped; this branch adds offline file-key `prepare`, `activate`, `rotate` and `recover` as an unshipped candidate. Import/export remain unavailable; Mac and operator handoff acceptance is pending.                                    |
+| Audit and required locking | Compose no longer advertises unsupported PQC logging or required-mlock switches. PQC events use the ordinary gateway log stream; there is no separate audit-file sink or fail-closed memory-locking policy.                                                   |
+| Secure-memory helpers      | A native secure-memory implementation and tests exist. Availability is build/platform-dependent and fallback is best-effort. This is not complete process-memory protection; immutable JS strings and runtime copies remain outside the guarantee.            |
+| TLS and push               | This repository does not establish an accepted end-to-end hybrid TLS or dual-signature push deployment. Helper presence is not proof of native-client or external-service support.                                                                            |
+| Test evidence              | Module tests and historical timing reports exist. Product-boundary coverage is incomplete, and random sign/verify roundtrips are not official known-answer tests. Historical results do not certify this revision.                                            |
 
 See [the current security status and repair gates](docs/security/pqc-whitepaper.md)
 before reviewing deployment or migration instructions.
 
 ### Read-only wrapping-key diagnostic (2026-10-03)
 
-This diagnostic updates the key-lifecycle row above; the other baseline rows are
-historical review notes, not a current acceptance inventory.
+This diagnostic checks one identity; it is not a complete key inventory.
 
 ```sh
 openclaw wrap-key status
@@ -67,8 +66,10 @@ and redaction; they do not write command stdout or stderr. `logging.file` select
 the ordinary log destination, not an independent audit sink. `logging.level:
 "silent"` suppresses these events.
 
-`wrap-key import`, `export` and `rotate` are not registered. Do not use historical
-command examples as recovery instructions or overwrite keys to clear an error.
+`wrap-key import` and `export` are not registered. The `prepare`, `activate`,
+`rotate` and `recover` commands in this candidate are not production procedures;
+they require offline operation and separate verification of the restarted gateway.
+Do not overwrite keys to clear an error.
 
 ### Authenticated identity wrapping upgrade
 

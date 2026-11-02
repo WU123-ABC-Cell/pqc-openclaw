@@ -3,6 +3,7 @@ import path from "node:path";
 import * as tar from "tar";
 import { describe, expect, it, vi } from "vitest";
 import { backupVerifyCommand } from "../commands/backup-verify.js";
+import { prepareFileWrappingKey } from "../security/wrap-key-file-install.js";
 import { resolveOpenClawStateSqlitePath } from "../state/openclaw-state-db.paths.js";
 import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
 import { createBackupArchive } from "./backup-create.js";
@@ -26,6 +27,36 @@ async function listEntries(file: string): Promise<string[]> {
 }
 
 describe("backup wrapping-key exclusion", () => {
+  it("excludes every prepared vault key and hardlink alias under a covered workspace", async () => {
+    await withOpenClawTestState(
+      { layout: "state-only", env: { OPENCLAW_WRAP_KEY_FILE: undefined } },
+      async (state) => {
+        await state.writeConfig({ agents: { defaults: { workspace: state.root } } });
+        const first = prepareFileWrappingKey(state.stateDir, "old-key");
+        const second = prepareFileWrappingKey(state.stateDir, "new-key");
+        const alias = state.statePath("vault-key-alias");
+        const symlinkAlias = state.statePath("vault-key-symlink");
+        await fs.link(first.keyPath, alias);
+        if (process.platform !== "win32") {
+          await fs.symlink(second.keyPath, symlinkAlias);
+        }
+        const output = `${state.root}-backup.tar.gz`;
+        try {
+          const result = await createBackupArchive({ output });
+          const entries = await listEntries(result.archivePath);
+          expect(entries.some((entry) => entry.includes(".wrap-keys"))).toBe(false);
+          expect(entries.some((entry) => entry.endsWith("/vault-key-alias"))).toBe(false);
+          expect(entries.some((entry) => entry.endsWith("/vault-key-symlink"))).toBe(false);
+          expect(entries.some((entry) => entry.endsWith("/openclaw.json"))).toBe(true);
+          const filter = await createBackupWrappingKeyFilter(state.stateDir);
+          await fs.writeFile(second.keyPath, "changed");
+          await expect(filter.assertUnchanged()).rejects.toThrow("changed during backup");
+        } finally {
+          await fs.rm(output, { force: true });
+        }
+      },
+    );
+  });
   it("does not publish when a selected regular file becomes a key symlink before read", async () => {
     await withOpenClawTestState({ env: { OPENCLAW_WRAP_KEY_FILE: undefined } }, async (state) => {
       const key = state.statePath("wrap-key.b64");

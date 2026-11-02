@@ -93,7 +93,7 @@ function backfillLegacyManagedImageRoots(db: DatabaseSync): void {
   }
 }
 
-export function ensureAdditiveStateColumns(db: DatabaseSync): void {
+export function ensureAdditiveStateColumns(db: DatabaseSync, targetVersion: 6 | 7 = 6): void {
   if (ensureColumn(db, "claw_package_refs", "updated_at_ms INTEGER NOT NULL DEFAULT 0")) {
     db.exec("UPDATE claw_package_refs SET updated_at_ms = installed_at_ms;");
   }
@@ -310,6 +310,10 @@ export function ensureAdditiveStateColumns(db: DatabaseSync): void {
   ensureColumn(db, "device_identities", "mldsa_private_key_pem TEXT");
   ensureColumn(db, "device_identities", "mldsa_private_key_wrapped BLOB");
   ensureColumn(db, "device_identities", "mldsa_private_key_wrap_key_id TEXT");
+  if (targetVersion === 7) {
+    ensureColumn(db, "device_identities", "write_generation INTEGER NOT NULL DEFAULT 0");
+    ensureColumn(db, "device_identities", "write_revision INTEGER NOT NULL DEFAULT 0");
+  }
   ensureColumn(db, "device_bootstrap_tokens", "pending_profile_json TEXT");
   ensureColumn(db, "gateway_restart_handoff", "restart_trace_started_at INTEGER");
   ensureColumn(db, "gateway_restart_handoff", "restart_trace_last_at INTEGER");

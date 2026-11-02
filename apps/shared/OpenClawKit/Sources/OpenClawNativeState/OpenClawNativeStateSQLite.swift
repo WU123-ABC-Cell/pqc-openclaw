@@ -37,7 +37,7 @@ public enum OpenClawNativeStateSQLiteValueType: Equatable, Sendable {
 /// One recursive connection lock serializes transactions and statement access.
 public final class OpenClawNativeStateSQLite: @unchecked Sendable {
     // Keep aligned with OPENCLAW_STATE_SCHEMA_VERSION. Native clients never upgrade this database.
-    private static let maximumSupportedSchemaVersion: Int64 = 6
+    private static let maximumSupportedSchemaVersion: Int64 = 7
     private static let defaultBusyTimeoutMilliseconds: Int32 = 5000
 
     private struct SchemaObject: Hashable {
@@ -110,6 +110,12 @@ public final class OpenClawNativeStateSQLite: @unchecked Sendable {
         Column(name: "mldsa_private_key_pem", type: "TEXT", notNull: false, primaryKeyPosition: 0, hidden: 0),
         Column(name: "mldsa_private_key_wrapped", type: "BLOB", notNull: false, primaryKeyPosition: 0, hidden: 0),
         Column(name: "mldsa_private_key_wrap_key_id", type: "TEXT", notNull: false, primaryKeyPosition: 0, hidden: 0),
+    ]
+
+    // v7 adds a dormant write generation/revision; version-zero bootstrap retains six columns.
+    private static let nodeDeviceIdentityGenerationColumns = [
+        Column(name: "write_generation", type: "INTEGER", notNull: true, primaryKeyPosition: 0, hidden: 0),
+        Column(name: "write_revision", type: "INTEGER", notNull: true, primaryKeyPosition: 0, hidden: 0),
     ]
 
     private static let deviceAuthTokens = CanonicalTable(
@@ -453,8 +459,10 @@ public final class OpenClawNativeStateSQLite: @unchecked Sendable {
         let columns = try self.tableColumns(table.name)
         if columns != table.columns {
             guard table.name == Self.deviceIdentities.name,
-                  columns == table.columns + Self.nodeDeviceIdentityColumns,
-                  try self.scalarInt64("PRAGMA user_version") > 0
+                  try self.scalarInt64("PRAGMA user_version") > 0,
+                  columns == table.columns + Self.nodeDeviceIdentityColumns +
+                    (try self.scalarInt64("PRAGMA user_version") >= 7
+                        ? Self.nodeDeviceIdentityGenerationColumns : [])
             else {
                 throw OpenClawNativeStateError("\(table.name) has an incompatible schema")
             }

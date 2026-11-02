@@ -337,10 +337,20 @@ fi
 
 mkdir -p "$STATE_DIR"
 chmod 0700 "$STATE_DIR"
+canonical_state_dir=$(cd "$STATE_DIR" && pwd -P)
+key_vault_dir="$(dirname "$canonical_state_dir")/$(basename "$canonical_state_dir").wrap-keys"
+if [[ -e "$key_vault_dir" || -L "$key_vault_dir" ]]; then
+  [[ -d "$key_vault_dir" && ! -L "$key_vault_dir" ]] \
+    || die "wrap-key vault must be a real directory: $key_vault_dir"
+else
+  mkdir -m 0700 "$key_vault_dir" || die "failed to create wrap-key vault: $key_vault_dir"
+fi
+chmod 0700 "$key_vault_dir"
 mkdir -p "$BACKUP_DIR"
 chmod 0700 "$BACKUP_DIR"
 if [[ -z "$SANDBOX_ROOT" ]]; then
   chown -R "$SERVICE_USER" "$STATE_DIR" || die "failed to assign state directory to $SERVICE_USER"
+  chown "$SERVICE_USER" "$key_vault_dir" || die "failed to assign wrap-key vault to $SERVICE_USER"
   chown -R "$SERVICE_USER" "$BACKUP_DIR" || die "failed to assign backup directory to $SERVICE_USER"
 fi
 
@@ -420,9 +430,6 @@ Type=simple
 User=$SERVICE_USER
 WorkingDirectory=$INSTALL_ROOT
 Environment=OPENCLAW_STATE_DIR=$STATE_DIR
-Environment=OPENCLAW_WRAP_KEY_OS_SERVICE=pqc-openclaw
-Environment=OPENCLAW_WRAP_KEY_OS_ACCOUNT=wrap-key-$(date +%Y-%m)
-Environment=OPENCLAW_WRAP_KEY_OS_ID=wrap-key-$(date +%Y-%m)
 Environment=OPENCLAW_WRAP_KEY_FILE=$keyfile
 EnvironmentFile=-$ENV_FILE
 ExecStart=$NODE_BIN $INSTALL_ROOT/dist/index.js gateway

@@ -41,6 +41,28 @@ directly — `install-pqc.sh` will overwrite them on the next run.
 The installer does not migrate the wrap key into an OS keyring; that
 remains an explicit operator action because it may require an interactive unlock.
 
+### Unshipped v7 wrapping-key review candidate
+
+This branch adds a sibling `<state-directory>.wrap-keys` vault and the offline
+`openclaw wrap-key prepare`, `activate`, `rotate` and `recover` commands. The
+installer creates the private vault for its service account and no longer
+configures an OS keyring entry that it has not installed. These commands are
+review candidates, not a production rotation procedure. Use only a disposable
+state copy. Stop the gateway and every other process that can write the shared
+state database before passing `--offline`; that flag records an operator
+assertion and cannot detect an idle process with an old key configuration.
+
+`rotate` commits a database generation before any service configuration change.
+Keep both key files. Set `OPENCLAW_WRAP_KEY_FILE` and `OPENCLAW_WRAP_KEY_ID` to the
+reported new file and ID in the root-owned `openclaw.env` before a service
+restart. The generated unit reads that file after its default file setting;
+systemd gives `EnvironmentFile=` values precedence. Reinstalling preserves the
+existing environment file. Run `recover --offline` only while writers remain
+stopped: its `ok` result verifies the CLI process's key selection and every
+identity row, while `gatewayRestartUnverified` stays true. Restart and check the
+actual gateway separately before resuming writes. The candidate has no Mac
+native or real systemd handoff acceptance yet.
+
 ---
 
 ## 1. Day-2 tasks (the ones you will actually do)
@@ -263,6 +285,9 @@ The state archive deliberately excludes `wrap-key.b64` and any legacy
 recovery channel; rotate the gateway token after a restore. Older archives
 created before this hardening may contain both secrets and should be protected
 as credentials or replaced after rotating them.
+The v7 candidate keeps prepared keys in a sibling vault outside this state
+archive. Any external backup of the state directory's parent must exclude that
+vault, and a rotated identity restore requires its matching key ID and file.
 
 ### 3.2 Restore from a backup
 
