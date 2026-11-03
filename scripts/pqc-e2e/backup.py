@@ -552,6 +552,11 @@ def main():
             os.makedirs(os.path.join(corrupt_state, "state"), exist_ok=True)
             with open(os.path.join(corrupt_state, "state", "openclaw.sqlite"), "wb") as f:
                 f.write(b"not-a-sqlite-database")
+            old_good = os.path.join(corrupt_backup, "pqc-openclaw-2020-01-01T030000Z.known-good.tar.gz")
+            with open(old_good, "wb") as archive:
+                archive.write(b"EXISTING-RESTORE-POINT")
+            with open(old_good + ".sha256", "w") as sidecar:
+                sidecar.write("existing sidecar\n")
             log("6c. corrupt current SQLite is rejected before publication")
             r = run(
                 args.script,
@@ -562,9 +567,11 @@ def main():
             )
             if r.returncode == 0:
                 fail("backup accepted a corrupt current-layout database")
-            if glob.glob(os.path.join(corrupt_backup, "*.tar.gz")):
+            if glob.glob(os.path.join(corrupt_backup, "*.must-not-publish.tar.gz")):
                 fail("corrupt backup was published before self-verification")
-            log("  rejected with no published tarball: OK")
+            if not os.path.isfile(old_good) or not os.path.isfile(old_good + ".sha256"):
+                fail("failed backup pruned an existing restore point")
+            log("  rejected without publishing or pruning: OK")
         finally:
             shutil.rmtree(corrupt_state, ignore_errors=True)
             shutil.rmtree(corrupt_backup, ignore_errors=True)
@@ -592,35 +599,123 @@ def main():
         finally:
             shutil.rmtree(lock_dir, ignore_errors=True)
 
-        # 8. retention: add 15 old fixtures, then require the successful run to
-        #    leave exactly 11 archives (7 daily + 4 weekly slots).
-        log("8. retention test: successful backup leaves exactly 11 archives")
-        for i in range(15):
-            age = i + 1
-            ts = (datetime.datetime(2026, 9, 2, 3, 0, 0) - datetime.timedelta(days=age)).strftime("%Y-%m-%dT%H%M%SZ")
-            fake_name = f"pqc-openclaw-{ts}.fake-{i:02d}.tar.gz"
-            fake_path = os.path.join(backup, fake_name)
-            with open(fake_path, "wb") as f:
-                f.write(b"FAKE-OLD-BACKUP")
-            mtime = (datetime.datetime(2026, 9, 2, 3, 0, 0) - datetime.timedelta(days=age)).timestamp()
-            os.utime(fake_path, (mtime, mtime))
-            with open(fake_path + ".sha256", "w") as f:
-                f.write(f"0000deadbeef{i:04x}  {fake_name}\n")
-        before = len([f for f in os.listdir(backup) if f.endswith(".tar.gz")])
+        # 8. Dense history must span daily dates and four older ISO weeks.
+        #    Two runs on a date compete for that date's slot; mtime is noise.
+        log("8. retention test: seven UTC dates plus four older ISO weeks")
+        with tempfile.TemporaryDirectory(prefix="pqc-e2e-retention-") as rotation_dir:
+            today = datetime.datetime.now(datetime.timezone.utc).date()
+
+            def fixture(when, label="fixture"):
+                name = f"pqc-openclaw-{when.strftime('%Y-%m-%dT%H%M%SZ')}.{label}.tar.gz"
+                target = os.path.join(rotation_dir, name)
+                with open(target, "wb") as archive:
+                    archive.write(b"OLD-BACKUP")
+                with open(target + ".sha256", "w") as sidecar:
+                    sidecar.write(f"fixture  {name}\n")
+                return target
+
+            candidates = []
+            for age in range(1, 50):
+                day = today - datetime.timedelta(days=age)
+                candidates.append(fixture(datetime.datetime.combine(day, datetime.time(3))))
+            older_same_day = candidates[0]
+            newer_same_day = fixture(
+                datetime.datetime.combine(today - datetime.timedelta(days=1), datetime.time(4)),
+                "manual",
+            )
+            # Falsify mtime ordering: an old archive appears newer by mtime.
+            os.utime(candidates[-1], (2_000_000_000, 2_000_000_000))
+            legacy = os.path.join(rotation_dir, "pqc-openclaw-legacy.tar.gz")
+            with open(legacy, "wb") as archive:
+                archive.write(b"UNKNOWN-NAME")
+            r = run(
+                args.script, "--state-dir", state, "--backup-dir", rotation_dir + os.sep,
+                "--skip-s3", "--skip-healthcheck", "--label", "retention-test",
+            )
+            if r.returncode not in (0, 2):
+                fail(f"retention backup failed: {r.stdout} {r.stderr}")
+            retained = [
+                path for path in glob.glob(os.path.join(rotation_dir, "*.tar.gz"))
+                if path != legacy
+            ]
+            daily = {today - datetime.timedelta(days=age) for age in range(7)}
+            daily_weeks = {day.isocalendar()[:2] for day in daily}
+            retained_days = set()
+            older_weeks = set()
+            for archive in retained:
+                stamp = os.path.basename(archive)[13:31]
+                day = datetime.datetime.strptime(stamp, "%Y-%m-%dT%H%M%SZ").date()
+                retained_days.add(day)
+                if day not in daily:
+                    older_weeks.add(day.isocalendar()[:2])
+                if not os.path.isfile(archive + ".sha256"):
+                    fail(f"retained archive has no checksum sidecar: {archive}")
+            if (
+                len(retained) != 11 or not daily.issubset(retained_days)
+                or len(older_weeks) != 4 or older_weeks & daily_weeks
+            ):
+                fail(f"retention did not keep 7 dates plus 4 older weeks: {retained}")
+            if not os.path.isfile(newer_same_day) or os.path.exists(older_same_day):
+                fail("retention did not select the newest archive on a UTC date")
+            if os.path.exists(older_same_day + ".sha256") or not os.path.isfile(legacy):
+                fail("retention removed an unknown archive or kept a pruned sidecar")
+
+        # A sparse history cannot fill all eleven slots; ISO week 1 crosses
+        # the calendar-year boundary and must still count as one week.
+        log("8b. sparse history and ISO year boundary")
+        with tempfile.TemporaryDirectory(prefix="pqc-e2e-weeks-") as weeks_dir:
+            week_fixtures = {}
+            for day in ("2025-12-15", "2025-12-22", "2025-12-31", "2026-01-01", "2026-01-05"):
+                stamp = datetime.datetime.fromisoformat(day).strftime("%Y-%m-%dT030000Z")
+                name = f"pqc-openclaw-{stamp}.history.tar.gz"
+                target = os.path.join(weeks_dir, name)
+                with open(target, "wb") as archive:
+                    archive.write(b"OLD-BACKUP")
+                with open(target + ".sha256", "w") as sidecar:
+                    sidecar.write(f"fixture  {name}\n")
+                week_fixtures[day] = target
+            r = run(
+                args.script, "--state-dir", state, "--backup-dir", weeks_dir,
+                "--skip-s3", "--skip-healthcheck", "--retention-daily", "0",
+                "--retention-weekly", "4", "--label", "weekly-test",
+            )
+            if r.returncode not in (0, 2):
+                fail(f"weekly retention backup failed: {r.stdout} {r.stderr}")
+            if not os.path.exists(week_fixtures["2026-01-01"]) or os.path.exists(week_fixtures["2025-12-31"]):
+                fail("ISO week 1 was split at New Year")
+            if os.path.exists(week_fixtures["2025-12-15"]):
+                fail("oldest weekly archive should have been pruned")
+
+        with tempfile.TemporaryDirectory(prefix="pqc-e2e-sparse-") as sparse_dir:
+            for date in ("2026-01-01", "2026-03-01"):
+                name = f"pqc-openclaw-{date}T030000Z.history.tar.gz"
+                with open(os.path.join(sparse_dir, name), "wb") as archive:
+                    archive.write(b"OLD-BACKUP")
+            r = run(
+                args.script, "--state-dir", state, "--backup-dir", sparse_dir,
+                "--skip-s3", "--skip-healthcheck", "--label", "sparse-test",
+            )
+            if r.returncode not in (0, 2):
+                fail(f"sparse retention backup failed: {r.stdout} {r.stderr}")
+            if len(glob.glob(os.path.join(sparse_dir, "*.tar.gz"))) != 3:
+                fail("sparse history should retain its three available dates")
+            r = run(
+                args.script, "--state-dir", state, "--backup-dir", sparse_dir,
+                "--skip-s3", "--skip-healthcheck", "--retention-daily", "0",
+                "--retention-weekly", "0", "--label", "keep-new-only",
+            )
+            if r.returncode not in (0, 2):
+                fail(f"zero-limit retention backup failed: {r.stdout} {r.stderr}")
+            remaining = glob.glob(os.path.join(sparse_dir, "*.tar.gz"))
+            if len(remaining) != 1 or "keep-new-only" not in remaining[0]:
+                fail("zero limits must still retain the newly verified archive")
+
         r = run(
-            args.script,
-            "--state-dir", state,
-            "--backup-dir", backup,
-            "--skip-s3", "--skip-healthcheck",
-            "--label", "retention-test",
+            args.script, "--state-dir", state, "--backup-dir", backup,
+            "--skip-s3", "--skip-healthcheck", "--retention-daily", "08",
         )
-        after = len([f for f in os.listdir(backup) if f.endswith(".tar.gz")])
-        pruned = before - after
-        log(f"  before={before} after={after} pruned={pruned}")
-        if not (4 <= pruned <= 8):
-            fail(f"retention pruned {pruned}, expected 4-8 (keep 11 of 16, math sensitive to mtime ordering)")
-        if after != 11:
-            fail(f"retention kept {after}, expected 11 (=7 daily + 4 weekly)")
+        if r.returncode == 0 or "retention limits" not in r.stderr:
+            fail("malformed retention limit was accepted")
 
         log("9. key aliases, special filenames and failure boundaries")
         check_key_boundaries(args.script)

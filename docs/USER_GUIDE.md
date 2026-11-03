@@ -311,14 +311,18 @@ systemctl list-timers pqc-openclaw-backup.timer
 sudo systemctl start pqc-openclaw-backup.service
 sudo systemctl status pqc-openclaw-backup.service --no-pager
 ls -la /var/backups/pqc-openclaw/
-# Should show ~7 daily + 4 weekly tarballs, each with a
-# matching .sha256 sidecar
+# Check retained archives and their matching .sha256 sidecars.
 
 # Verify the most recent backup
 LATEST=$(ls -t /var/backups/pqc-openclaw/*.tar.gz | head -1)
 sudo bash /usr/local/bin/backup-pqc.sh --verify "$LATEST"
 # → "verify OK: ..."
 ```
+
+The default local policy keeps one archive for each of the latest seven UTC
+backup dates and one for each of four older ISO weeks. A sparse history may
+contain fewer than eleven archives. Manual labeled backups use the same slots;
+store any recovery point that must never rotate separately.
 
 For off-host storage, set these variables in the scheduler environment (the
 gateway's `/etc/pqc-openclaw/openclaw.env` is not loaded by the backup service).

@@ -297,10 +297,15 @@ If systemd is unavailable, an operator may instead add a cron entry such as:
 0 3 * * * /usr/local/bin/backup-pqc.sh --json >> /var/log/pqc-backup.log 2>&1
 ```
 
-Retention: 7 daily + 4 weekly (defaults). Adjust with
-`--retention-daily N --retention-weekly N`. The cleanup runs **after**
-the new tarball is verified, so a failed run never rotates the only
-good copy.
+Retention defaults to the newest archive from each of the seven most recent
+distinct UTC backup dates, plus one newest archive from each of four older ISO
+weeks not represented by those daily dates. Adjust with
+`--retention-daily N --retention-weekly N` (decimal 0–9999). Sparse history may
+leave fewer than eleven archives; the newly verified archive is always kept.
+Labeled manual archives share the same date/week slots. Unrecognized archive
+names are left for manual review. Cleanup runs **after** the new tarball is
+verified, so a failed run does not rotate the last good copy. This policy
+applies to local files; configure and inspect off-host retention separately.
 
 If you also have S3 off-host storage, set `--s3-bucket my-bucket` in
 the cron line (or set `S3_BUCKET` in the env file):

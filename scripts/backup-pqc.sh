@@ -86,8 +86,8 @@ USAGE
 OPTIONS
   --state-dir PATH          State dir to snapshot.       [default: /var/lib/pqc-openclaw]
   --backup-dir PATH         Where to write tarballs.     [default: /var/backups/pqc-openclaw]
-  --retention-daily N       Keep N daily backups.        [default: 7]
-  --retention-weekly N      Keep N weekly backups.       [default: 4]
+  --retention-daily N       Keep newest backup on N UTC dates (0-9999). [default: 7]
+  --retention-weekly N      Keep newest backup in N older ISO weeks.   [default: 4]
   --healthcheck-bin PATH    Path to healthcheck-pqc.sh.  [default: /usr/local/bin/healthcheck-pqc.sh]
   --skip-healthcheck        Do not block on a failed healthcheck.
   --healthcheck-skip-keyring  Tell the pre-flight healthcheck to validate the file key only.
@@ -177,6 +177,16 @@ while [[ $# -gt 0 ]]; do
     --help)              print_help; exit 0 ;;
     *) echo "Unknown option: $1" >&2; print_help; exit 1 ;;
   esac
+done
+
+# Reject malformed retention values before publishing a backup. The real
+# rotation uses decimal values; Bash arithmetic would interpret leading zeroes
+# as octal and can fail after the archive has already been published.
+for retention_limit in "$RETENTION_DAILY" "$RETENTION_WEEKLY"; do
+  if [[ ! "$retention_limit" =~ ^(0|[1-9][0-9]{0,3})$ ]]; then
+    echo "[FAIL] retention limits must be decimal integers from 0 to 9999" >&2
+    exit 1
+  fi
 done
 
 # ----------------------------------------------------------------------
@@ -645,33 +655,83 @@ ok "publish" "$FINAL_PATH"
 # ----------------------------------------------------------------------
 # Retention: prune old backups (AFTER the new one is verified)
 # ----------------------------------------------------------------------
-# Grandfather-father-son lite: keep N daily + N weekly worth of the
-# most recent tarballs. Anything older gets pruned AFTER we have a
-# verified new tarball in place, so we never rotate the only good
-# copy on a failed run.
-#
-# We use `ls -1t` (sort by mtime, newest first) instead of GNU
-# `find -printf` so this works on macOS BSD `ls`. The head -n -K trick
-# drops the last K lines (i.e. keeps everything except the K oldest).
+# Use UTC timestamps in archive names, not mutable filesystem mtimes. Keep
+# one newest archive from each of the latest N distinct dates, then one from
+# each of N older ISO weeks not represented by the daily keepers. Unknown
+# archive names and symlinks are left for operator review. Always keep this
+# newly verified archive, including when both limits are zero.
+if ! RETENTION_RESULT=$(python3 - "$BACKUP_DIR" "$FINAL_PATH" "$RETENTION_DAILY" "$RETENTION_WEEKLY" "$VERBOSE" <<'PY'
+import datetime as dt
+import os
+import re
+import sys
 
-PRUNE_COUNT=0
-TOTAL_KEEP=$(( RETENTION_DAILY + RETENTION_WEEKLY ))
-# Collect all pqc-openclaw-*.tar.gz in BACKUP_DIR, newest first, then
-# drop the first $TOTAL_KEEP (those are the keepers) and prune the rest.
-ALL_OLD=$(ls -1t "$BACKUP_DIR"/pqc-openclaw-*.tar.gz 2>/dev/null \
-  | tail -n +$(( TOTAL_KEEP + 1 )) || true)
-if [[ -n "$ALL_OLD" ]]; then
-  while IFS= read -r OLD; do
-    [[ -z "$OLD" ]] && continue
-    if [[ -f "${OLD}.sha256" ]]; then
-      rm -f "${OLD}.sha256"
-    fi
-    rm -f "$OLD"
-    PRUNE_COUNT=$(( PRUNE_COUNT + 1 ))
-    [[ $VERBOSE -eq 1 ]] && echo "[PRUNE] $OLD"
-  done <<< "$ALL_OLD"
+backup_dir, published, daily_limit, weekly_limit, verbose = sys.argv[1:]
+published = os.path.abspath(published)
+daily_limit, weekly_limit = int(daily_limit), int(weekly_limit)
+pattern = re.compile(
+    r"^pqc-openclaw-(\d{4}-\d{2}-\d{2})T(\d{6})Z(?:\.[A-Za-z0-9_-]+)?\.tar\.gz$"
+)
+archives = []
+for entry in os.scandir(backup_dir):
+    match = pattern.fullmatch(entry.name)
+    if match is None or not entry.is_file(follow_symlinks=False):
+        continue
+    try:
+        timestamp = dt.datetime.strptime("".join(match.groups()), "%Y-%m-%d%H%M%S")
+    except ValueError:
+        continue
+    archives.append((timestamp, entry.name, os.path.abspath(entry.path)))
+archives.sort(reverse=True)
+if published not in {item[2] for item in archives}:
+    raise RuntimeError("newly verified archive is missing or has an invalid name")
+
+keepers = {published}
+daily_dates = set()
+daily_weeks = set()
+for timestamp, name, archive in archives:
+    if len(daily_dates) >= daily_limit:
+        break
+    backup_date = timestamp.date()
+    if backup_date in daily_dates:
+        continue
+    daily_dates.add(backup_date)
+    daily_weeks.add(backup_date.isocalendar()[:2])
+    keepers.add(archive)
+
+weekly_weeks = set()
+for timestamp, name, archive in archives:
+    if len(weekly_weeks) >= weekly_limit:
+        break
+    week = timestamp.date().isocalendar()[:2]
+    if week in daily_weeks or week in weekly_weeks:
+        continue
+    weekly_weeks.add(week)
+    keepers.add(archive)
+
+pruned = 0
+for timestamp, name, archive in archives:
+    if archive in keepers:
+        continue
+    # The backup lock prevents other scheduled runs; verify this is still a
+    # regular archive before deleting it and its adjacent checksum file.
+    if not os.path.isfile(archive) or os.path.islink(archive):
+        continue
+    os.unlink(archive)
+    sidecar = archive + ".sha256"
+    if os.path.lexists(sidecar):
+        os.unlink(sidecar)
+    pruned += 1
+    if verbose == "1":
+        print(f"[PRUNE] {archive}", file=sys.stderr)
+print(pruned, len(keepers), len(daily_dates), len(weekly_weeks))
+PY
+); then
+  fail "retention" "could not prune verified backups; published archive remains at $FINAL_PATH"
+  exit 1
 fi
-ok "retention" "kept $TOTAL_KEEP (daily=$RETENTION_DAILY + weekly=$RETENTION_WEEKLY), pruned $PRUNE_COUNT"
+read -r PRUNE_COUNT KEEP_COUNT DAILY_COUNT WEEKLY_COUNT <<< "$RETENTION_RESULT"
+ok "retention" "kept $KEEP_COUNT (daily=$DAILY_COUNT/$RETENTION_DAILY + weekly=$WEEKLY_COUNT/$RETENTION_WEEKLY), pruned $PRUNE_COUNT"
 
 # ----------------------------------------------------------------------
 # Optional: S3 upload
