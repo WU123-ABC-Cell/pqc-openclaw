@@ -351,16 +351,35 @@ if [[ $SKIP_KEYRING -eq 0 ]]; then
   # file directly; operators can migrate it to a platform keyring separately.
   keyfile="$STATE_DIR/wrap-key.b64"
   if [[ ! -f "$keyfile" ]]; then
+    # A reinstall must not manufacture a plausible replacement key for an
+    # existing encrypted identity. Leave the recovery state intact.
+    python3 "$INSTALL_ROOT/scripts/check-wrap-key-recovery.py" "$STATE_DIR/state/openclaw.sqlite" \
+      || die "wrap key is missing while encrypted identities may exist; restore the original $keyfile"
     log "generating fresh 32-byte wrap key"
-    node -e "
-      const c = require('node:crypto');
-      process.stdout.write(c.randomBytes(32).toString('base64url'));
-    " > "$keyfile"
-    chmod 0600 "$keyfile"
-    if [[ -z "$SANDBOX_ROOT" ]]; then
-      chown "$SERVICE_USER" "$keyfile" || die "failed to assign wrap key to $SERVICE_USER"
+    key_creation=$(node - "$keyfile" <<'NODE'
+const fs = require('node:fs');
+const crypto = require('node:crypto');
+try {
+  fs.writeFileSync(process.argv[2], crypto.randomBytes(32).toString('base64url'), {
+    flag: 'wx', mode: 0o600,
+  });
+  process.stdout.write('created');
+} catch (error) {
+  if (error.code !== 'EEXIST') throw error;
+  process.stdout.write('existing');
+}
+NODE
+    ) || die "failed to create wrap key exclusively at $keyfile"
+    if [[ "$key_creation" == "created" ]]; then
+      chmod 0600 "$keyfile"
+      if [[ -z "$SANDBOX_ROOT" ]]; then
+        chown "$SERVICE_USER" "$keyfile" || die "failed to assign wrap key to $SERVICE_USER"
+      fi
+      ok "live wrap key written to $keyfile"
+    else
+      [[ -f "$keyfile" && ! -L "$keyfile" ]] || die "unsafe wrap key path appeared at $keyfile"
+      ok "wrap key file appeared concurrently at $keyfile (keeping)"
     fi
-    ok "live wrap key written to $keyfile"
   else
     ok "wrap key file already exists at $keyfile (keeping)"
   fi

@@ -38,6 +38,7 @@ import argparse
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -271,6 +272,93 @@ def main():
     if r.returncode == 0:
         fail("bare invocation should exit non-zero (no sudo)")
     log("  exit code semantics: OK")
+
+    # 9. The reinstall guard inspects the complete identity population before
+    # the installer is allowed to create a missing fallback key.
+    log("9. missing-key recovery guard refuses encrypted identities")
+    guard = os.path.join(os.path.dirname(args.script), "check-wrap-key-recovery.py")
+    if not os.path.isfile(guard) or (
+        '"$INSTALL_ROOT/scripts/check-wrap-key-recovery.py"' not in source
+    ):
+        fail("installer does not invoke the missing-key recovery guard")
+    with tempfile.TemporaryDirectory(prefix="pqc-e2e-key-recovery-") as state_dir:
+        db_path = os.path.join(state_dir, "openclaw.sqlite")
+
+        def check_guard():
+            return subprocess.run(
+                [sys.executable, guard, db_path], capture_output=True, text=True
+            )
+
+        if check_guard().returncode != 0 or os.path.exists(db_path):
+            fail("fresh state must permit key creation without creating a database")
+        with sqlite3.connect(db_path) as database:
+            database.execute(
+                "CREATE TABLE device_identities (identity_key TEXT, "
+                "mldsa_private_key_wrapped BLOB, mldsa_private_key_wrap_key_id TEXT)"
+            )
+            database.execute("INSERT INTO device_identities VALUES ('primary', NULL, NULL)")
+        if check_guard().returncode != 0:
+            fail("plaintext-only state should permit a new wrapping key")
+        with sqlite3.connect(db_path) as database:
+            database.execute(
+                "INSERT INTO device_identities VALUES ('secondary', x'01', 'old-key')"
+            )
+        denied = check_guard()
+        if denied.returncode == 0 or "restore their original wrap key" not in denied.stderr:
+            fail(f"wrapped non-primary identity did not block a new key: {denied.stderr}")
+        if os.path.exists(os.path.join(state_dir, "wrap-key.b64")):
+            fail("recovery guard created a replacement key")
+        with open(db_path, "wb") as database:
+            database.write(b"not a SQLite database")
+        if check_guard().returncode == 0:
+            fail("uninspectable state database must fail closed")
+        os.unlink(db_path)
+        with sqlite3.connect(db_path) as database:
+            database.execute(
+                "CREATE TABLE device_identities (identity_key TEXT, device_id TEXT, "
+                "public_key_pem TEXT, private_key_pem TEXT, created_at_ms INTEGER, "
+                "updated_at_ms INTEGER)"
+            )
+        if check_guard().returncode != 0:
+            fail("recognized plaintext six-column state must permit a key")
+        os.unlink(db_path)
+        os.symlink(os.path.join(state_dir, "missing-target.sqlite"), db_path)
+        if check_guard().returncode == 0:
+            fail("dangling database symlink must block key creation")
+        parent_path = os.path.join(state_dir, "state")
+        os.symlink(os.path.join(state_dir, "missing-mounted-state"), parent_path)
+        parent_guard = subprocess.run(
+            [sys.executable, guard, os.path.join(parent_path, "openclaw.sqlite")],
+            capture_output=True, text=True,
+        )
+        if parent_guard.returncode == 0:
+            fail("dangling database parent symlink must block key creation")
+
+        node_match = re.search(
+            r"key_creation=\$\(node - \"\$keyfile\" <<'NODE'\n(.*?)\nNODE",
+            source,
+            re.DOTALL,
+        )
+        if not node_match:
+            fail("installer does not use exclusive Node key creation")
+        key_path = os.path.join(state_dir, "wrap-key.b64")
+
+        def create_key():
+            return subprocess.run(
+                ["node", "-", key_path], input=node_match.group(1),
+                capture_output=True, text=True,
+            )
+
+        created = create_key()
+        if created.returncode != 0 or created.stdout != "created":
+            fail(f"exclusive key creation failed: {created.stderr}")
+        with open(key_path, "rb") as key_file:
+            original_key = key_file.read()
+        raced = create_key()
+        with open(key_path, "rb") as key_file:
+            retained_key = key_file.read()
+        if raced.returncode != 0 or raced.stdout != "existing" or retained_key != original_key:
+            fail("installer overwrote an existing concurrently provisioned wrap key")
 
     log("ALL CHECKS PASSED")
 

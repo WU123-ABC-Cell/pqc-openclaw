@@ -30,7 +30,10 @@ import {
   type StoredDeviceIdentity,
   type DeviceIdentityStoreOptions,
 } from "./device-identity-store.js";
-import { loadOrCreateDeviceIdentity } from "./device-identity.js";
+import {
+  loadOrCreateDeviceIdentity,
+  resolveDeviceIdentityWrappingOptions,
+} from "./device-identity.js";
 import {
   decodeMlDsa65PublicKey,
   decodeMlDsa65SecretKey,
@@ -576,6 +579,101 @@ describe("M5.5 auto-inject default keyring from env", () => {
     });
     expect(stored?.mldsaPrivateKeyPem).toBeNull();
     expect(stored?.mldsaPrivateKeyWrapped).not.toBeNull();
+  });
+
+  it("preserves encrypted identity and recovery state when the fallback key is lost", () => {
+    const options = makeStoreOptions();
+    delete options.env.OPENCLAW_WRAP_KEY_FILE;
+    delete options.env.OPENCLAW_WRAP_KEY_ID;
+    const created = loadOrCreateDeviceIdentity(options);
+    const keyPath = path.join(options.stateDir, "wrap-key.b64");
+    const originalKey = fs.readFileSync(keyPath, "utf8");
+    const before = readStoredDeviceIdentity({
+      ...options,
+      wrappingKeyProvider: new FileKeyring(keyPath),
+    });
+    fs.rmSync(keyPath);
+
+    expect(() => loadOrCreateDeviceIdentity(options)).toThrow(/Restore the original key/);
+    expect(fs.existsSync(keyPath)).toBe(false);
+    const doctor = repairInvalidCanonicalIdentity(options.env);
+    expect(doctor.changes).toEqual([]);
+    expect(doctor.warnings.join(" ")).toMatch(/Restore the original key/);
+    expect(fs.existsSync(keyPath)).toBe(false);
+
+    fs.writeFileSync(keyPath, originalKey, { mode: 0o600 });
+    expect(loadOrCreateDeviceIdentity(options).deviceId).toBe(created.deviceId);
+    expect(
+      readStoredDeviceIdentity({ ...options, wrappingKeyProvider: new FileKeyring(keyPath) })
+        ?.mldsaPrivateKeyWrapped,
+    ).toBe(before?.mldsaPrivateKeyWrapped);
+  });
+
+  it("does not create a fallback key when only a non-primary identity is wrapped", () => {
+    const options = makeStoreOptions();
+    delete options.env.OPENCLAW_WRAP_KEY_FILE;
+    delete options.env.OPENCLAW_WRAP_KEY_ID;
+    loadOrCreateDeviceIdentity({ ...options, identityKey: "secondary" });
+    const keyPath = path.join(options.stateDir, "wrap-key.b64");
+    fs.rmSync(keyPath);
+
+    expect(() => loadOrCreateDeviceIdentity(options)).toThrow(/Restore the original key/);
+    expect(fs.existsSync(keyPath)).toBe(false);
+    expect(readStoredDeviceIdentityReadOnly({ ...options, identityKey: "primary" })).toBeNull();
+  });
+
+  it("permits a new key for the recognized plaintext six-column legacy database", () => {
+    const options = makeStoreOptions();
+    delete options.env.OPENCLAW_WRAP_KEY_FILE;
+    options.path = path.join(options.stateDir, "state", "openclaw.sqlite");
+    fs.mkdirSync(path.dirname(options.path), { recursive: true });
+    const { DatabaseSync } = requireNodeSqlite();
+    const database = new DatabaseSync(options.path);
+    try {
+      database.exec(`CREATE TABLE device_identities (
+        identity_key TEXT PRIMARY KEY, device_id TEXT, public_key_pem TEXT,
+        private_key_pem TEXT, created_at_ms INTEGER, updated_at_ms INTEGER
+      )`);
+    } finally {
+      database.close();
+    }
+
+    resolveDeviceIdentityWrappingOptions(options, true);
+    expect(fs.existsSync(path.join(options.stateDir, "wrap-key.b64"))).toBe(true);
+  });
+
+  it("does not treat a dangling database symlink as fresh state", () => {
+    if (process.platform === "win32") {
+      return;
+    }
+    const options = makeStoreOptions();
+    delete options.env.OPENCLAW_WRAP_KEY_FILE;
+    options.path = path.join(options.stateDir, "state", "openclaw.sqlite");
+    fs.mkdirSync(path.dirname(options.path), { recursive: true });
+    fs.symlinkSync(path.join(options.stateDir, "missing-target.sqlite"), options.path);
+
+    expect(() => resolveDeviceIdentityWrappingOptions(options, true)).toThrow(
+      /existing state could not be inspected/,
+    );
+    expect(fs.existsSync(path.join(options.stateDir, "wrap-key.b64"))).toBe(false);
+  });
+
+  it("does not treat a dangling database parent symlink as fresh state", () => {
+    if (process.platform === "win32") {
+      return;
+    }
+    const options = makeStoreOptions();
+    delete options.env.OPENCLAW_WRAP_KEY_FILE;
+    options.path = path.join(options.stateDir, "state", "openclaw.sqlite");
+    fs.symlinkSync(
+      path.join(options.stateDir, "missing-mounted-state"),
+      path.dirname(options.path),
+    );
+
+    expect(() => resolveDeviceIdentityWrappingOptions(options, true)).toThrow(
+      /existing state could not be inspected/,
+    );
+    expect(fs.existsSync(path.join(options.stateDir, "wrap-key.b64"))).toBe(false);
   });
 
   it("Doctor preserves an invalid envelope instead of generating a fallback identity", () => {

@@ -25,6 +25,8 @@ import {
   assertPrivateWindowsWrapKeyDirectory,
   assertPrivateWindowsWrapKeyFile,
 } from "../security/windows-wrap-key-acl.js";
+import { withExistingOpenClawStateDatabaseReadOnly } from "../state/openclaw-state-db-readonly.js";
+import { resolveOpenClawStateSqlitePath } from "../state/openclaw-state-db.paths.js";
 import { acquireDeviceIdentityCoordinator } from "./device-identity-coordinator.js";
 import {
   generateStoredDeviceIdentity,
@@ -165,6 +167,90 @@ function resolveFallbackFileKeyring(
   assertPrivateWindowsWrapKeyDirectory(stateDir);
   // Diagnostics use the same key selection and permission policy as signing,
   // but must never generate a key or attempt filesystem writes.
+  if (create && !pathMayExist(keyPath)) {
+    // A missing key file can be a recovery incident. Inspect every identity,
+    // including non-primary rows, before creating a new key that could be
+    // mistaken for the one protecting the existing ciphertext.
+    let hasWrappedIdentity: boolean;
+    try {
+      const databasePath = path.resolve(
+        options.path ?? resolveOpenClawStateSqlitePath(options.env ?? process.env),
+      );
+      // ENOENT on the database itself can hide a dangling parent symlink.
+      // Walk to the first existing component before treating the path as fresh.
+      let existingComponent = databasePath;
+      while (true) {
+        try {
+          if (fs.lstatSync(existingComponent).isSymbolicLink()) {
+            throw new Error("state database path contains a symbolic link");
+          }
+          break;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+            throw error;
+          }
+          const parent = path.dirname(existingComponent);
+          if (parent === existingComponent) {
+            break;
+          }
+          existingComponent = parent;
+        }
+      }
+      hasWrappedIdentity =
+        withExistingOpenClawStateDatabaseReadOnly(({ db }) => {
+          const table = db
+            .prepare(
+              "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'device_identities'",
+            )
+            .get();
+          if (!table) {
+            return false;
+          }
+          const columns = new Set(
+            (db.prepare("PRAGMA table_info(device_identities)").all() as { name: string }[]).map(
+              (column) => column.name,
+            ),
+          );
+          const wrappedColumns = ["mldsa_private_key_wrapped", "mldsa_private_key_wrap_key_id"];
+          if (wrappedColumns.every((column) => !columns.has(column))) {
+            const legacyColumns = [
+              "identity_key",
+              "device_id",
+              "public_key_pem",
+              "private_key_pem",
+              "created_at_ms",
+              "updated_at_ms",
+            ];
+            if (
+              columns.size === legacyColumns.length &&
+              legacyColumns.every((c) => columns.has(c))
+            ) {
+              return false;
+            }
+          }
+          if (!wrappedColumns.every((column) => columns.has(column))) {
+            throw new Error("unrecognized device identity table schema");
+          }
+          return Boolean(
+            db
+              .prepare(
+                "SELECT 1 FROM device_identities WHERE mldsa_private_key_wrapped IS NOT NULL OR mldsa_private_key_wrap_key_id IS NOT NULL LIMIT 1",
+              )
+              .get(),
+          );
+        }, options) ?? false;
+    } catch (error) {
+      throw new Error(
+        `Cannot create a replacement device identity wrapping key: existing state could not be inspected. Restore the original key at ${keyPath}.`,
+        { cause: error },
+      );
+    }
+    if (hasWrappedIdentity) {
+      throw new Error(
+        `Cannot create a replacement device identity wrapping key: encrypted identities already exist. Restore the original key at ${keyPath}.`,
+      );
+    }
+  }
   if (create) {
     try {
       fs.writeFileSync(keyPath, encodeBase64UrlKey(generateWrappingKey()), {
