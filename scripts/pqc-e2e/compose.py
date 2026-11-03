@@ -27,9 +27,8 @@ would fail on at parse time:
  11. The bind-mount source path for healthcheck-pqc.sh defaults
      to /usr/local/bin/healthcheck-pqc.sh (matches what
      install-pqc.sh installs to)
- 12. secrets_file env names (OPENCLAW_GATEWAY_TOKEN_FILE,
-     OPENCLAW_WRAP_KEY_FILE) are referenced in the gateway
-     environment
+ 12. The gateway and CLI both route the mounted gateway token through the
+     shipped entrypoint; the wrap-key file remains configured directly
 
 Why this exists: docker-compose.pqc.yml is an evaluation recipe.
 Structural checks catch missing secrets and misleading security
@@ -47,6 +46,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 
 
 def log(msg):
@@ -205,13 +205,67 @@ process.stdout.write(JSON.stringify(YAML.parse(fs.readFileSync(process.argv[1], 
     log("  PQC_HEALTHCHECK_PATH default = /usr/local/bin/healthcheck-pqc.sh: OK")
 
     # 12. *_FILE env vars referenced
-    log("12. *_FILE env vars in gateway environment")
+    log("12. token file connected to gateway and CLI entrypoints")
     env_block = gw["environment"]
     env_str = "\n".join(f"{k}: {v}" for k, v in env_block.items()) if isinstance(env_block, dict) else "\n".join(env_block)
     for needle in ("OPENCLAW_GATEWAY_TOKEN_FILE", "OPENCLAW_WRAP_KEY_FILE"):
         if needle not in env_str:
             fail(f"{needle} not in openclaw-gateway environment block")
-    log(f"  OPENCLAW_GATEWAY_TOKEN_FILE + OPENCLAW_WRAP_KEY_FILE present: OK")
+    cli = doc["services"].get("openclaw-cli") or {}
+    if cli.get("environment", {}).get("OPENCLAW_GATEWAY_TOKEN_FILE") != gw["environment"].get("OPENCLAW_GATEWAY_TOKEN_FILE"):
+        fail("gateway and CLI must reference the same token secret path")
+    wrapper = "/app/scripts/pqc-token-entrypoint.sh"
+    if gw.get("command", [None])[0] != wrapper or cli.get("entrypoint", [None])[0] != wrapper:
+        fail("gateway and CLI must both run the token-file entrypoint")
+    if gw["command"][1:5] != ["node", "dist/index.js", "gateway", "--auth"] or gw["command"][5] != "token":
+        fail("Compose gateway must select token auth explicitly")
+    if "gateway_token" not in (cli.get("secrets") or []):
+        fail("CLI does not mount gateway_token")
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    entrypoint_path = os.path.join(repo_root, "scripts", "pqc-token-entrypoint.sh")
+    if not os.path.isfile(entrypoint_path):
+        fail("gateway token entrypoint is missing")
+    with open(os.path.join(repo_root, "Dockerfile"), encoding="utf8") as dockerfile:
+        if "COPY --from=runtime-assets --chown=node:node --chmod=0755 /app/scripts/pqc-token-entrypoint.sh ./scripts/pqc-token-entrypoint.sh" not in dockerfile.read():
+            fail("runtime image does not contain executable gateway token entrypoint")
+    with open(os.path.join(repo_root, ".dockerignore"), encoding="utf8") as dockerignore:
+        if "/secrets" not in dockerignore.read().splitlines():
+            fail("Compose host secret directory is not excluded from Docker build context")
+    log("  gateway and CLI token-file entrypoint wired into Compose and image: OK")
+
+    # Execute the actual bridge with a disposable non-secret fixture. This
+    # catches a structurally present but inert _FILE configuration.
+    if os.name == "posix":
+        with tempfile.TemporaryDirectory(prefix="pqc-compose-token-") as tmp:
+            secret_file = os.path.join(tmp, "gateway-token")
+            with open(secret_file, "w", encoding="ascii") as secret:
+                secret.write("compose-token-test-value-32-bytes\n")
+            os.chmod(secret_file, 0o400)
+            probe = ["sh", entrypoint_path, "node", "-e", "process.exit(process.env.OPENCLAW_GATEWAY_TOKEN === 'compose-token-test-value-32-bytes' ? 0 : 1)"]
+            env = {**os.environ, "OPENCLAW_GATEWAY_TOKEN_FILE": secret_file}
+            env.pop("OPENCLAW_GATEWAY_TOKEN", None)
+            if subprocess.run(probe, env=env, capture_output=True).returncode != 0:
+                fail("token entrypoint did not pass file content to gateway process")
+            env["OPENCLAW_GATEWAY_TOKEN_FILE"] = os.path.join(tmp, "missing")
+            if subprocess.run(probe, env=env, capture_output=True).returncode != 78:
+                fail("token entrypoint did not fail closed for missing secret")
+            env["OPENCLAW_GATEWAY_TOKEN_FILE"] = secret_file
+            env["OPENCLAW_GATEWAY_TOKEN"] = "conflicting-token"
+            if subprocess.run(probe, env=env, capture_output=True).returncode != 78:
+                fail("token entrypoint did not reject conflicting token sources")
+            env.pop("OPENCLAW_GATEWAY_TOKEN_FILE")
+            env["OPENCLAW_GATEWAY_TOKEN"] = "compose-token-test-value-32-bytes"
+            if subprocess.run(probe, env=env, capture_output=True).returncode != 0:
+                fail("token entrypoint broke the existing environment token path")
+            os.chmod(secret_file, 0o600)
+            with open(secret_file, "w", encoding="ascii") as secret:
+                pass
+            os.chmod(secret_file, 0o400)
+            env.pop("OPENCLAW_GATEWAY_TOKEN")
+            env["OPENCLAW_GATEWAY_TOKEN_FILE"] = secret_file
+            if subprocess.run(probe, env=env, capture_output=True).returncode != 78:
+                fail("token entrypoint did not reject an empty secret")
+        log("  token file, missing/empty/conflict rejection, and env control: OK")
 
     log("ALL CHECKS PASSED")
 

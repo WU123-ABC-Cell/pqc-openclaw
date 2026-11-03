@@ -511,6 +511,44 @@ describe("resolveGatewayCredentialsFromConfig", () => {
 });
 
 describe("resolveGatewayCredentialsFromValues", () => {
+  it("rejects a persisted token that conflicts with the Compose token file", () => {
+    const env = {
+      OPENCLAW_GATEWAY_TOKEN_FILE: "/run/secrets/gateway_token",
+      OPENCLAW_GATEWAY_TOKEN: "file-token",
+    } as NodeJS.ProcessEnv;
+    expect(() =>
+      resolveGatewayCredentialsFromValues({
+        configToken: "stored-token",
+        env,
+        tokenPrecedence: "config-first",
+      }),
+    ).toThrow("gateway.auth.token conflicts with OPENCLAW_GATEWAY_TOKEN_FILE");
+    expect(() =>
+      resolveGatewayCredentialsFromConfig({
+        cfg: cfg({ gateway: { mode: "local", auth: { token: "stored-token" } } }),
+        env,
+      }),
+    ).toThrow("gateway.auth.token conflicts with OPENCLAW_GATEWAY_TOKEN_FILE");
+    expect(
+      resolveGatewayCredentialsFromConfig({
+        cfg: cfg({ gateway: { mode: "local", auth: { token: "file-token" } } }),
+        env,
+      }).token,
+    ).toBe("file-token");
+    expect(() =>
+      resolveGatewayCredentialsFromConfig({
+        cfg: cfg({ gateway: { mode: "local", auth: { mode: "password" } } }),
+        env,
+      }),
+    ).toThrow("OPENCLAW_GATEWAY_TOKEN_FILE requires gateway auth mode=token");
+    expect(() =>
+      resolveGatewayCredentialsFromConfig({
+        cfg: cfg({ gateway: { mode: "local", auth: { password: "stored-password" } } }), // pragma: allowlist secret
+        env,
+      }),
+    ).toThrow("OPENCLAW_GATEWAY_TOKEN_FILE requires gateway auth mode=token");
+  });
+
   it("supports config-first precedence for token/password", () => {
     const resolved = resolveGatewayCredentialsFromDefaultValues({
       tokenPrecedence: "config-first",

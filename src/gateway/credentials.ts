@@ -3,6 +3,7 @@
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import {
   createGatewayCredentialPlan,
+  assertGatewayTokenFileMatchesConfig,
   type GatewayCredentialPlan,
   trimCredentialToUndefined,
   trimToUndefined,
@@ -90,6 +91,7 @@ export function resolveGatewayCredentialsFromValues(params: {
   const envToken = trimToUndefined(env.OPENCLAW_GATEWAY_TOKEN);
   const envPassword = trimToUndefined(env.OPENCLAW_GATEWAY_PASSWORD);
   const configToken = trimCredentialToUndefined(params.configToken);
+  assertGatewayTokenFileMatchesConfig({ env, envToken, configToken });
   const configPassword = trimCredentialToUndefined(params.configPassword);
   const tokenPrecedence = params.tokenPrecedence ?? "env-first";
   const passwordPrecedence = params.passwordPrecedence ?? "env-first";

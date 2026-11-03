@@ -6,6 +6,7 @@ import type {
   GatewayTrustedProxyConfig,
 } from "../config/types.gateway.js";
 import { resolveSecretInputRef } from "../config/types.secrets.js";
+import { assertGatewayTokenFileMatchesConfig } from "./credential-planner.js";
 import { resolveGatewayCredentialsFromValues } from "./credentials.js";
 
 /** Authentication modes after config, override, and credential inputs are combined. */
@@ -64,6 +65,7 @@ export function resolveGatewayAuth(params: {
     }
   }
   const env = params.env ?? process.env;
+  assertGatewayTokenFileMatchesConfig({ env, authMode: authConfig.mode });
   const tokenRef = resolveSecretInputRef({ value: authConfig.token }).ref;
   const passwordRef = resolveSecretInputRef({ value: authConfig.password }).ref;
   // Secret refs are not plaintext credentials here. Startup/runtime secret

@@ -49,6 +49,33 @@ type GatewaySecretDefaults = NonNullable<OpenClawConfig["secrets"]>["defaults"];
 /** Normalize optional Gateway credential strings to nonempty values. */
 export const trimToUndefined = normalizeOptionalString;
 
+/** A Compose token file must not silently lose to a different stored token. */
+export function assertGatewayTokenFileMatchesConfig(params: {
+  env: NodeJS.ProcessEnv;
+  envToken?: string;
+  configToken?: string;
+  configPasswordPresent?: boolean;
+  authMode?: string;
+}): void {
+  if (
+    trimToUndefined(params.env.OPENCLAW_GATEWAY_TOKEN_FILE) &&
+    params.authMode !== "token" &&
+    (params.authMode || params.configPasswordPresent)
+  ) {
+    throw new Error("OPENCLAW_GATEWAY_TOKEN_FILE requires gateway auth mode=token");
+  }
+  if (
+    trimToUndefined(params.env.OPENCLAW_GATEWAY_TOKEN_FILE) &&
+    params.envToken &&
+    params.configToken &&
+    params.envToken !== params.configToken
+  ) {
+    throw new Error(
+      "gateway.auth.token conflicts with OPENCLAW_GATEWAY_TOKEN_FILE; use the same token or remove gateway.auth.token",
+    );
+  }
+}
+
 /**
  * Like trimToUndefined but also rejects unresolved env var placeholders (e.g. `${VAR}`).
  * This prevents literal placeholder strings like `${OPENCLAW_GATEWAY_TOKEN}` from being
@@ -96,6 +123,18 @@ export function createGatewayCredentialPlan(params: {
   const authMode = gateway?.auth?.mode;
   const envToken = trimToUndefined(env.OPENCLAW_GATEWAY_TOKEN);
   const envPassword = trimToUndefined(env.OPENCLAW_GATEWAY_PASSWORD);
+  assertGatewayTokenFileMatchesConfig({
+    env,
+    envToken,
+    configToken: resolveSecretInputRef({
+      value: gateway?.auth?.token,
+      defaults,
+    }).ref
+      ? undefined
+      : trimCredentialToUndefined(gateway?.auth?.token),
+    configPasswordPresent: hasConfiguredSecretInput(gateway?.auth?.password, defaults),
+    authMode,
+  });
 
   const localToken = resolveConfiguredGatewayCredentialInput({
     value: gateway?.auth?.token,

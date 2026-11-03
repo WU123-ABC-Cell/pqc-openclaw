@@ -5,6 +5,9 @@
 # into the project root; keep it out of the build context.
 .env
 .env.*
+# The PQC Compose recipe reads these files at runtime. Never send them to
+# Docker's build context or cache through COPY . .
+/secrets
 
 .bun-cache
 .bun

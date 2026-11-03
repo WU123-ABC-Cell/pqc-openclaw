@@ -233,6 +233,19 @@ describe("gateway auth", () => {
     expect(auth.password).toBe("config-password"); // pragma: allowlist secret
   });
 
+  it("rejects a different persisted token when Compose supplied a token file", () => {
+    const env = {
+      OPENCLAW_GATEWAY_TOKEN_FILE: "/run/secrets/gateway_token",
+      OPENCLAW_GATEWAY_TOKEN: "file-token",
+    } as NodeJS.ProcessEnv;
+    expect(() =>
+      resolveGatewayAuth({ authConfig: { mode: "token", token: "stored-token" }, env }),
+    ).toThrow("gateway.auth.token conflicts with OPENCLAW_GATEWAY_TOKEN_FILE");
+    expect(
+      resolveGatewayAuth({ authConfig: { mode: "token", token: "file-token" }, env }).token,
+    ).toBe("file-token");
+  });
+
   it("treats env-template auth secrets as SecretRefs instead of plaintext", () => {
     const auth = resolveGatewayAuth({
       authConfig: {

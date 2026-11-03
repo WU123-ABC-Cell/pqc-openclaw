@@ -240,6 +240,7 @@ COPY --from=runtime-assets --chown=node:node /app/src/agents/templates ./src/age
 COPY --from=runtime-assets --chown=node:node /app/${OPENCLAW_BUNDLED_PLUGIN_DIR} ./${OPENCLAW_BUNDLED_PLUGIN_DIR}
 COPY --from=runtime-assets --chown=node:node /app/skills ./skills
 COPY --from=runtime-assets --chown=node:node /app/docs ./docs
+COPY --from=runtime-assets --chown=node:node --chmod=0755 /app/scripts/pqc-token-entrypoint.sh ./scripts/pqc-token-entrypoint.sh
 COPY --from=runtime-assets --chown=node:node /app/qa ./qa
 
 # Keep pnpm available in the runtime image for container-local workflows.
