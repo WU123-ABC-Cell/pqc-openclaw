@@ -14,35 +14,32 @@ by [@WU123-ABC-Cell](https://github.com/WU123-ABC-Cell).
 
 ## Current capabilities and release blockers
 
-Status is based on static review of revision
-`0c273072acc724edafbf516eaa38c9dd0195d9d1`. It is not a runtime acceptance report.
+Updated 2026-11-03. This table describes the code in the commit containing this
+file. It supersedes the historical `0c273072acc724edafbf516eaa38c9dd0195d9d1`
+review. The third-review repairs on `r3-fixes-20261103` remain candidates until
+their own deployment and recovery checks pass; the public `master` baseline at
+the start of this work was `4e14148`. See the [security status](docs/security/pqc-whitepaper.md)
+for exact limits and historical scope.
 
-The table below describes that committed baseline. Local repair candidates dated
-2026-09-17 add known wrapping-key alias exclusion to both backup paths and fix
-default-keyring environment/configuration reuse and silent provider downgrade.
-Focused Linux checks are not release acceptance; required submission review and
-cloud CI remain pending. See the [security status](docs/security/pqc-whitepaper.md)
-for the changed key-selection contract and remaining blockers.
-
-| Surface                    | Actual integration and limitations                                                                                                                                                                                                                      |
-| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Device signatures          | Gateway and bundled mobile clients use ML-DSA-65 wire keys/signatures (1952/3309 bytes). Apple clients require OS 26; upgraded Ed25519 clients receive a new device ID and must pair again. No Ed25519 fallback exists.                                 |
-| Identity storage           | AES-256-GCM wrapping and file/environment/OS keyring providers exist. Keypair validation, legacy migration, provider isolation and error handling remain repair targets. Encryption does not protect against a thief who also obtains the wrapping key. |
-| Backups                    | Built-in state backup does not currently exclude the default wrapping-key file. The separate `scripts/backup-pqc.sh` excludes it. Treat existing archives as sensitive and retain independent recovery keys; neither policy alone makes a backup safe.  |
-| Nostr                      | The production plugin still calls NIP-04. The custom `src/security/nip44-v2.ts` helper has no observed production caller and has unresolved protocol defects. Do not enable or treat it as compliant NIP-44 or delivered PQC messaging.                 |
-| Key lifecycle              | Read-only `openclaw wrap-key status` is registered. Import/export/rotation remain helper APIs, not operator commands; persistent lifecycle acceptance is pending. See the diagnostic scope below.                                                       |
-| Audit and required locking | Compose no longer advertises unsupported PQC logging or required-mlock switches. PQC events use the ordinary gateway log stream; there is no separate audit-file sink or fail-closed memory-locking policy.                                             |
-| Secure-memory helpers      | A native secure-memory implementation and tests exist. Availability is build/platform-dependent and fallback is best-effort. This is not complete process-memory protection; immutable JS strings and runtime copies remain outside the guarantee.      |
-| TLS and push               | This repository does not establish an accepted end-to-end hybrid TLS or dual-signature push deployment. Helper presence is not proof of native-client or external-service support.                                                                      |
-| Test evidence              | Module tests and historical timing reports exist. Product-boundary coverage is incomplete, and random sign/verify roundtrips are not official known-answer tests. Historical results do not certify this revision.                                      |
+| Surface           | Current implementation and remaining limit                                                                                                                                                                                                                                                                                                     |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Device signatures | Gateway and bundled mobile clients use ML-DSA-65 wire proofs. Apple clients require OS 26; native Apple acceptance remains pending. Legacy Ed25519 authorization is not transferred.                                                                                                                                                           |
+| Identity storage  | AES-256-GCM identity wrapping binds row context and checks keypair correspondence. A missing file key no longer triggers replacement when wrapped rows exist. Keep the original wrapping key separately; losing it makes encrypted identities unrecoverable.                                                                                   |
+| Backups           | Both `openclaw backup create` and `scripts/backup-pqc.sh` exclude the known default/configured wrapping-key files, targets and hardlink aliases. They do not exclude unknown independent copies or encrypt other archive contents. Older archives may contain keys. Local daily/weekly rotation is a candidate pending real recovery exercise. |
+| Nostr             | The production plugin uses the custom OpenClaw PQC DM v1 kind `4444` transport and signed key announcements. This is not standard NIP-44 or interoperable with ordinary Nostr clients; independent protocol review remains pending.                                                                                                            |
+| Key lifecycle     | Read-only `openclaw wrap-key status` is registered. Import/export/rotation are not operator commands. A separate SQLite v7 rotation candidate still needs native Apple acceptance.                                                                                                                                                             |
+| Deployment        | The Compose file-token path and secret handling have a local repair candidate. Real container startup, non-root secret access and gateway/CLI authentication remain to be exercised.                                                                                                                                                           |
+| Audit and memory  | PQC events use ordinary logging. There is no separate audit-file sink or fail-closed memory-locking policy. Secure-memory coverage depends on platform and build.                                                                                                                                                                              |
+| TLS and push      | This repository has no accepted end-to-end hybrid TLS deployment or deployed external-service PQC push-signature integration. Helper code does not establish client or service support.                                                                                                                                                        |
+| Evidence          | Focused tests and historical timing reports are not production acceptance, cryptographic certification or official known-answer tests. Check CI against the exact commit being deployed.                                                                                                                                                       |
 
 See [the current security status and repair gates](docs/security/pqc-whitepaper.md)
 before reviewing deployment or migration instructions.
 
 ### Read-only wrapping-key diagnostic (2026-10-03)
 
-This diagnostic updates the key-lifecycle row above; the other baseline rows are
-historical review notes, not a current acceptance inventory.
+This command checks the selected identity and active key; it is not a complete
+key inventory or production-readiness check.
 
 ```sh
 openclaw wrap-key status
@@ -112,9 +109,8 @@ not production acceptance. Their existence does not resolve the blockers above.
 
 - Record the exact commit, Node version, dependency lock, platform, command and exit
   code for each new result.
-- Billing/usage failures that occur before testing are neither test passes nor test
-  failures. The reviewed revision's supplied Actions evidence shows this kind of
-  failure; this status review did not refresh remote runs.
+- A workflow that stops before testing provides no test result. Check the run
+  and exact commit before citing it as evidence.
 - Local results, checked-in historical reports and current cloud CI results are
   separate evidence. A badge is a link to status, not a certification.
 - Timing measurements can fail to detect a difference in one setup; they cannot
@@ -129,7 +125,7 @@ not production acceptance. Their existence does not resolve the blockers above.
 | `src/infra/device-identity*.ts`     | Device identity generation, persistence and verification                |
 | `src/security/`                     | Wrapping, keyring, secure-memory and experimental cryptographic helpers |
 | `src/logging/pqc-log.ts`            | PQC event logger; separate audit-file integration is not established    |
-| `extensions/nostr/src/nostr-bus.ts` | Production Nostr plugin, currently NIP-04                               |
+| `extensions/nostr/src/nostr-bus.ts` | Production custom PQC DM v1 transport (kind `4444`)                     |
 | `scripts/`                          | Operator and verification scripts; inspect scope and prerequisites      |
 | `docs/security/`                    | Current status plus historical design and measurement material          |
 | `docker-compose.pqc.yml`            | Evaluation deployment recipe with unresolved configuration contracts    |

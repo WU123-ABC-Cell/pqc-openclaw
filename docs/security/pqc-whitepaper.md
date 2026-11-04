@@ -2,16 +2,40 @@
 
 Author: 吴昊天 (Wu Haotian)
 
-Status updated: 2026-09-21
+Status updated: 2026-11-03
 
-Implementation baseline: `0c273072acc724edafbf516eaa38c9dd0195d9d1`
+Implementation checked: local `r3-fixes-20261103` at
+`c04df90d4647a0112149ddf63d51da0470a97cf6`. Public `master` at the start
+of this review was `4e14148`. The local branch is not production accepted.
 
 ## Status and scope
 
-This page replaces the previous delivery-oriented whitepaper as the current status
-statement. It is based on static source review, not a fresh test, deployment or
-cryptographic certification. The previous text remains in Git history; retained
-measurement files are not deleted by this documentation change.
+This page separates the checked code from the dated review retained below.
+The local branch has focused test evidence, but no real Compose container
+acceptance, lost-key recovery exercise on an installed system, or native Apple
+acceptance. It is not a cryptographic certification or production release.
+
+| Area                       | Checked implementation and remaining boundary                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Device identity            | Gateway and bundled clients use ML-DSA-65 proofs. Wrapped SQLite rows authenticate row context and reject mismatched keypairs. Legacy Ed25519 authorization is not transferred; Apple OS 26 native acceptance remains pending.                                                                                                                                                                                                                                                |
+| Backups                    | Both `openclaw backup create` and `scripts/backup-pqc.sh` exclude known default/configured wrapping-key files, their resolved targets and hardlink aliases. Encrypted identity rows remain in the archive, so recovery requires the original key stored separately. Other secrets in the archive are not encrypted by this exclusion; independent key copies at unknown paths cannot be identified. Older archives may contain keys and must remain protected as credentials. |
+| Recovery                   | The branch prevents a missing default wrapping-key file from being replaced when wrapped identities exist or state cannot be inspected. The installer uses exclusive key creation. Real installed-system recovery remains to be exercised.                                                                                                                                                                                                                                    |
+| Retention                  | The branch selects one local archive for each of seven newest UTC backup dates and four older ISO weeks. Sparse histories can have fewer points; off-host retention is separate. A real multiweek restore exercise remains pending.                                                                                                                                                                                                                                           |
+| Nostr                      | Production uses the custom OpenClaw PQC DM v1 kind `4444` transport. It is not standard NIP-44 or interoperable with ordinary Nostr clients; independent protocol review remains pending.                                                                                                                                                                                                                                                                                     |
+| Deployment                 | Compose file-token wiring has a local candidate. Container UID 1000 secret reads, real startup and Gateway/CLI authentication have not been exercised here. No separate PQC audit-file sink or required memory-locking policy is claimed.                                                                                                                                                                                                                                     |
+| Key lifecycle and evidence | `openclaw wrap-key status` is read-only. Import/export/rotate are not operator commands. A separate SQLite v7 rotation candidate needs native Apple verification. Focused tests and historical timing files do not establish release acceptance or official known-answer tests.                                                                                                                                                                                               |
+
+For current backup behavior and restore requirements, see
+[the backup command guide](../cli/backup.md) and
+[operations guide](OPERATIONS.md). For historical evidence, use the exact
+commit and run identifier cited with each result.
+
+<details>
+<summary>Historical review notes (0c273 baseline and September–October 2026 notes; not current operating guidance)</summary>
+
+The sections below document earlier findings and proposed repairs. Their
+descriptions of “current” behavior apply only to their stated dates and do not
+supersede the status table above.
 
 ### Local repair candidates (2026-09-17)
 
@@ -76,7 +100,7 @@ ML-DSA device authentication does not make all OpenClaw transports, clients,
 plugins or external services post-quantum. Symmetric wrapping protects only when
 the wrapping key and protected data are not both available to the attacker.
 
-## Actual production paths
+## Historical production paths at the reviewed baseline
 
 | Area                 | Source owner                                                                                                          | What the baseline establishes                                                                                                                                                                                       |
 | -------------------- | --------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -102,9 +126,9 @@ cannot safely fall back to another algorithm.
 
 ### Backup and recovery
 
-The default wrapping key is stored as `wrap-key.b64` in the state directory.
-The built-in backup includes state and does not exclude this file at the baseline;
-the separate shell backup does exclude it. These are different policies.
+At the `0c273` historical baseline, the default wrapping key was stored as
+`wrap-key.b64` in the state directory and the built-in backup did not exclude
+it. That warning does not describe the checked implementation above.
 
 Treat existing built-in archives as secret-bearing. Excluding one key file does
 not protect other credentials in an archive. Keep recovery keys independently
@@ -266,3 +290,5 @@ not only isolated primitives. Do not skip a failing test to make CI green.
 Global protocol/version and incompatible database/envelope changes need explicit
 owner decisions and migration plans. USB packaging remains deferred until these
 product gates are satisfied. This page is a repair status, not a completed audit.
+
+</details>
