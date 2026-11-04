@@ -138,3 +138,8 @@ jobs:
             "$bin_dir/$wrapper" --help >"$RUNNER_TEMP/$wrapper.out" 2>"$RUNNER_TEMP/$wrapper.err"
             test ! -s "$RUNNER_TEMP/$wrapper.err"
           done
+
+          # Exercise the built, installed gateway and CLI with a disposable
+          # file-backed token. Docker mount/UID behavior still needs its own
+          # container acceptance run.
+          python3 scripts/pqc-e2e/gateway_token_live.py --repo "$install_root"
