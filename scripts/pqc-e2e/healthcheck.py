@@ -12,6 +12,8 @@ keyring mock), runs the healthcheck against it, and verifies that:
   3. On a broken deployment (no fork process, no /healthz, no wrap
      key, no state db), the critical checks fail and the script
      exits non-zero (RC 1) with [FAIL] lines naming each gap.
+  4. A 0400 wrap-key file passes, while a 0644 file fails the actual
+     permission check without Bash arithmetic errors.
 
 Why this exists: the healthcheck is the production operator's first
 line of defense. If it lies (says OK when something is actually
@@ -277,6 +279,27 @@ def main():
             fail("node-version check did not run; expected to find node on PATH")
         if ok_count < 2:
             fail(f"only {ok_count} [OK] lines, expected at least 2 (node-version + wrap-key-file + state-db)")
+        for mode, expected in ((0o400, "ok"), (0o644, "fail")):
+            os.chmod(wrap_key_file, mode)
+            mode_result = run(
+                args.script,
+                "--install-root", install_root,
+                "--state-dir", state_dir,
+                "--wrap-key-file", wrap_key_file,
+                "--port", str(port),
+                "--json",
+                "--skip-keyring",
+            )
+            mode_doc = json.loads(mode_result.stdout)
+            wrap_check = next(
+                check for check in mode_doc["checks"] if check["check"] == "wrap-key-file"
+            )
+            if wrap_check["status"] != expected or "value too great for base" in mode_result.stderr:
+                fail(f"mode {mode:o} produced wrap-key result {wrap_check} or arithmetic error")
+            allowed_exits = (1,) if expected == "fail" else (0, 2)
+            if mode_result.returncode not in allowed_exits:
+                fail(f"mode {mode:o} returned {mode_result.returncode}, expected {allowed_exits}")
+        log("  0400 key accepted; 0644 key rejected without arithmetic error")
     finally:
         gateway.terminate()
         gateway.wait(timeout=5)

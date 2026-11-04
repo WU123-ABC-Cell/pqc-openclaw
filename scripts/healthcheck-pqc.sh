@@ -243,8 +243,11 @@ if [[ -f "$WRAP_KEY_FILE" ]]; then
   if [[ "${OS:-}" == "linux" || "${OS:-}" == "macos" ]]; then
     if command -v stat >/dev/null 2>&1; then
       MODE=$(stat -c %a "$WRAP_KEY_FILE" 2>/dev/null || stat -f %p "$WRAP_KEY_FILE" 2>/dev/null | tail -c 4)
-      # POSIX bits: world-readable is a security hole
-      if [[ "${MODE: -1}" =~ [0-7] ]] && (( MODE & 0o077 )); then
+      # stat prints octal digits. Parse them explicitly before testing the
+      # group/other bits; Bash does not accept the Python-style 0o prefix.
+      if [[ ! "$MODE" =~ ^[0-7]{3,4}$ ]]; then
+        fail "wrap-key-file" "could not parse file permissions for $WRAP_KEY_FILE (mode=$MODE)"
+      elif (( (8#$MODE & 8#77) != 0 )); then
         fail "wrap-key-file" "file $WRAP_KEY_FILE has unsafe permissions (mode=$MODE); expected 0600 or 0400"
       else
         SIZE=$(stat -c %s "$WRAP_KEY_FILE" 2>/dev/null || stat -f %z "$WRAP_KEY_FILE" 2>/dev/null)

@@ -191,19 +191,26 @@ services:
     # ------------------------------------------------------------------
     # Health check
     # ------------------------------------------------------------------
-    # Override the upstream `node dist/docker-healthcheck.js` single-
-    # endpoint probe with the full 8-check `healthcheck-pqc.sh`. The
-    # 30s interval + 10s timeout + 5 retries + 60s start_period
-    # matches install-pqc.sh systemd unit's healthcheck (operator can
-    # compare exit codes 0/1/2 directly across systemd and Docker).
+    # Run the full 8-check script against container paths. Its exit 2 means
+    # warnings only; Docker reserves 2, so translate 0/2 to healthy and keep
+    # critical failures unhealthy. Preserve the JSON details in health logs.
     healthcheck:
       test:
         - CMD
         - bash
-        - /usr/local/bin/healthcheck-pqc.sh
-        - --port
-        - "18789"
-        - --json
+        - -c
+        - |
+          bash /usr/local/bin/healthcheck-pqc.sh \
+            --port 18789 \
+            --state-dir /home/node/.openclaw \
+            --install-root /app \
+            --wrap-key-file /run/secrets/wrap_key \
+            --skip-keyring --json
+          status=$$?
+          if [ "$$status" -eq 0 ] || [ "$$status" -eq 2 ]; then
+            exit 0
+          fi
+          exit 1
       interval: 30s
       timeout: 10s
       retries: 5

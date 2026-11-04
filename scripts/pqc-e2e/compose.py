@@ -16,11 +16,9 @@ would fail on at parse time:
   6. Cap_drop list contains NET_RAW, NET_ADMIN, SYS_PTRACE,
      SYS_ADMIN (the documented hardening in the file header)
   7. read_only: true on the gateway (defense-in-depth)
-  8. healthcheck.test starts with CMD (compose-required) and
-     references the same /usr/local/bin/healthcheck-pqc.sh path
-     the in-container mount exposes (catches the
-     /usr/local/share/.../usr/local/bin/... mismatch we hit in
-     7582ca01ba)
+  8. healthcheck.test uses the mounted script with container state/key paths,
+     and maps warning-only exit 2 to Docker success while critical failures
+     remain unhealthy (also catches the mount-path regression in 7582ca01ba)
   9. user is set to a non-root UID (1000:1000)
  10. mem_limit / pids_limit are set (catches accidental removal
      during refactors)
@@ -156,7 +154,7 @@ process.stdout.write(JSON.stringify(YAML.parse(fs.readFileSync(process.argv[1], 
     log("  read_only: true: OK")
 
     # 8. healthcheck path consistency (regression for 7582ca01ba bug)
-    log("8. healthcheck mount source == target == /usr/local/bin/healthcheck-pqc.sh")
+    log("8. healthcheck mount, container paths, and exit mapping")
     healthcheck_mounts = [v for v in gw["volumes"] if "healthcheck" in v]
     if not healthcheck_mounts:
         fail("no healthcheck bind mount on openclaw-gateway")
@@ -171,12 +169,35 @@ process.stdout.write(JSON.stringify(YAML.parse(fs.readFileSync(process.argv[1], 
         if "healthcheck" in target and target != "/usr/local/bin/healthcheck-pqc.sh":
             fail(f"healthcheck mount target is not /usr/local/bin/healthcheck-pqc.sh: {m}")
     healthcheck_test = gw["healthcheck"].get("test") or []
-    if not healthcheck_test or healthcheck_test[0] != "CMD":
-        fail(f"healthcheck.test must start with CMD; got {healthcheck_test}")
-    joined = " ".join(healthcheck_test)
-    if "/usr/local/bin/healthcheck-pqc.sh" not in joined:
-        fail(f"healthcheck.test does not reference /usr/local/bin/healthcheck-pqc.sh: {joined}")
-    log(f"  healthcheck mount + test path consistent: OK")
+    if len(healthcheck_test) != 4 or healthcheck_test[:3] != ["CMD", "bash", "-c"]:
+        fail(f"healthcheck.test must run the container adapter via CMD bash -c: {healthcheck_test}")
+    health_command = healthcheck_test[3]
+    script_path = "/usr/local/bin/healthcheck-pqc.sh"
+    if script_path not in health_command:
+        fail(f"healthcheck.test does not reference {script_path}: {health_command}")
+    for flag, path in (
+        ("--state-dir", gw["environment"]["OPENCLAW_STATE_DIR"]),
+        ("--wrap-key-file", gw["environment"]["OPENCLAW_WRAP_KEY_FILE"]),
+        ("--install-root", "/app"),
+    ):
+        if f"{flag} {path}" not in health_command:
+            fail(f"healthcheck.test does not use the container {flag} path {path}")
+    if "--skip-keyring" not in health_command or "--json" not in health_command:
+        fail("healthcheck.test must skip unused OS keyring and retain JSON diagnostics")
+    with tempfile.TemporaryDirectory(prefix="pqc-compose-health-") as tmp:
+        fake_health = os.path.join(tmp, "healthcheck-pqc.sh")
+        with open(fake_health, "w", encoding="utf8") as stub:
+            stub.write('printf "{\\"status\\":\\"probe\\"}\\n"\nexit "$PQC_TEST_HEALTH_EXIT"\n')
+        # Compose reduces $$ to $ before the container runs this command.
+        shell_command = health_command.replace("$$", "$")
+        shell_command = shell_command.replace(script_path, fake_health)
+        for script_exit, expected_exit in ((0, 0), (2, 0), (1, 1), (3, 1)):
+            env = dict(os.environ, PQC_TEST_HEALTH_EXIT=str(script_exit))
+            probe = subprocess.run(["bash", "-c", shell_command], env=env,
+                                   capture_output=True, text=True)
+            if probe.returncode != expected_exit or '"status":"probe"' not in probe.stdout:
+                fail(f"healthcheck exit {script_exit} mapped to {probe.returncode}; expected {expected_exit}")
+    log("  container paths and health exit mapping: OK")
 
     # 9. user is non-root
     log("9. user is non-root (1000:1000 or similar)")
