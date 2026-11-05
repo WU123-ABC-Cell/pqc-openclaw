@@ -5,6 +5,7 @@
 > **日期**: 2026-08-23
 > **状态**: v1 self-audit
 > **范围**: fork 的 PQC 实施。2026-09-07 校准说明：这是 self-audit，不是第三方证明。14 份 retained reports 是 2026-08 的固定环境测量；`max |t| = 1.983 < 4.5` 只表示该实验未观察到超过阈值的统计差异。报告不证明 constant-time，也不是 current checkout 的 fresh benchmark。
+> **2026-11-05 证据更正**：下文旧版“150 KAT”指随机性质/往返检查，不能作为官方已知答案测试或 FIPS 合规证明。当前仓库仅为 ML-DSA-65 固定了两项 NIST ACVP 样例；其他算法及参数集的官方向量覆盖仍待补充。
 
 ## 1. TL;DR
 
@@ -36,13 +37,13 @@ _*noble-* 系列审计声明_* (Paul Miller 官网):
 
 ### 2.2 算法实现 (Algorithm implementation)
 
-| 算法                                   | 实现                      | 论文需要                        |
-| -------------------------------------- | ------------------------- | ------------------------------- |
-| **ML-DSA-44/65/87** (FIPS 204)         | @noble/post-quantum 0.7.0 | KAT 26 × 3 = 78 invariants pass |
-| **ML-KEM-512/768/1024** (FIPS 203)     | @noble/post-quantum 0.7.0 | KAT 24 × 3 = 72 invariants pass |
-| **AES-256-GCM** (FIPS 197)             | Node crypto (OpenSSL 3.x) | 标准, 公开审计                  |
-| **SHA-256** (FIPS 180-4)               | Node crypto (OpenSSL 3.x) | 标准, 公开审计                  |
-| **PBKDF2-SHA256 210k iter** (RFC 8018) | Node crypto (OpenSSL 3.x) | OWASP 2023 推荐                 |
+| 算法                                   | 实现                      | 论文需要                                           |
+| -------------------------------------- | ------------------------- | -------------------------------------------------- |
+| **ML-DSA-44/65/87** (FIPS 204)         | @noble/post-quantum 0.7.0 | 历史随机性质检查；当前另有 2 项官方 ML-DSA-65 样例 |
+| **ML-KEM-512/768/1024** (FIPS 203)     | @noble/post-quantum 0.7.0 | 历史随机性质检查；未核验官方向量                   |
+| **AES-256-GCM** (FIPS 197)             | Node crypto (OpenSSL 3.x) | 标准, 公开审计                                     |
+| **SHA-256** (FIPS 180-4)               | Node crypto (OpenSSL 3.x) | 标准, 公开审计                                     |
+| **PBKDF2-SHA256 210k iter** (RFC 8018) | Node crypto (OpenSSL 3.x) | OWASP 2023 推荐                                    |
 
 ## 3. Wrap path 详细分析
 
@@ -263,9 +264,9 @@ if (a.length === b.length && timingSafeEqual(a, b)) { ... }
 - ✅ dudect-style 单 bit 区分测试 ML-DSA sign/verify (FIPS 204 全部 3 个 param set: 44/65/87, 18K ops total, |t| < 1.8, Node 22 + @noble 0.7.0, 见 §5.1.2)
 - ✅ dudect-style 单 bit 区分测试 ML-KEM encap/decap (FIPS 203 全部 3 个 param set: 512/768/1024, 60K ops, |t| < 1.5, Node 22 + @noble 0.7.0, 见 §5.1.3)
 - ✅ valgrind callgrind cache-timing 测 FIPS 203/204 全部 6 个 param set + AES-256-GCM wrap/unwrap (走 OpenSSL 3.x FIPS 140-3 path, 14 ops, K=20 process/class × N=20 ops = 800 ops/algo, 11.2K ops total, 9 cache event types, max |t| < 2.0, Node 22 + @noble 0.7.0 + OpenSSL 3.x + valgrind 3.18.1, 2026-08-30 补全 AES-GCM, 见 §5.1.4)
-- ✅ 150 KAT invariants across 6 NIST parameter sets
+- ⚠️ 历史记录中的 150 项为性质/往返检查，不是官方 KAT
 - ✅ 应用层 `===` 扫描, 已知 case 都是非敏感
-- ✅ FIPS 204/203 全部 parameter set 验证
+- ⚠️ 仅验证了部分参数长度与往返性质，不能据此声称 FIPS 203/204 全参数集符合性
 - ✅ M12 v3 fail-closed wrap path
 - ✅ Wrap key 0600 权限
 - ✅ Threat model 文档 (威胁 + 缓解 + 残余风险)
@@ -283,7 +284,7 @@ if (a.length === b.length && timingSafeEqual(a, b)) { ... }
 
 > **Section 5: Implementation Security**
 >
-> We use @noble/post-quantum 0.7.0 [noble-ref] for ML-DSA and ML-KEM, which is a single-file auditable implementation under MIT license with documented security claims [noble-audit-ref]. Our wrap path uses Node.js crypto (OpenSSL 3.x, FIPS 140-3 validated [openssl-ref]) for AES-256-GCM and PBKDF2-SHA256. We verified FIPS 204/203 compliance via 150 KAT invariants across all 6 NIST parameter sets (Section 4).
+> We use @noble/post-quantum 0.7.0 [noble-ref] for ML-DSA and ML-KEM. Historical round-trip checks do not establish FIPS 203/204 conformance. The current repository compares two ML-DSA-65 dependency operations with fixed NIST ACVP sample outputs; broader algorithm validation and certification remain outside this evidence.
 >
 > We conducted a self-audit of constant-time properties (Appendix C). Known limitations: (1) cache-timing and EM side-channels not analyzed, (2) no formal verification via EasyCrypt, (3) no third-party cryptographer review. These are listed as P0 backlog in our threat model [threat-model-ref]. The implementation should NOT be deployed in high-security production environments without first addressing these gaps.
 

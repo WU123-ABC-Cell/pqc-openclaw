@@ -243,10 +243,14 @@ and side-channel Actions runs stopped before testing due to billing/usage limits
 This status update did not query their current remote state. They are not accepted
 passing CI evidence. Cloud reruns remain pending availability.
 
-`src/infra/mldsa65-kat.test.ts` performs random key generation, sign/verify and
-rejection/property checks. Those checks are useful but are not known-answer tests:
-they contain no fixed official seed/key/signature expected outputs. Add matching,
-provenance-recorded official vectors before claiming KAT coverage.
+`src/infra/mldsa65-properties.test.ts` performs random key generation,
+sign/verify and rejection/property checks. These are not known-answer tests.
+`src/infra/mldsa65-acvp.test.ts` compares full fixed outputs from the
+[NIST ACVP-Server v1.1.0.43 samples](https://github.com/usnistgov/ACVP-Server/tree/975de31eb83d87039ec88934fdc47d8c312b892d/gen-val/json-files):
+ML-DSA-65 KeyGen group 2/case 26 and deterministic internal SigGen group
+10/case 147. This covers two dependency-level operations; the SigGen sample's
+raw message is not valid UTF-8 and does not exercise the product's string
+payload wrapper. It is not FIPS certification or full algorithm validation.
 
 The prior whitepaper referenced `pqc-fork-scripts/` runners that are absent from
 the baseline's tracked files. Its counts, startup numbers and deployment results

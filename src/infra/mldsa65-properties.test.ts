@@ -1,12 +1,11 @@
-// FIPS 204 ML-DSA-65 KAT invariants — vitest scaffold.
+// ML-DSA-65 key storage and signature property tests.
 //
 // These tests pin the contract of the mldsa65-key-storage module: key lengths,
 // signature length, sign/verify round-trip, fingerprint stability, and
 // tamper detection. They use the @noble/post-quantum-backed helpers that
 // mldsa65-key-storage.ts owns (see that file for why we use @noble on Node 22).
-// Each invariant asserts a property that must hold for any conformant ML-DSA-65
-// implementation; the tests pass iff the production code honours FIPS 204 §4
-// Table 1 parameter set 6.
+// These random round-trip checks are not known-answer tests. The pinned NIST
+// ACVP samples live in mldsa65-acvp.test.ts.
 import { describe, expect, it } from "vitest";
 import {
   MLDSA65_MAX_MESSAGE_BYTES,
@@ -25,7 +24,7 @@ import {
   verifyMlDsa65Signature,
 } from "./mldsa65-key-storage.js";
 
-describe("ML-DSA-65 KAT (FIPS 204 §4, parameter set 6)", () => {
+describe("ML-DSA-65 storage and signature properties", () => {
   it("public key is exactly 1952 raw bytes (FIPS 204 §4 Table 1)", () => {
     const kp = generateMlDsa65KeyPair();
     expect(kp.publicKey.length).toBe(MLDSA65_PUBLIC_KEY_LENGTH);

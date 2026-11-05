@@ -43,7 +43,8 @@ jobs:
         run: >-
           node scripts/run-vitest.mjs run
           src/infra/device-identity-store.wrap.test.ts
-          src/infra/mldsa65-kat.test.ts
+          src/infra/mldsa65-acvp.test.ts
+          src/infra/mldsa65-properties.test.ts
           src/security/keyring-provider.test.ts
           src/security/nip44-v2.test.ts
           src/security/push-dual-signature.test.ts

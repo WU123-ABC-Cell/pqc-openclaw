@@ -87,7 +87,7 @@
 **A**: 3 步.
 
 1. **paulmillr 公开声明**: @noble repo README + CHANGELOG 0.7.0 写 "auditable, constant-time, side-channel resistant"
-2. **FIPS 203/204 spec compliance**: @noble 0.7.0 通过 KAT 174/174 (我们测, 跟 NIST 2048-185 KAT bundle 字节级一致)
+2. **FIPS 203/204 证据范围**: 旧版“174/174 KAT”与“NIST bundle 字节级一致”的说法在当前仓库没有可复现证据。当前只固定并逐字节比较了两项 NIST ACVP ML-DSA-65 样例，不能据此声称所有参数集符合标准或获得 FIPS 认证。
 3. **我们 self-audit**: 14 algo × 2 test types × 9 events = 252 measurements, 0 leak (见 Q2)
 
 **不**算: 第三方 cryptographer 独立 verify @noble 0.7.0 constant-time claim (P0 backlog).
