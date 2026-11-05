@@ -467,14 +467,14 @@ describe("createKeyring (factory)", () => {
     expect(ring.getActiveKey().key).toEqual(key);
   });
 
-  it("getActiveKey on a missing entry throws with a migration hint", () => {
+  it("getActiveKey on an unreadable entry gives safe recovery guidance", () => {
     const ring = createKeyring({
       kind: "os",
       service: "openclaw",
       account: "device-identity",
     });
-    expect(() => ring.getActiveKey()).toThrow(/no entry found/);
-    expect(() => ring.getActiveKey()).toThrow(/migrate-oskeyring/);
+    expect(() => ring.getActiveKey()).toThrow(/configured entry could not be read/);
+    expect(() => ring.getActiveKey()).toThrow(/original wrapping key/);
   });
 
   it('builds a CompositeKeyring from {kind:"composite"}', () => {
@@ -508,6 +508,34 @@ describe("OsKeyring (whitepaper 2.2.5.B, M6.B)", () => {
     expect(ring.getActiveKey()).toEqual({ key, keyId: "wrap-key-2026-08" });
   });
 
+  it("does not classify a null read as a missing entry", () => {
+    class NullEntry {
+      getPassword(): null {
+        return null;
+      }
+      setPassword(): void {}
+      deletePassword(): boolean {
+        return false;
+      }
+    }
+    OsKeyring.__setNapiModuleForTests({ Entry: NullEntry });
+    const ring = new OsKeyring("openclaw", "wrap-key-2026-08");
+    expect(() => ring.getActiveKey()).toThrow(/configured entry could not be read/);
+    expect(() => ring.getActiveKey()).toThrow(/original wrapping key/);
+  });
+
+  it("preserves the backend error without claiming the entry is missing", () => {
+    class LockedEntry extends MockEntry {
+      override getPassword(): string {
+        throw new Error("backend locked");
+      }
+    }
+    OsKeyring.__setNapiModuleForTests({ Entry: LockedEntry });
+    const ring = new OsKeyring("openclaw", "wrap-key-2026-08");
+    expect(() => ring.getActiveKey()).toThrow(/Underlying error: backend locked/);
+    expect(() => ring.getActiveKey()).toThrow(/original wrapping key/);
+  });
+
   it("getKeyById returns null for a non-matching keyId", () => {
     const ring = new OsKeyring("openclaw", "wrap-key-2026-08");
     expect(ring.getKeyById("wrap-key-2026-09")).toBeNull();
@@ -515,7 +543,7 @@ describe("OsKeyring (whitepaper 2.2.5.B, M6.B)", () => {
 
   it("getKeyById rejects a missing owning entry", () => {
     const ring = new OsKeyring("openclaw", "wrap-key-2026-08", "wrap-key-2026-08");
-    expect(() => ring.getKeyById("wrap-key-2026-08")).toThrow(/no entry found/);
+    expect(() => ring.getKeyById("wrap-key-2026-08")).toThrow(/configured entry could not be read/);
   });
 
   it("deleteKey removes the entry", () => {
@@ -526,7 +554,7 @@ describe("OsKeyring (whitepaper 2.2.5.B, M6.B)", () => {
     expect(borrowed).toEqual(key);
     ring.deleteKey();
     expect(borrowed).toEqual(Buffer.alloc(32));
-    expect(() => ring.getKeyById("wrap-key-2026-08")).toThrow(/no entry found/);
+    expect(() => ring.getKeyById("wrap-key-2026-08")).toThrow(/configured entry could not be read/);
   });
 
   it("rejects malformed base64url key material in setKeyBase64Url", () => {
@@ -680,7 +708,7 @@ describe("getDefaultKeyringFromEnv (M5.5 auto-inject — whitepaper 2.2.5.A)", (
     try {
       const ring = getDefaultKeyringFromEnv();
       expect(ring).toBeInstanceOf(CompositeKeyring);
-      expect(() => ring!.getActiveKey()).toThrow(/no entry found/);
+      expect(() => ring!.getActiveKey()).toThrow(/configured entry could not be read/);
       expect(ring!.getKeyById("historical-file")).toEqual(fileKey);
       // Seed the OS entry and confirm the OS variant now wins.
       const providers = (ring as unknown as { providers: KeyringProvider[] }).providers;

@@ -290,7 +290,7 @@ print('missing')
 " 2>/dev/null)
       case "$KEYRING_OK" in
         ok)      ok "os-keyring" "Secret Service entry found (service=$WRAP_KEY_OS_SERVICE, account=$WRAP_KEY_OS_ACCOUNT)" ;;
-        missing) fail "os-keyring" "Secret Service entry not found (run scripts/install-pqc.sh to provision)" ;;
+        missing) fail "os-keyring" "Secret Service entry not found; verify service/account and backend. The installer provisions only a file key; use --skip-keyring for file-backed deployments." ;;
         *)       warn "os-keyring" "Secret Service check returned: $KEYRING_OK" ;;
       esac
     else

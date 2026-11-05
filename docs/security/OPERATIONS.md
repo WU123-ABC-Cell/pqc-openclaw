@@ -337,14 +337,14 @@ operator-managed.
 
 ## 5. When to page the security team
 
-| Symptom                                                                         | Page?                                  | Why                                                                                                 |
-| ------------------------------------------------------------------------------- | -------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| `[FAIL] wrap-key-file: unsafe permissions` (mode 0644 etc)                      | **Yes**                                | The wrap key is world-readable. Possible leak. Rotate the key and investigate how the mode changed. |
-| `[FAIL] os-keyring: Secret Service entry not found` after a file-backed install | No                                     | Expected until explicit OS-keyring migration; monitor with `--skip-keyring` meanwhile.              |
-| `[WARN] os-keyring: Secret Service check returned: <error>`                     | **Yes** if it persists across restarts | The dbus session or libsecret has a problem; the wrap key is unprotected.                           |
-| Sudden drop in `[PQC]` events to zero                                           | No                                     | Could just mean no traffic. Cross-check with normal Gateway traffic.                                |
-| `[PQC] mlock-unavailable` reappears after every restart                         | No, but file a follow-up               | Rebuild or diagnose the native addon; changing Node alone does not enable `process.mlock`.          |
-| `journalctl` shows unexpected key access from outside the fork process          | **Yes**                                | Possible compromise. Stop the fork, rotate the key, restore from backup, forensic the host.         |
+| Symptom                                                                         | Page?                                   | Why                                                                                                                                        |
+| ------------------------------------------------------------------------------- | --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `[FAIL] wrap-key-file: unsafe permissions` (mode 0644 etc)                      | **Yes**                                 | The wrap key is world-readable. Possible leak. Rotate the key and investigate how the mode changed.                                        |
+| `[FAIL] os-keyring: Secret Service entry not found` after a file-backed install | No                                      | Expected until explicit OS-keyring migration; monitor with `--skip-keyring` meanwhile.                                                     |
+| `[WARN] os-keyring: Secret Service check returned: <error>`                     | **Yes** for OS-backed use if persistent | The D-Bus session or libsecret may be unavailable; verify access to the original key. File-backed deployments should use `--skip-keyring`. |
+| Sudden drop in `[PQC]` events to zero                                           | No                                      | Could just mean no traffic. Cross-check with normal Gateway traffic.                                                                       |
+| `[PQC] mlock-unavailable` reappears after every restart                         | No, but file a follow-up                | Rebuild or diagnose the native addon; changing Node alone does not enable `process.mlock`.                                                 |
+| `journalctl` shows unexpected key access from outside the fork process          | **Yes**                                 | Possible compromise. Stop the fork, rotate the key, restore from backup, forensic the host.                                                |
 
 ---
 

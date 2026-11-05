@@ -384,13 +384,8 @@ NODE
     ok "wrap key file already exists at $keyfile (keeping)"
   fi
 
-  # OS-keyring migration remains an explicit operator step because it can
-  # require an interactive platform unlock prompt.
-  if [[ "$OS" == "macos" || "$OS" == "linux" ]]; then
-    if [[ -f "$INSTALL_ROOT/scripts/migrate-oskeyring.mjs" ]] || [[ -f "$INSTALL_ROOT/src/security/os-keyring.ts" ]]; then
-      warn "automatic OS-keyring migration skipped; follow PQC-FORK.md §Wrap-key provisioning if required"
-    fi
-  fi
+  # This installer provisions only the file key. It does not attempt an
+  # OS-keyring migration or imply that a migration script is installed.
 else
   ok "keyring provisioning skipped (--skip-keyring)"
 fi

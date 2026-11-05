@@ -69,8 +69,10 @@ function loadNapiKeyringModuleWithThrow(cause?: unknown): never {
       "could not be loaded. Install it with `pnpm install` (or `npm install " +
       "@napi-rs/keyring`). On Linux you also need libsecret-1-0 (apt: " +
       "`libsecret-1-0`, rpm: `libsecret`) and a running Secret Service " +
-      "(gnome-keyring, KWallet, KeePassXC, etc.). Until then use " +
-      '{kind:"file"} or {kind:"env"} in the keyring config.' +
+      "(gnome-keyring, KWallet, KeePassXC, etc.). For existing encrypted " +
+      "state, restore the original provider and wrapping key; do not " +
+      "switch key sources or generate a replacement key. See " +
+      "PQC-FORK.md, Wrap-key provisioning." +
       (cause instanceof Error ? ` Underlying error: ${cause.message}` : ""),
     cause instanceof Error ? { cause } : undefined,
   );
@@ -134,14 +136,17 @@ export class OsKeyring implements KeyringProvider {
     if (this.cachedKey) {
       return { key: this.cachedKey, keyId: this.keyId };
     }
+    const unavailable =
+      `OsKeyring: configured entry could not be read for service=${this.service} ` +
+      `account=${this.account}. Check the service/account and unlock the OS keyring. ` +
+      `Existing ciphertext requires the original wrapping key; do not generate a ` +
+      `replacement. See PQC-FORK.md, Wrap-key provisioning.`;
     let password: string | null;
     try {
       password = this.entry.getPassword();
     } catch (cause) {
       throw new Error(
-        `OsKeyring: no entry found for service=${this.service} ` +
-          `account=${this.account}. Run the migration script to seed ` +
-          `the key (pqc-fork-scripts/migrate-oskeyring.mjs). ` +
+        `${unavailable} ` +
           `Underlying error: ${cause instanceof Error ? cause.message : String(cause)}`,
         { cause },
       );
@@ -149,9 +154,7 @@ export class OsKeyring implements KeyringProvider {
     // The native binding maps backend read errors to null, so null does not
     // establish that an entry is merely absent. Never authorize fallback.
     if (password === null) {
-      throw new Error(
-        `OsKeyring: configured entry unavailable for service=${this.service} account=${this.account}`,
-      );
+      throw new Error(unavailable);
     }
     const key = decodeKeyMaterial(password, `os:${this.service}/${this.account}`);
     this.cachedKey = protectKey(key, `os:${this.service}/${this.account}`);
