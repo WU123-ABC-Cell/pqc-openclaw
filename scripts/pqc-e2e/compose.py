@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
 pqc-fork-e2e-compose.py — static / structural validation for
-docker-compose.pqc.yml. This is NOT a substitute for
-`docker compose config` (we run on dev machines without a Docker
-daemon), but it covers the checks that `docker compose config`
-would fail on at parse time:
+docker-compose.pqc.yml. This checks selected structural and security
+invariants without a Docker daemon. It does not replace
+`docker compose config` or actual container creation and cold start:
 
   1. YAML well-formed (the repository-pinned `yaml` package)
   2. Top-level keys: services, secrets, networks
@@ -13,6 +12,7 @@ would fail on at parse time:
      top level AND referenced by the gateway service (otherwise
      docker compose would warn "secret not used")
   5. No inert PQC security switches or fake mlock tmpfs are advertised
+     and neither service overrides Docker's default seccomp policy
   6. Cap_drop list contains NET_RAW, NET_ADMIN, SYS_PTRACE,
      SYS_ADMIN (the documented hardening in the file header)
   7. read_only: true on the gateway (defense-in-depth)
@@ -136,6 +136,15 @@ process.stdout.write(JSON.stringify(YAML.parse(fs.readFileSync(process.argv[1], 
         fail("mlock_tmpfs is not connected to the secure-memory backend")
     if any("mlock_tmpfs" in str(mount) for mount in gw["volumes"]):
         fail("gateway mounts an unused mlock_tmpfs volume")
+    for name in ("openclaw-gateway", "openclaw-cli"):
+        service = doc["services"].get(name)
+        if not service:
+            fail(f"{name} service is missing")
+        options = service.get("security_opt") or []
+        if "no-new-privileges:true" not in options:
+            fail(f"{name} does not enable no-new-privileges")
+        if any(str(option).startswith(("seccomp:", "seccomp=")) for option in options):
+            fail(f"{name} unexpectedly overrides the daemon seccomp policy")
     log("  unsupported controls absent: OK")
 
     # 6. cap_drop

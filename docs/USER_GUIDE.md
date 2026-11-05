@@ -104,20 +104,25 @@ deployment, use a Linux VM or container, not WSL.
 git clone https://github.com/WU123-ABC-Cell/pqc-openclaw.git
 cd pqc-openclaw
 
-# Build + run with the production-hardened compose recipe
+# Prepare test secrets and host directories as described in the Compose header.
+# Build + run the evaluation recipe
 docker compose -f docker-compose.pqc.yml up -d
 
-# Healthcheck (uses the bind-mounted healthcheck-pqc.sh)
+# Run the mounted healthcheck against container paths
 docker compose -f docker-compose.pqc.yml exec openclaw-gateway \
-    bash /usr/local/bin/healthcheck-pqc.sh --json
+    bash /usr/local/bin/healthcheck-pqc.sh \
+    --port 18789 --state-dir /home/node/.openclaw \
+    --install-root /app --wrap-key-file /run/secrets/wrap_key \
+    --skip-keyring --json
 ```
 
-The compose file (`docker-compose.pqc.yml`) does the hardening
-work for you: read-only rootfs, cap-drop on `NET_RAW` /
+The Compose evaluation recipe (`docker-compose.pqc.yml`) configures
+read-only rootfs, cap-drop on `NET_RAW` /
 `NET_ADMIN` / `SYS_PTRACE` / `SYS_ADMIN`, no-new-privileges,
-seccomp default, non-root user 1000:1000, mlock tmpfs,
-mem_limit 1g, pids_limit 256. See the file header for the full
-rationale.
+non-root user 1000:1000, mem_limit 1g, and pids_limit 256. Docker
+uses the daemon's configured seccomp policy because this recipe does
+not override it. See the file header for the full rationale and
+verify security settings on the target Docker host.
 
 ### 1.5 What `install-pqc.sh` accepts
 

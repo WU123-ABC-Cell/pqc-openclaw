@@ -122,12 +122,11 @@ services:
       - NET_ADMIN
       - SYS_PTRACE
       - SYS_ADMIN
-    # seccomp default + no-new-privileges blocks setuid binaries inside
-    # the container and limits the syscall surface to Docker's default
-    # profile. A custom seccomp profile is out of scope for v1.
+    # Keep no-new-privileges. Docker uses its daemon's configured seccomp
+    # policy when no seccomp security_opt is set; "seccomp:default" would
+    # instead be parsed as a path to a nonexistent profile file.
     security_opt:
       - no-new-privileges:true
-      - seccomp:default
     # read_only rootfs with explicit tmpfs mounts for the few paths
     # that genuinely need write access at runtime. This stops an
     # attacker who lands a write primitive from persisting to /usr.
@@ -259,7 +258,6 @@ services:
       - SYS_PTRACE
     security_opt:
       - no-new-privileges:true
-      - seccomp:default
     stdin_open: true
     tty: true
     init: true
