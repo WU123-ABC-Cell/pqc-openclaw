@@ -40,7 +40,7 @@ describe("device identity state dir defaults", () => {
     });
   });
 
-  it.each([false, true])(
+  it.each(process.platform === "win32" ? [false] : [false, true])(
     "uses the custom database's state owner for both key and coordinator (alias: %s)",
     async (useAlias) => {
       await withStateDirEnv("openclaw-identity-custom-state-", async ({ stateDir }) => {
@@ -72,6 +72,30 @@ describe("device identity state dir defaults", () => {
           }),
         ).toEqual(identity);
         expect(fs.existsSync(resolveGatewayLockDir(stateDir))).toBe(false);
+      });
+    },
+  );
+
+  it.runIf(process.platform !== "win32")(
+    "does not replace a missing wrap key through a resolved state directory alias",
+    async () => {
+      await withStateDirEnv("openclaw-identity-alias-recovery-", async ({ stateDir }) => {
+        const physicalStateDir = path.join(stateDir, "custom-state");
+        const aliasStateDir = path.join(stateDir, "state-alias");
+        const physicalPath = path.join(physicalStateDir, "state", "custom.sqlite");
+        const original = loadOrCreateDeviceIdentity({ path: physicalPath });
+        const keyPath = path.join(physicalStateDir, "wrap-key.b64");
+        const originalKey = fs.readFileSync(keyPath, "utf8");
+        closeOpenClawStateDatabaseForTest();
+        fs.rmSync(keyPath);
+        fs.symlinkSync(physicalStateDir, aliasStateDir, "dir");
+
+        const aliasOptions = { path: path.join(aliasStateDir, "state", "custom.sqlite") };
+        expect(() => loadOrCreateDeviceIdentity(aliasOptions)).toThrow(/Restore the original key/u);
+        expect(fs.existsSync(keyPath)).toBe(false);
+
+        fs.writeFileSync(keyPath, originalKey, { mode: 0o600 });
+        expect(loadOrCreateDeviceIdentity(aliasOptions).deviceId).toBe(original.deviceId);
       });
     },
   );

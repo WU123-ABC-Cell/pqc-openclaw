@@ -182,7 +182,14 @@ function resolveFallbackFileKeyring(
       while (true) {
         try {
           if (fs.lstatSync(existingComponent).isSymbolicLink()) {
-            throw new Error("state database path contains a symbolic link");
+            // A resolved alias is safe to inspect; a dangling one must not look like fresh state.
+            try {
+              fs.realpathSync.native(existingComponent);
+            } catch (cause) {
+              throw new Error("state database path contains an unresolved symbolic link", {
+                cause,
+              });
+            }
           }
           break;
         } catch (error) {

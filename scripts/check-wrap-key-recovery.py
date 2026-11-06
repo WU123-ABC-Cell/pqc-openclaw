@@ -20,7 +20,11 @@ def may_create_wrap_key(database_path: str) -> bool:
             component = parent
             continue
         if stat.S_ISLNK(mode):
-            raise OSError("state database path contains a symbolic link")
+            # Inspect a resolved alias; never mistake a dangling link for fresh state.
+            try:
+                os.stat(component)
+            except OSError as error:
+                raise OSError("state database path contains an unresolved symbolic link") from error
         if component != Path(database_path).absolute():
             return True
         break

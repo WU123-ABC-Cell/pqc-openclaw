@@ -284,11 +284,16 @@ def main():
     with tempfile.TemporaryDirectory(prefix="pqc-e2e-key-recovery-") as state_dir:
         db_path = os.path.join(state_dir, "openclaw.sqlite")
 
-        def check_guard():
+        def check_guard(path=db_path):
             return subprocess.run(
-                [sys.executable, guard, db_path], capture_output=True, text=True
+                [sys.executable, guard, path], capture_output=True, text=True
             )
 
+        alias_dir = os.path.join(state_dir, "state-alias")
+        os.symlink(state_dir, alias_dir)
+        alias_db_path = os.path.join(alias_dir, "openclaw.sqlite")
+        if check_guard(alias_db_path).returncode != 0 or os.path.exists(db_path):
+            fail("resolved state alias with no database must permit key creation")
         if check_guard().returncode != 0 or os.path.exists(db_path):
             fail("fresh state must permit key creation without creating a database")
         with sqlite3.connect(db_path) as database:
@@ -306,6 +311,8 @@ def main():
         denied = check_guard()
         if denied.returncode == 0 or "restore their original wrap key" not in denied.stderr:
             fail(f"wrapped non-primary identity did not block a new key: {denied.stderr}")
+        if check_guard(alias_db_path).returncode == 0:
+            fail("resolved alias must not hide a wrapped non-primary identity")
         if os.path.exists(os.path.join(state_dir, "wrap-key.b64")):
             fail("recovery guard created a replacement key")
         with open(db_path, "wb") as database:
