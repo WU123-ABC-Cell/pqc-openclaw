@@ -413,30 +413,22 @@ describe("legacy Ed25519 identity retirement input normalization", () => {
 });
 
 describe("device identity crypto helpers", () => {
-  it.skip("preserves existing public-key wire normalization (PQC: Ed25519 removed by M2 — whitepaper 2.1)", () => {
-    const { publicKey } = crypto.generateKeyPairSync("ed25519");
-    const publicKeyPem = publicKey.export({ type: "spki", format: "pem" });
-    const publicKeyRaw = publicKeyRawBase64UrlFromPem(publicKeyPem);
-    const standardBase64 = `${publicKeyRaw.replaceAll("-", "+").replaceAll("_", "/")}=`;
+  it("normalizes ML-DSA-65 wire keys and verifies a UTF-8 product payload", async () => {
+    await withTempDir("openclaw-device-identity-crypto-", async (rootDir) => {
+      const identity = loadOrCreateDeviceIdentity(storeOptions(rootDir));
+      const publicKeyRaw = publicKeyRawBase64UrlFromPem(identity.publicKeyPem);
+      const standardBase64 = Buffer.from(publicKeyRaw, "base64url").toString("base64");
+      const payload = JSON.stringify({ action: "system.run", note: "中文 🦞", ts: 1234 });
+      const signature = signDevicePayload(identity.privateKeyPem, payload);
 
-    expect(normalizeDevicePublicKeyBase64Url(publicKeyPem)).toBe(publicKeyRaw);
-    expect(normalizeDevicePublicKeyBase64Url(standardBase64)).toBe(publicKeyRaw);
-    expect(normalizeDevicePublicKeyBase64Url(`${standardBase64}=`)).toBe(publicKeyRaw);
-    expect(deriveDeviceIdFromPublicKey(publicKeyRaw)).toBe(
-      deriveDeviceIdFromPublicKey(publicKeyPem),
-    );
-  });
-
-  it.skip("signs payloads that verify against PEM and raw public key forms (PQC: Ed25519 removed by M2 — whitepaper 2.1)", () => {
-    const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
-    const publicKeyPem = publicKey.export({ type: "spki", format: "pem" });
-    const privateKeyPem = privateKey.export({ type: "pkcs8", format: "pem" });
-    const payload = JSON.stringify({ action: "system.run", ts: 1234 });
-    const signature = signDevicePayload(privateKeyPem, payload);
-    const publicKeyRaw = publicKeyRawBase64UrlFromPem(publicKeyPem);
-
-    expect(verifyDeviceSignature(publicKeyPem, payload, signature)).toBe(true);
-    expect(verifyDeviceSignature(publicKeyRaw, payload, signature)).toBe(true);
-    expect(verifyDeviceSignature(publicKeyRaw, `${payload}!`, signature)).toBe(false);
+      expect(normalizeDevicePublicKeyBase64Url(identity.publicKeyPem)).toBe(publicKeyRaw);
+      expect(normalizeDevicePublicKeyBase64Url(standardBase64)).toBe(publicKeyRaw);
+      expect(normalizeDevicePublicKeyBase64Url(standardBase64 + "=")).toBe(publicKeyRaw);
+      expect(deriveDeviceIdFromPublicKey(publicKeyRaw)).toBe(identity.deviceId);
+      expect(Buffer.from(signature, "base64url")).toHaveLength(3309);
+      expect(verifyDeviceSignature(identity.publicKeyPem, payload, signature)).toBe(true);
+      expect(verifyDeviceSignature(publicKeyRaw, payload, signature)).toBe(true);
+      expect(verifyDeviceSignature(publicKeyRaw, payload + "!", signature)).toBe(false);
+    });
   });
 });

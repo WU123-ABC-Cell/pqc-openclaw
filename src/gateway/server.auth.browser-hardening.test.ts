@@ -1,11 +1,16 @@
 // Browser auth hardening tests cover origin, trusted-proxy, signed-device,
 // bootstrap-token, and scope checks for control UI WebSocket clients.
-import { randomUUID } from "node:crypto";
+import { randomUUID, webcrypto } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import { WebSocket } from "ws";
 import { ConnectErrorDetailCodes } from "../../packages/gateway-protocol/src/connect-error-details.js";
+import {
+  loadOrCreateDeviceIdentity as loadBrowserDeviceIdentity,
+  signDevicePayload as signBrowserDevicePayload,
+} from "../../ui/src/lib/nodes/index.js";
+import { createStorageMock } from "../../ui/src/test-helpers/storage.js";
 import {
   loadOrCreateDeviceIdentity,
   publicKeyRawBase64UrlFromPem,
@@ -477,6 +482,53 @@ describe("gateway auth browser hardening", () => {
         },
       );
     });
+  });
+
+  test("accepts the Control UI ML-DSA-65 identity through a real Gateway handshake", async () => {
+    const { listDevicePairing } = await import("../infra/device-pairing.js");
+    testState.gatewayAuth = { mode: "token", token: "secret" };
+    vi.stubGlobal("crypto", webcrypto);
+    vi.stubGlobal("localStorage", createStorageMock());
+    try {
+      await withGatewayServer(async ({ port }) => {
+        const ws = await openWs(port, { origin: originForPort(port) });
+        try {
+          const identity = await loadBrowserDeviceIdentity();
+          const nonce = (await readConnectChallengeNonce(ws)) ?? "";
+          const signedAt = Date.now();
+          const payload = buildDeviceAuthPayload({
+            deviceId: identity.deviceId,
+            clientId: CONTROL_UI_CLIENT.id,
+            clientMode: CONTROL_UI_CLIENT.mode,
+            role: "operator",
+            scopes: ["operator.admin"],
+            signedAtMs: signedAt,
+            token: "secret",
+            nonce,
+          });
+          const signature = await signBrowserDevicePayload(identity.privateKey, payload);
+          const res = await connectReq(ws, {
+            token: "secret",
+            scopes: ["operator.admin"],
+            client: CONTROL_UI_CLIENT,
+            device: {
+              id: identity.deviceId,
+              publicKey: identity.publicKey,
+              signature,
+              signedAt,
+              nonce,
+            },
+          });
+          expect(res.ok, JSON.stringify(res)).toBe(true);
+          const pairing = await listDevicePairing();
+          expect(pairing.paired.some((entry) => entry.deviceId === identity.deviceId)).toBe(true);
+        } finally {
+          ws.close();
+        }
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   test("rejects forged loopback origin for control-ui when proxy headers make client non-local", async () => {

@@ -32,6 +32,9 @@ describe("PQC CI product boundary coverage", () => {
       "src/security/windows-wrap-key-acl.test.ts",
       "src/infra/fs-safe-defaults.test.ts",
       "src/infra/device-identity.state-dir.test.ts",
+      "src/infra/device-identity.test.ts",
+      "src/gateway/server.auth.browser-hardening.test.ts",
+      "ui/src/lib/nodes/device-identity.test.ts",
     ]) {
       expect(command).toContain(suite);
       expect(readFileSync(suite, "utf8").length).toBeGreaterThan(0);
