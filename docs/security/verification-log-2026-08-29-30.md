@@ -6,8 +6,11 @@
 > current integrity gate is `node scripts/check-pqc-cache-timing-evidence.mjs`.
 > Historical "0 leak" wording means only that the recorded statistic stayed
 > below the chosen threshold in that experiment; it is not a security proof.
+> Commands below refer to an external, untracked directory. They are historical
+> run notes, not runnable reproduction instructions for a clean clone; raw
+> measurements and runner provenance are not checked into this repository.
 >
-> **目的**: paper reviewer 复现依据, 记录 8/29 M6.B OsKeyring 真部署 + 8/30 AES-256-GCM cache-timing 补全 两件 paper-grade work 的验证步骤, 引用 commit hash + 工具 + 关键发现.
+> **目的**: 保存 8/29 M6.B OsKeyring 与 8/30 AES-256-GCM cache-timing 的历史操作记录；原始脚本和逐次数据未随仓库交付，不能将这些步骤当作当前可复现的论文证据。
 >
 > **范围**: 仅 8/29 + 8/30 这 2 天累计 paper claim 从 26 ops / 127.6K 升到 28 ops / 129.2K 的验证细节. 8/25-8/28 之前的 work 见对应 commit message.
 >
@@ -174,7 +177,7 @@ Fork 默认 `CompositeKeyring([OsKeyring, FileKeyring])`:
 
 **Commit**: `b12aa7ad43` (whitepaper 5 处改, AES-GCM cache-timing 补全 entry)
 
-**目标**: 7 hot paths (AES-GCM + ML-DSA 全部 3 param set + ML-KEM 全部 3 param set) × 2 test types (user-space + cache-timing) **均匀覆盖**. 之前 12 cache-timing ops 只覆盖 FIPS 203/204, AES-GCM 走 OpenSSL 3.x FIPS 140-3 path 没单独测 cache-timing (作为 "假设是" 在 §6.3 honest list). 8/30 补全 2 ops.
+**目标**: 7 hot paths (AES-GCM + ML-DSA 全部 3 param set + ML-KEM 全部 3 param set) × 2 test types (user-space + cache-timing) **均匀覆盖**. 之前 12 cache-timing ops 只覆盖 FIPS 203/204, AES-GCM 的 Node/OpenSSL 路径没单独测 cache-timing；FIPS 模块启用状态未核对 (作为 "假设是" 在 §6.3 honest list). 8/30 补全 2 ops.
 
 ### 2.1 工具 (跟 12 ML algos 同一 protocol)
 

@@ -4,7 +4,7 @@
 >
 > **关联**: 白皮书 `docs/security/pqc-whitepaper.md` + 历史验证日志 `docs/security/verification-log-2026-08-29-30.md` + 14 个 `docs/security/ct-reports/*/report.json`。
 >
-> **范围**: 本 FAQ 保留 2026-08-30 测量背景；2026-09-07 当前 master 为 `d3b940a21e`。14 份 retained reports 位于 `docs/security/ct-reports/`，记录 `max |t| = 1.983 < 4.5`。这表示固定实验没有观察到超过阈值的统计差异，不是 constant-time 证明。
+> **范围**: 本 FAQ 保留 2026-08-30 测量背景；2026-09-07 当前 master 为 `d3b940a21e`。14 份 retained reports 位于 `docs/security/ct-reports/`，记录 `max |t| = 1.983 < 4.5`。这表示固定实验没有观察到超过阈值的统计差异，不是 constant-time 证明。 原始 runner 和逐次数据未纳入仓库；当前检查器只核对保留摘要的字段与阈值。
 
 ---
 
@@ -12,13 +12,13 @@
 
 **A**: dudect-ct 是 dudect 完整 C 工具链 (需要链接 valgrind + 编译 wrapper C). Node 没有现成 dudect-ct 集成. 我们用 Node 高精度 timer (`process.hrtime.bigint`) + Welch's t-test 复现 dudect 核心方法, 阈值保持 4.5 标准.
 
-**替代**: 用 dudect-ct 是 [Q3 per-op cache-timing 那个 backlog] 一起做的 P0 升级方向. 短期 (28 ops) Node + valgrind callgrind pipeline 同样 paper-grade 因为: (1) dudect 论文 阈值 4.5 跟 dudect-ct 一致, (2) K=20 process/class 跟 dudect 推荐样本数一致, (3) Welch's t-test 实现跟 dudect-ct 等价.
+**替代**: 后续需要固定 runner 来源、保存原始样本并复算统计量，再评估是否满足目标论文的证据标准。仅复用阈值或 Welch 检验方法不足以证明实验可复现或结论可靠。
 
 ## Q2: cache-timing 14 ops (8.75 min) + user-space 14 ops (~30 min) 算 rigorous 吗?
 
-**A**: 算 paper-grade 但不是 audit-grade.
+**A**: 这是历史自测摘要；当前仓库缺少原始 runner 与逐次数据，无法仅凭摘要判定为 paper-grade 或 audit-grade。
 
-- **paper-grade**: 14 algo × 2 test types × 9 cache event types = 252 measurements 全部 \|t\| < 2.0, 阈值 4.5. 累计 129.2K ops. 给 reviewer 看的 evidence.
+- **历史记录**: 文档声称覆盖 14 类操作、两种测试与累计 129.2K 次；仓库只保留 14 份缓存摘要，不能复核全部计数或原始统计。
 - **不是 audit-grade**: 没第三方 cryptographer 签字 (P0 backlog, 4-6 周 + 钱, 见 Q6). 没 per-op cache-timing (P0 backlog, 98h CPU, 见 Q3).
 
 **Common reviewer 期望**: side-channel paper 通常要求 ≥ 1M ops 总数 + per-op test + 第三方签字. 我们 129.2K ops 数量小, per-op 没做, 没第三方 — 这是 scope, 不是错误, 在 §10 honest list 显式 mark.
@@ -31,7 +31,7 @@
 - 14 algo × 5000 ops × 2 class = **98h CPU** (我们 i7-14650HX 单机, 实际跑要 4+ 天)
 - K=20 process/class 改 K=1 (single process), 14 algo × 5000 ops × 2 class × 50x slowdown ≈ 14 × 5K × 2 × 50 / 3600 ≈ **2 days**
 
-**短期 (8/30) 没跑原因**: CPU time 太长, 跟 reviewer 解释 per-process aggregate 已经 paper-grade (signal-to-noise 弱但 constant-time property 仍应 hold).
+**短期 (8/30) 没跑原因**: 历史记录称受 CPU 时间约束。进程级汇总的信噪比较弱，当前仓库也无法复跑该实验，不能替代逐操作验证。
 
 **长期 (P0 backlog)**: 等分布式 valgrind cluster 或专用 test infra. 不在本文 scope.
 
@@ -43,16 +43,11 @@
 
 此保证覆盖 built-in provider 的 decoded working Buffer，不覆盖无法可靠清零的 base64url JavaScript string，也不声称控制 OpenSSL 内部 cipher-context copy 或第三方自定义 key provider。
 
-## Q5: AES-GCM 走 OpenSSL 3.x FIPS 140-3 validated path, 还能信 cache-timing 0 leak?
+## Q5: AES-GCM 的历史 cache-timing 摘要能证明什么?
 
-**A**: 能信, 但有限定.
+**A**: 保留的摘要记录了当时 Node/OpenSSL 调用路径下低于所选阈值的进程级缓存事件统计值。当前仓库没有原始 runner 或逐次数据，无法从干净克隆重跑或复算；这些结果不能证明无旁路泄漏，也不能证明运行时启用了经验证的 OpenSSL FIPS 模块。
 
-- **限定**: 我们测的是 **OpenSSL 3.x 在 i7-14650HX 平台 + Node 22 调用栈** 的 cache miss 数. **不**测 (a) 其他平台 (ARM, AMD), (b) 其他 OpenSSL 版本, (c) 旁路 cache-timing 攻击 (FLUSH+RELOAD / PRIME+PROBE, P0 backlog).
-- **支撑**:
-  1. OpenSSL 3.x FIPS 140-3 module 是 NIST-validated, 算法本身有 audit
-  2. 我们 black-box 测 Node 22 调用栈, 跟 paper §5.1.4 协议完全一致
-  3. AES-NI 硬件指令在 i7-14650HX 是 constant-time (Intel 公开声明, 但 **没第三方 cryptographer verify**)
-- **不**说: 我们没测 AES-NI 硬件 timing (Intel perf counter 测, P1 backlog), 没测旁路攻击 (P0 backlog).
+其他平台、OpenSSL 版本、逐操作测量与主动缓存攻击都未由这些摘要覆盖。
 
 ## Q6: 第三方 cryptographer 审 4-6 周 + 钱 — 在 scope 吗?
 
@@ -67,20 +62,16 @@
 - **AES-GCM** (1 hot path, wrap/unwrap) — secret-wrapping 唯一对称算法
 - **ML-DSA-65** (1 hot path, sign/verify) — device identity signing (实际生产选 ML-DSA-65, 不是 44/87)
 - **ML-KEM-768** (1 hot path, encap/decap) — Nostr NIP-44 v2 hybrid envelope (实际生产选 ML-KEM-768)
-- **ML-DSA-44/87 + ML-KEM-512/1024** (4 hot paths × 2 ops) — paper claim 完整性, 验证 @noble 0.7.0 全部 3 param set 都没 leak (paper reviewer 关心 "只测一个 param set 够吗")
+- **ML-DSA-44/87 + ML-KEM-512/1024** (4 hot paths × 2 ops) — paper claim 完整性, 记录 @noble 0.7.0 其他参数集的历史阈值结果 (paper reviewer 关心 "只测一个 param set 够吗")
 
 **不需要 SLH-DSA / Falcon**: fork 没用到. SLH-DSA (FIPS 205) 是 hash-based 长期签名备选, 跟 ML-DSA-65 选型无关. Falcon (FN-DSA) 是体积更小的备选, 跟 ML-DSA-65 选型无关. 选 768/65 等级 (而非 1024/87) 原因见 §5.1.
 
 ## Q8: K=20 process/class 够吗? 业界标准多少?
 
-**A**: 够 paper-grade, 跟 dudect 推荐一致.
+**A**: 当前无法凭留存摘要证明 K=20 足够；需要原始样本、明确的效应大小与检验功效分析。
 
-- **dudect 论文**推荐 K=100 process/class 达到 ~sqrt(K) = 10x t-test power
-- **我们 K=20** 是 paper-grade 不是 audit-grade
-- **统计 power**: t-test 在 20 samples/class 时, 检测 effect size d=1.0 (large effect) 的 power ≈ 0.85. 实际 cache-timing leak 如果存在, 一般 effect size > 1.0 (因为 L1 miss 数差异 >> noise), 20 samples 足够.
-- **Trade-off**: K=100 跑一次 12 algos × 2 class × 100 = 2400 valgrind process, 估 2-3 hour (vs K=20 的 30 min).
-
-**短期 (8/30) K=20 原因**: 跑 8/27 + 8/28 + 8/30 三次 driver 共 2.5h, K=20 是 time/perf trade-off. paper accept 后跑 K=100 升级 audit-grade.
+- **历史 K=20**: 保留的缓存摘要各记载两类各 20 个样本；仓库没有原始数据或统计功效分析，不能据此判断是否足以发现实际泄漏。
+- **后续方案**: 固定 runner、环境和代码版本，保存原始样本，预先定义要检测的效应大小与分析方法，再复核统计功效和结果。
 
 ## Q9: @noble/post-quantum 0.7.0 怎么 verify constant-time?
 
@@ -88,7 +79,7 @@
 
 1. **paulmillr 公开声明**: @noble repo README + CHANGELOG 0.7.0 写 "auditable, constant-time, side-channel resistant"
 2. **FIPS 203/204 证据范围**: 旧版“174/174 KAT”与“NIST bundle 字节级一致”的说法在当前仓库没有可复现证据。当前固定并逐字节比较了 ML-DSA-44/65/87 各两项，以及 ML-KEM-512/768/1024 各三项 NIST ACVP 样例，不能据此声称完整算法或产品协议符合标准，也不能声称获得 FIPS 认证。
-3. **我们 self-audit**: 14 algo × 2 test types × 9 events = 252 measurements, 0 leak (见 Q2)
+3. **历史 self-audit**: 14 份缓存摘要记录了所选阈值内的结果；没有原始数据可复算，也不能推断零泄漏 (见 Q2)
 
 **不**算: 第三方 cryptographer 独立 verify @noble 0.7.0 constant-time claim (P0 backlog).
 
@@ -135,4 +126,4 @@
 - `pqc-whitepaper.md` (主 paper, §5.1.4 / §6.3 / §9.1.2 / §10)
 - `verification-log-2026-08-29-30.md` (8/29 M6.B + 8/30 AES-GCM CT 验证步骤, 复现依据)
 - `PAPER-SUBMISSION-CHECKLIST.md` (1-page 提交就绪状态盘)
-- `constant-time-audit.md` (Side-channel 攻击面 §5.1.1-5.1.4 详 14 ops × 0 leak 数据)
+- `constant-time-audit.md` (Side-channel 攻击面 §5.1.1-5.1.4 记录历史阈值结果及复现限制)

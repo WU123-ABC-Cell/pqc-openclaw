@@ -2,8 +2,9 @@
 
 ## Overview
 
-The PQC OpenClaw fork (this repository) is a production-grade post-quantum
-cryptography hardening of upstream OpenClaw. We treat the cryptographic
+The PQC OpenClaw fork (this repository) is an experimental post-quantum
+cryptography hardening of upstream OpenClaw. It is still under security review
+and is not approved for production deployment. We treat the cryptographic
 code path as security-critical: wrap key handling, keyring providers,
 side-channel resistance, and OS keyring integration are all in scope for
 security review and vulnerability disclosure.
@@ -13,13 +14,13 @@ are eligible for fixes, and our disclosure timeline.
 
 ## Supported Versions
 
-| Version                             | Supported | Notes                                                                |
-| ----------------------------------- | --------- | -------------------------------------------------------------------- |
-| `main` (latest commit)              | ✅        | All security fixes land here first.                                  |
-| Tagged releases (`v1.x.y`)          | ✅        | Backports security fixes for the most recent minor.                  |
-| Older minor versions                | ❌        | Upgrade to the latest `v1.x` to receive fixes.                       |
-| PRs / branches under review         | ❌        | Not production targets.                                              |
-| Upstream `openclaw/openclaw:master` | —         | See upstream's own security policy. This fork re-bases periodically. |
+| Version                           | Supported | Notes                                                                |
+| --------------------------------- | --------- | -------------------------------------------------------------------- |
+| `master` (fork default branch)    | ✅        | All security fixes land here first.                                  |
+| Tagged releases (`v1.x.y`)        | ✅        | Backports security fixes for the most recent minor.                  |
+| Older minor versions              | ❌        | Upgrade to the latest `v1.x` to receive fixes.                       |
+| PRs / branches under review       | ❌        | Not production targets.                                              |
+| Upstream `openclaw/openclaw:main` | —         | See upstream's own security policy. This fork re-bases periodically. |
 
 The PQC fork follows [Semantic Versioning](https://semver.org/). A
 security fix that breaks the on-disk `state.db` schema, the wrap-key
@@ -103,11 +104,11 @@ fork, but we will still accept reports and route them appropriately:
   PRIME+PROBE) on microarchitectures we have not tested. We list
   these in the whitepaper §6.3 honest list and consider them a
   known limitation, not a vulnerability in the fork code.
-- Findings on **FIPS 140-3 certification** status. The fork relies
-  on OpenSSL 3.x FIPS 140-3 validated path for AES-256-GCM. We
-  explicitly do not claim FIPS 140-3 certification for the fork
-  itself; that is a separate (long) process (see whitepaper §10
-  future work, audit-grade backlog #3).
+- Findings on **FIPS 140-3 certification** status. This fork has not
+  established that a validated OpenSSL FIPS module is enabled in a
+  specific deployment, and does not claim FIPS 140-3 certification.
+  Incorrect documentation or configuration claims about validation
+  are still welcome as reports.
 
 ## Cryptographic Agility
 
@@ -121,13 +122,17 @@ The fork is designed for cryptographic agility:
   `authTag`, `keyId` fields. The on-disk `BLOB` column in
   `state.db` is a base64url-encoded JSON. New key types can be
   added by extending the envelope and bumping the version field.
-- Side-channel test scripts in `pqc-fork-scripts/` are
-  algorithm-agnostic. Adding a new algorithm (e.g. SLH-DSA) just
-  means adding a new driver line.
 
 This means a future cryptographic break (e.g. a practical attack
 on ML-KEM-768) can be remediated by a key rotation + algorithm
 swap, with no on-disk migration beyond updating the wrap envelope.
+
+## Historical Side-Channel Evidence
+
+The 14 checked-in cache-timing summaries are historical. The original
+measurement runners lived outside this repository, so a clean clone cannot
+repeat that campaign. The repository checker validates stored report fields
+and thresholds; it does not rerun measurements or prove side-channel safety.
 
 ## Reporting a Non-Security Issue
 
