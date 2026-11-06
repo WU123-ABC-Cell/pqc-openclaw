@@ -250,7 +250,11 @@ sign/verify and rejection/property checks. These are not known-answer tests.
 ML-DSA-65 KeyGen group 2/case 26 and deterministic internal SigGen group
 10/case 147. This covers two dependency-level operations; the SigGen sample's
 raw message is not valid UTF-8 and does not exercise the product's string
-payload wrapper. `src/security/ml-kem-768-acvp.test.ts` separately compares
+payload wrapper. `src/infra/mldsa44-87-acvp.test.ts` adds fixed KeyGen and
+deterministic internal SigGen answers for ML-DSA-44 (1/1, 8/110) and
+ML-DSA-87 (3/51, 12/172). Those two parameter sets are dependency-level
+checks; the device-proof protocol currently uses ML-DSA-65.
+`src/security/ml-kem-768-acvp.test.ts` separately compares
 complete ML-KEM-768 KeyGen, encapsulation and decapsulation outputs against
 the same pinned NIST sample set (groups/cases 2/26, 2/26 and 5/86). These
 tests exercise the dependency's deterministic interfaces and the product's

@@ -26,6 +26,7 @@ describe("PQC CI product boundary coverage", () => {
       "extensions/nostr/src/nostr-bus.inbound.test.ts",
       "extensions/nostr/src/nostr-bus.e2e.test.ts",
       "src/security/wrap-key-cli.test.ts",
+      "src/infra/mldsa44-87-acvp.test.ts",
       "src/security/ml-kem-512-1024-acvp.test.ts",
       "src/security/ml-kem-768-acvp.test.ts",
       "src/security/windows-wrap-key-acl.test.ts",

@@ -5,7 +5,7 @@
 > **日期**: 2026-08-23
 > **状态**: v1 self-audit
 > **范围**: fork 的 PQC 实施。2026-09-07 校准说明：这是 self-audit，不是第三方证明。14 份 retained reports 是 2026-08 的固定环境测量；`max |t| = 1.983 < 4.5` 只表示该实验未观察到超过阈值的统计差异。报告不证明 constant-time，也不是 current checkout 的 fresh benchmark。
-> **2026-11-06 证据更正**：下文旧版“150 KAT”指随机性质/往返检查，不能作为官方已知答案测试或 FIPS 合规证明。当前仓库固定了两项 ML-DSA-65 和九项 ML-KEM-512/768/1024 NIST ACVP 样例；完整产品协议的官方向量覆盖仍待补充。
+> **2026-11-06 证据更正**：下文旧版“150 KAT”指随机性质/往返检查，不能作为官方已知答案测试或 FIPS 合规证明。当前仓库为 ML-DSA-44/65/87 各固定两项、为 ML-KEM-512/768/1024 各固定三项 NIST ACVP 样例；完整产品协议的官方向量覆盖仍待补充。
 
 ## 1. TL;DR
 
@@ -37,13 +37,13 @@ _*noble-* 系列审计声明_* (Paul Miller 官网):
 
 ### 2.2 算法实现 (Algorithm implementation)
 
-| 算法                                   | 实现                      | 论文需要                                           |
-| -------------------------------------- | ------------------------- | -------------------------------------------------- |
-| **ML-DSA-44/65/87** (FIPS 204)         | @noble/post-quantum 0.7.0 | 历史随机性质检查；当前另有 2 项官方 ML-DSA-65 样例 |
-| **ML-KEM-512/768/1024** (FIPS 203)     | @noble/post-quantum 0.7.0 | 历史随机性质检查；当前每个参数集各有 3 项官方样例  |
-| **AES-256-GCM** (FIPS 197)             | Node crypto (OpenSSL 3.x) | 标准, 公开审计                                     |
-| **SHA-256** (FIPS 180-4)               | Node crypto (OpenSSL 3.x) | 标准, 公开审计                                     |
-| **PBKDF2-SHA256 210k iter** (RFC 8018) | Node crypto (OpenSSL 3.x) | OWASP 2023 推荐                                    |
+| 算法                                   | 实现                      | 论文需要                                          |
+| -------------------------------------- | ------------------------- | ------------------------------------------------- |
+| **ML-DSA-44/65/87** (FIPS 204)         | @noble/post-quantum 0.7.0 | 历史随机性质检查；当前每个参数集各有 2 项官方样例 |
+| **ML-KEM-512/768/1024** (FIPS 203)     | @noble/post-quantum 0.7.0 | 历史随机性质检查；当前每个参数集各有 3 项官方样例 |
+| **AES-256-GCM** (FIPS 197)             | Node crypto (OpenSSL 3.x) | 标准, 公开审计                                    |
+| **SHA-256** (FIPS 180-4)               | Node crypto (OpenSSL 3.x) | 标准, 公开审计                                    |
+| **PBKDF2-SHA256 210k iter** (RFC 8018) | Node crypto (OpenSSL 3.x) | OWASP 2023 推荐                                   |
 
 ## 3. Wrap path 详细分析
 
@@ -284,7 +284,7 @@ if (a.length === b.length && timingSafeEqual(a, b)) { ... }
 
 > **Section 5: Implementation Security**
 >
-> We use @noble/post-quantum 0.7.0 [noble-ref] for ML-DSA and ML-KEM. Historical round-trip checks do not establish FIPS 203/204 conformance. The current repository compares two ML-DSA-65 and three operations for each ML-KEM parameter set against fixed NIST ACVP sample outputs; broader algorithm validation and certification remain outside this evidence.
+> We use @noble/post-quantum 0.7.0 [noble-ref] for ML-DSA and ML-KEM. Historical round-trip checks do not establish FIPS 203/204 conformance. The current repository compares two operations for each ML-DSA parameter set and three for each ML-KEM parameter set against fixed NIST ACVP sample outputs; broader algorithm validation and certification remain outside this evidence.
 >
 > We conducted a self-audit of constant-time properties (Appendix C). Known limitations: (1) cache-timing and EM side-channels not analyzed, (2) no formal verification via EasyCrypt, (3) no third-party cryptographer review. These are listed as P0 backlog in our threat model [threat-model-ref]. The implementation should NOT be deployed in high-security production environments without first addressing these gaps.
 
