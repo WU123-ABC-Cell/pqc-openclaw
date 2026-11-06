@@ -46,6 +46,7 @@ jobs:
           src/infra/mldsa65-acvp.test.ts
           src/infra/mldsa65-properties.test.ts
           src/security/keyring-provider.test.ts
+          src/security/ml-kem-512-1024-acvp.test.ts
           src/security/ml-kem-768-acvp.test.ts
           src/security/nip44-v2.test.ts
           src/security/push-dual-signature.test.ts

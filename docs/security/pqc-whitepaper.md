@@ -254,8 +254,10 @@ payload wrapper. `src/security/ml-kem-768-acvp.test.ts` separately compares
 complete ML-KEM-768 KeyGen, encapsulation and decapsulation outputs against
 the same pinned NIST sample set (groups/cases 2/26, 2/26 and 5/86). These
 tests exercise the dependency's deterministic interfaces and the product's
-public-key derivation wrapper. They do not establish Nostr envelope security,
-FIPS certification or full algorithm validation.
+public-key derivation wrapper. `src/security/ml-kem-512-1024-acvp.test.ts`
+adds the same three dependency-level operations for ML-KEM-512 (1/1, 1/1,
+4/76) and ML-KEM-1024 (3/51, 3/51, 6/96). These checks do not establish
+Nostr envelope security, FIPS certification or full algorithm validation.
 
 The prior whitepaper referenced `pqc-fork-scripts/` runners that are absent from
 the baseline's tracked files. Its counts, startup numbers and deployment results
