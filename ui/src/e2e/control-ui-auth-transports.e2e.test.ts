@@ -46,6 +46,9 @@ type BrowserConnectEvidence = {
   authFields: string[];
   clientId: string | null;
   clientMode: string | null;
+  deviceId: string | null;
+  devicePublicKey: string | null;
+  hasDeviceSignature: boolean;
   hasDevice: boolean;
   scopes: string[];
 };
@@ -70,6 +73,7 @@ type ProxyConnectionEvidence = {
 
 type RealTransportProxy = {
   close: () => Promise<void>;
+  dropConnections: () => void;
   evidence: ProxyConnectionEvidence[];
   port: number;
   trustedUrl: string;
@@ -130,11 +134,15 @@ function captureBrowserConnect(
   const params = asRecord(frame.params);
   const client = asRecord(params?.client);
   const auth = asRecord(params?.auth);
+  const device = asRecord(params?.device);
   evidence.browserConnect = {
     authFields: auth ? Object.keys(auth).toSorted() : [],
     clientId: stringValue(client?.id),
     clientMode: stringValue(client?.mode),
-    hasDevice: asRecord(params?.device) !== null,
+    deviceId: stringValue(device?.id),
+    devicePublicKey: stringValue(device?.publicKey),
+    hasDeviceSignature: Boolean(stringValue(device?.signature)),
+    hasDevice: device !== null,
     scopes: stringArray(params?.scopes).toSorted(),
   };
   return stringValue(frame.id);
@@ -161,8 +169,15 @@ function captureGatewayResult(
 }
 
 function sanitizeProxyEvidence(evidence: ProxyConnectionEvidence) {
+  const browserConnect = evidence.browserConnect;
   return {
-    browserConnect: evidence.browserConnect,
+    browserConnect: browserConnect
+      ? {
+          ...browserConnect,
+          devicePublicKey: undefined,
+          devicePublicKeyLength: browserConnect.devicePublicKey?.length ?? 0,
+        }
+      : undefined,
     browserOriginPresent: Boolean(evidence.browserOrigin),
     gatewayResult: evidence.gatewayResult,
     identityInjected: evidence.identityInjected,
@@ -309,6 +324,11 @@ async function startRealTransportProxy(gatewayUrl: string): Promise<RealTranspor
           server.close((error) => (error ? reject(error) : resolve()));
         });
       });
+    },
+    dropConnections: () => {
+      for (const socket of activeSockets) {
+        socket.terminate();
+      }
     },
     evidence,
     port: address.port,
@@ -715,6 +735,76 @@ describeControlUiE2e("Control UI real auth transports E2E", () => {
             allowedOriginConnected: true,
             rejectedOriginRecovery: true,
           },
+        },
+        null,
+        2,
+      )}\n`,
+      "utf8",
+    );
+  });
+
+  it("keeps one ML-DSA browser identity through transport reconnect and page reload", async () => {
+    const connected = await createBrowserPage(allowedUi.baseUrl, proxy.trustedUrl);
+    const { page, evidenceStartIndex } = connected;
+    await page.locator("openclaw-app-shell").waitFor({ timeout: controlUiSettleTimeoutMs });
+    const successfulConnect = (entry: ProxyConnectionEvidence) =>
+      entry.route === "trusted" &&
+      entry.gatewayResult?.ok === true &&
+      entry.gatewayResult.helloType === "hello-ok";
+    const first = await waitForConnectionEvidence(successfulConnect, evidenceStartIndex);
+    const deviceId = first.browserConnect?.deviceId;
+    const publicKey = first.browserConnect?.devicePublicKey;
+    expect(deviceId).toMatch(/^[a-f0-9]{64}$/);
+    expect(publicKey).toBeTruthy();
+    expect(first.browserConnect?.hasDeviceSignature).toBe(true);
+
+    const storedIdentity = () =>
+      page.evaluate(() => {
+        const raw = localStorage.getItem("openclaw-device-identity-v2");
+        if (!raw) {
+          return null;
+        }
+        const parsed = JSON.parse(raw) as { deviceId?: string; publicKey?: string };
+        return { deviceId: parsed.deviceId, publicKey: parsed.publicKey };
+      });
+    expect(await storedIdentity()).toEqual({ deviceId, publicKey });
+
+    const reconnectStartIndex = proxy.evidence.length;
+    proxy.dropConnections();
+    const reconnected = await waitForConnectionEvidence(successfulConnect, reconnectStartIndex);
+    expect(reconnected.browserConnect).toMatchObject({
+      deviceId,
+      devicePublicKey: publicKey,
+      hasDeviceSignature: true,
+    });
+    expect(await storedIdentity()).toEqual({ deviceId, publicKey });
+
+    const reloadStartIndex = proxy.evidence.length;
+    const response = await page.reload({
+      timeout: controlUiSettleTimeoutMs,
+      waitUntil: "domcontentloaded",
+    });
+    expect(response?.status()).toBe(200);
+    await page.locator("openclaw-app-shell").waitFor({ timeout: controlUiSettleTimeoutMs });
+    const afterReload = await waitForConnectionEvidence(successfulConnect, reloadStartIndex);
+    expect(afterReload.browserConnect).toMatchObject({
+      deviceId,
+      devicePublicKey: publicKey,
+      hasDeviceSignature: true,
+    });
+    expect(await storedIdentity()).toEqual({ deviceId, publicKey });
+    expect(connected.errors).toEqual([]);
+    await closeConnectedContext(connected.context);
+
+    await writeFile(
+      path.join(artifactDir, "browser-device-identity-lifecycle.json"),
+      `${JSON.stringify(
+        {
+          deviceId,
+          first: sanitizeProxyEvidence(first),
+          reconnected: sanitizeProxyEvidence(reconnected),
+          afterReload: sanitizeProxyEvidence(afterReload),
+          identityPersisted: true,
         },
         null,
         2,
