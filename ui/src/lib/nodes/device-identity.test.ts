@@ -68,6 +68,16 @@ describe("Control UI device identity", () => {
     expect(await loadOrCreateDeviceIdentity()).toEqual(identity);
   });
 
+  it("shares the first persistent identity across concurrent callers", async () => {
+    const [first, second] = await Promise.all([
+      loadOrCreateDeviceIdentity(),
+      loadOrCreateDeviceIdentity(),
+    ]);
+    expect(second).toEqual(first);
+    expect(JSON.parse(localStorage.getItem(identityKey) ?? "null").deviceId).toBe(first.deviceId);
+    expect(await loadOrCreateDeviceIdentity()).toEqual(first);
+  });
+
   it("replaces a stored Ed25519 identity without reusing its scoped device token", async () => {
     const oldDeviceId = "a".repeat(64);
     localStorage.setItem(

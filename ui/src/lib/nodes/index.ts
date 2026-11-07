@@ -898,13 +898,7 @@ export function peekStoredDeviceIdentityId(): string | null {
   }
 }
 
-export async function loadOrCreateDeviceIdentity(): Promise<DeviceIdentity> {
-  const storage = getSafeLocalStorage();
-  if (!storage) {
-    throw new Error(
-      "Browser local storage is unavailable; enable site storage to keep a paired device identity",
-    );
-  }
+async function loadOrCreateDeviceIdentityFromStorage(storage: Storage): Promise<DeviceIdentity> {
   try {
     const raw = storage.getItem(DEVICE_IDENTITY_STORAGE_KEY);
     if (raw) {
@@ -956,6 +950,43 @@ export async function loadOrCreateDeviceIdentity(): Promise<DeviceIdentity> {
   // Preserve legacy recovery data if persisting the replacement failed.
   removeLegacyBrowserIdentity(storage);
   return identity;
+}
+
+const pendingIdentityLoads = new WeakMap<Storage, Promise<DeviceIdentity>>();
+
+export async function loadOrCreateDeviceIdentity(): Promise<DeviceIdentity> {
+  const storage = getSafeLocalStorage();
+  if (!storage) {
+    throw new Error(
+      "Browser local storage is unavailable; enable site storage to keep a paired device identity",
+    );
+  }
+  const pending = pendingIdentityLoads.get(storage);
+  if (pending) {
+    return pending;
+  }
+  const operation = (async () => {
+    const locks = globalThis.navigator?.locks;
+    if (locks) {
+      // The read must occur after acquiring the origin-wide lock: a sibling tab
+      // may have persisted its identity while this request was waiting.
+      return locks.request(DEVICE_IDENTITY_STORAGE_KEY, () =>
+        loadOrCreateDeviceIdentityFromStorage(storage),
+      );
+    }
+    if (typeof window !== "undefined") {
+      throw new Error(
+        "Browser device identity requires Web Locks; open the Control UI on HTTPS or localhost in a supported browser",
+      );
+    }
+    return loadOrCreateDeviceIdentityFromStorage(storage);
+  })();
+  pendingIdentityLoads.set(storage, operation);
+  try {
+    return await operation;
+  } finally {
+    pendingIdentityLoads.delete(storage);
+  }
 }
 
 export async function signDevicePayload(privateKeyBase64Url: string, payload: string) {
