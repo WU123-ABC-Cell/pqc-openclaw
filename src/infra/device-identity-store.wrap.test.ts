@@ -96,6 +96,7 @@ function writeKeyFile(filePath: string, key: Buffer, mode = 0o600): void {
 
 function makeStoreOptions(wrappingKeyProvider?: WrappingKeyProvider): DeviceIdentityStoreOptions & {
   stateDir: string;
+  env: NodeJS.ProcessEnv;
 } {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-pqc-m5-"));
   tempDirs.push(stateDir);
