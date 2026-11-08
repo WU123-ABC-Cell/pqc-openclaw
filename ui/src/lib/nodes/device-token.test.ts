@@ -47,6 +47,12 @@ function storeIdentity() {
 }
 
 function deferIdentityFingerprint() {
+  // jsdom has no Web Locks; let these epoch tests reach the fingerprint barrier.
+  vi.stubGlobal("navigator", {
+    locks: {
+      request: async (_name: string, callback: () => Promise<unknown>) => callback(),
+    },
+  });
   const digest = deferred<ArrayBuffer>();
   const digestMock = vi.fn(() => digest.promise);
   vi.stubGlobal("crypto", { subtle: { digest: digestMock } });
