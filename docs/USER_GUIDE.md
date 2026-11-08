@@ -78,7 +78,7 @@ brew install nvm    # or use the nvm install script from 1.1
 nvm install
 nvm use
 
-# 3. The production installer currently requires root even on macOS
+# 3. The installer currently requires root even on macOS
 sudo bash scripts/install-pqc.sh --skip-systemd
 ```
 
@@ -94,9 +94,9 @@ paths. The Linux systemd flow below does not apply.
 # To start the daemon manually, see §3.3.
 ```
 
-WSL2 does not have a real systemd by default (unless you enabled
-it with `systemd=true` in `/etc/wsl.conf`). For a real production
-deployment, use a Linux VM or container, not WSL.
+WSL2 does not have systemd enabled by default (unless you enabled
+it with `systemd=true` in `/etc/wsl.conf`). For an evaluation that needs
+service management, use a Linux VM or container.
 
 ### 1.4 Container (Docker / Podman)
 
@@ -140,8 +140,8 @@ sudo bash scripts/install-pqc.sh \
 For a fully isolated Linux validation, `--sandbox-root PATH` requires an
 existing empty, non-symlink directory owned by the caller with mode 0700.
 
-`--help` lists every flag with a one-liner. The defaults are
-sane for a single-host production install.
+`--help` lists every flag with a one-liner. These defaults are for an
+isolated evaluation; this fork is not accepted for production keys or data.
 
 ---
 
@@ -256,14 +256,15 @@ sudo launchctl list | grep pqc-openclaw
 log show --predicate 'process == "pqc-openclaw"' --last 5m
 ```
 
-### 3.3 Tail the audit log
+### 3.3 Inspect PQC events in gateway logs
 
 ```sh
-sudo tail -f /var/lib/pqc-openclaw/pqc-audit.log
+sudo journalctl -u pqc-openclaw -f
 ```
 
-The audit log is JSONL, one event per line. PQC-specific events
-are tagged `[PQC]`:
+PQC-specific events, when emitted, are tagged `[PQC]` in the ordinary
+gateway log stream. There is no separate `pqc-audit.log` sink. These logs
+are neither a complete nor a tamper-resistant audit trail:
 
 | Event               | When                         | What it tells you                              |
 | ------------------- | ---------------------------- | ---------------------------------------------- |
@@ -495,9 +496,10 @@ Yes, with caveats. Use different `--install-root`, `--state-dir`,
 and `--service-user` per instance, and bind to different
 ports (`--port 28789` etc). The state dirs must not overlap
 or you will corrupt one of them. Each instance has its own
-wrap key. See the repository `docker-compose.pqc.yml`
-for the multi-container pattern (one service per instance,
-one mlock tmpfs per instance).
+wrap key. If using containers, define a separate service, state volume and
+credentials for each instance. The repository `docker-compose.pqc.yml`
+shows a single-instance evaluation recipe; its tmpfs mounts do not
+enable memory locking.
 
 ### 6.6 "How do I migrate from upstream OpenClaw?"
 
@@ -508,16 +510,13 @@ verified snapshot, retained key material, and a rehearsed restore.
 
 ### 6.7 "What is the audit-grade story?"
 
-The fork has a paper-grade self-audit at
+The repository has a self-audit at
 [constant-time audit](/security/constant-time-audit) and a historical campaign
-of 28 user-space/cache-hierarchy measurements across 129,200 trials. No
-statistically significant difference exceeded the recorded threshold; this is
-not proof of constant-time behavior. The third-party cryptographer audit
-is in P0 backlog; the RFP is being prepared. Until that
-audit, the fork is **not** suitable for government / financial
-deployments where a signed auditor letter is required. It is
-**fine** for engineering teams who can read the self-audit
-and the verification log themselves.
+of 28 user-space/cache-hierarchy measurements across 129,200 trials. Those
+summaries do not prove constant-time behavior or replace independent review.
+The fork is for isolated evaluation and research; it is not accepted for
+production keys or data. See [the security status](/security/pqc-whitepaper)
+for the current evidence and remaining release gates.
 
 ### 6.8 "Where do I report a vulnerability?"
 
@@ -598,13 +597,13 @@ For more failure modes, see
 
 ## 8. Where to go next
 
-You are now running a post-quantum-hardened OpenClaw instance.
-What you can do with it:
+If the setup and checks above passed, you have an experimental PQC OpenClaw
+instance for isolated evaluation. Next steps:
 
 - **Build something**: import the example apps under repository `examples/`,
   wire them into your own code via the standard OpenClaw client SDK.
-- **Deploy it for real**: follow [MIGRATION](/security/MIGRATION)
-  to bring production traffic over.
+- **Rehearse migration**: follow [MIGRATION](/security/MIGRATION)
+  with disposable state and test clients; do not move production traffic yet.
 - **Audit it**: read [the whitepaper](/security/pqc-whitepaper) +
   [constant-time audit](/security/constant-time-audit). Spot a
   weakness? File an issue or see the repository `SECURITY.md`.
@@ -613,5 +612,5 @@ What you can do with it:
 - **Get help**: file an issue at
   <https://github.com/WU123-ABC-Cell/pqc-openclaw/issues>.
 
-The cryptography and retained evidence are inspectable; the operational limits
-above are part of the deployment contract.
+The cryptography and retained evidence are inspectable; the limits above
+still apply to evaluation and release review.

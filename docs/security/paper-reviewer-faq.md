@@ -61,7 +61,7 @@
 
 - **AES-GCM** (1 hot path, wrap/unwrap) — secret-wrapping 唯一对称算法
 - **ML-DSA-65** (1 hot path, sign/verify) — device identity signing (实际生产选 ML-DSA-65, 不是 44/87)
-- **ML-KEM-768** (1 hot path, encap/decap) — Nostr NIP-44 v2 hybrid envelope (实际生产选 ML-KEM-768)
+- **ML-KEM-768** (1 hot path, encap/decap) — 自定义 OpenClaw PQC DM v1 kind `4444` 消息封装使用 ML-KEM-768；借用 NIP-44 conversation key 与 padding 设计，但不兼容标准 NIP-44 客户端
 - **ML-DSA-44/87 + ML-KEM-512/1024** (4 hot paths × 2 ops) — paper claim 完整性, 记录 @noble 0.7.0 其他参数集的历史阈值结果 (paper reviewer 关心 "只测一个 param set 够吗")
 
 **不需要 SLH-DSA / Falcon**: fork 没用到. SLH-DSA (FIPS 205) 是 hash-based 长期签名备选, 跟 ML-DSA-65 选型无关. Falcon (FN-DSA) 是体积更小的备选, 跟 ML-DSA-65 选型无关. 选 768/65 等级 (而非 1024/87) 原因见 §5.1.

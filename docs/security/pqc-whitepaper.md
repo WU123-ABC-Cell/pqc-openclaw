@@ -2,18 +2,20 @@
 
 Author: 吴昊天 (Wu Haotian)
 
-Status updated: 2026-11-03
+Status updated: 2026-11-08
 
-Implementation checked: local `r3-fixes-20261103` at
-`c04df90d4647a0112149ddf63d51da0470a97cf6`. Public `master` at the start
-of this review was `4e14148`. The local branch is not production accepted.
+Implementation checked: local `r3-security-docs-20261108` based on
+`e3f19cefc2b97702d5124077ef2739cd1d769a37` before this documentation
+revision. The branch is not production accepted.
 
 ## Status and scope
 
 This page separates the checked code from the dated review retained below.
-The local branch has focused test evidence, but no real Compose container
-acceptance, lost-key recovery exercise on an installed system, or native Apple
-acceptance. It is not a cryptographic certification or production release.
+The local branch has focused test evidence. A peer reported original Compose
+container acceptance at the earlier `4c71ae5f79edfdb7aa6771ca6ff247a359d61918`
+commit on 2026-11-05; it does not establish acceptance for this branch. A
+lost-key recovery exercise on an installed system and native Apple acceptance
+remain pending. This is not a cryptographic certification or production release.
 
 | Area                       | Checked implementation and remaining boundary                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -22,7 +24,7 @@ acceptance. It is not a cryptographic certification or production release.
 | Recovery                   | The branch prevents a missing default wrapping-key file from being replaced when wrapped identities exist or state cannot be inspected. The installer uses exclusive key creation. Real installed-system recovery remains to be exercised.                                                                                                                                                                                                                                    |
 | Retention                  | The branch selects one local archive for each of seven newest UTC backup dates and four older ISO weeks. Sparse histories can have fewer points; off-host retention is separate. A real multiweek restore exercise remains pending.                                                                                                                                                                                                                                           |
 | Nostr                      | Production uses the custom OpenClaw PQC DM v1 kind `4444` transport. It is not standard NIP-44 or interoperable with ordinary Nostr clients; independent protocol review remains pending.                                                                                                                                                                                                                                                                                     |
-| Deployment                 | Compose file-token wiring has a local candidate. Container UID 1000 secret reads, real startup and Gateway/CLI authentication have not been exercised here. No separate PQC audit-file sink or required memory-locking policy is claimed.                                                                                                                                                                                                                                     |
+| Deployment                 | Peer-reported original Compose validation at `4c71ae5f` covered UID 1000 secret reads, startup, positive/negative token authentication, healthy gateway and CLI ordering. It was not repeated at this exact source commit. No separate PQC audit-file sink or required memory-locking policy is claimed.                                                                                                                                                                      |
 | Key lifecycle and evidence | `openclaw wrap-key status` is read-only. Import/export/rotate are not operator commands. A separate SQLite v7 rotation candidate needs native Apple verification. Focused tests and historical timing files do not establish release acceptance or official known-answer tests.                                                                                                                                                                                               |
 
 For current backup behavior and restore requirements, see

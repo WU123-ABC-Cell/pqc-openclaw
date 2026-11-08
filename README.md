@@ -14,12 +14,13 @@ by [@WU123-ABC-Cell](https://github.com/WU123-ABC-Cell).
 
 ## Current capabilities and release blockers
 
-Updated 2026-11-03. This table describes the code in the commit containing this
-file. It supersedes the historical `0c273072acc724edafbf516eaa38c9dd0195d9d1`
-review. The third-review repairs on `r3-fixes-20261103` remain candidates until
-their own deployment and recovery checks pass; the public `master` baseline at
-the start of this work was `4e14148`. See the [security status](docs/security/pqc-whitepaper.md)
-for exact limits and historical scope.
+Updated 2026-11-08 against local code commit
+`e3f19cefc2b97702d5124077ef2739cd1d769a37` (before this documentation
+revision). This table supersedes the historical
+`0c273072acc724edafbf516eaa38c9dd0195d9d1` review. Third-review repairs
+remain candidates until their own deployment and recovery checks pass. See the
+[security status](docs/security/pqc-whitepaper.md) for exact limits and
+historical scope.
 
 | Surface           | Current implementation and remaining limit                                                                                                                                                                                                                                                                                                     |
 | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -28,7 +29,7 @@ for exact limits and historical scope.
 | Backups           | Both `openclaw backup create` and `scripts/backup-pqc.sh` exclude the known default/configured wrapping-key files, targets and hardlink aliases. They do not exclude unknown independent copies or encrypt other archive contents. Older archives may contain keys. Local daily/weekly rotation is a candidate pending real recovery exercise. |
 | Nostr             | The production plugin uses the custom OpenClaw PQC DM v1 kind `4444` transport and signed key announcements. This is not standard NIP-44 or interoperable with ordinary Nostr clients; independent protocol review remains pending.                                                                                                            |
 | Key lifecycle     | Read-only `openclaw wrap-key status` is registered. Import/export/rotation are not operator commands. A separate SQLite v7 rotation candidate still needs native Apple acceptance.                                                                                                                                                             |
-| Deployment        | The Compose file-token path and secret handling have a local repair candidate. Real container startup, non-root secret access and gateway/CLI authentication remain to be exercised.                                                                                                                                                           |
+| Deployment        | A peer reported the original Dockerfile and Compose passing startup, UID 1000 secret reads, token rejection and CLI health at `4c71ae5f79edfdb7aa6771ca6ff247a359d61918` on 2026-11-05. That report is for an earlier commit; the current branch has not repeated full container acceptance.                                                   |
 | Audit and memory  | PQC events use ordinary logging. There is no separate audit-file sink or fail-closed memory-locking policy. Secure-memory coverage depends on platform and build.                                                                                                                                                                              |
 | TLS and push      | This repository has no accepted end-to-end hybrid TLS deployment or deployed external-service PQC push-signature integration. Helper code does not establish client or service support.                                                                                                                                                        |
 | Evidence          | Focused tests and historical timing reports are not production acceptance, cryptographic certification or official known-answer tests. Check CI against the exact commit being deployed.                                                                                                                                                       |

@@ -337,14 +337,14 @@ operator-managed.
 
 ## 5. When to page the security team
 
-| Symptom                                                                         | Page?                                  | Why                                                                                                 |
-| ------------------------------------------------------------------------------- | -------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| `[FAIL] wrap-key-file: unsafe permissions` (mode 0644 etc)                      | **Yes**                                | The wrap key is world-readable. Possible leak. Rotate the key and investigate how the mode changed. |
-| `[FAIL] os-keyring: Secret Service entry not found` after a file-backed install | No                                     | Expected until explicit OS-keyring migration; monitor with `--skip-keyring` meanwhile.              |
-| `[WARN] os-keyring: Secret Service check returned: <error>`                     | **Yes** if it persists across restarts | The dbus session or libsecret has a problem; the wrap key is unprotected.                           |
-| Sudden drop in `[PQC]` events to zero                                           | No                                     | Could just mean no traffic. Cross-check with normal Gateway traffic.                                |
-| `[PQC] mlock-unavailable` reappears after every restart                         | No, but file a follow-up               | Rebuild or diagnose the native addon; changing Node alone does not enable `process.mlock`.          |
-| `journalctl` shows unexpected key access from outside the fork process          | **Yes**                                | Possible compromise. Stop the fork, rotate the key, restore from backup, forensic the host.         |
+| Symptom                                                                         | Page?                                  | Why                                                                                                                                              |
+| ------------------------------------------------------------------------------- | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `[FAIL] wrap-key-file: unsafe permissions` (mode 0644 etc)                      | **Yes**                                | The wrap key is world-readable. Possible leak. Rotate the key and investigate how the mode changed.                                              |
+| `[FAIL] os-keyring: Secret Service entry not found` after a file-backed install | No                                     | Expected until explicit OS-keyring migration; monitor with `--skip-keyring` meanwhile.                                                           |
+| `[WARN] os-keyring: Secret Service check returned: <error>`                     | **Yes** if it persists across restarts | The dbus session or libsecret has a problem; the wrap key is unprotected.                                                                        |
+| Sudden drop in `[PQC]` events to zero                                           | No                                     | Could just mean no traffic. Cross-check with normal Gateway traffic.                                                                             |
+| `[PQC] mlock-unavailable` reappears after every restart                         | No, but file a follow-up               | Rebuild or diagnose the native addon; changing Node alone does not enable `process.mlock`.                                                       |
+| Independent host audit evidence shows unexpected key-file access                | **Yes**                                | Possible compromise. Preserve evidence and use a reviewed recovery procedure; gateway logs alone cannot observe other processes reading the key. |
 
 ---
 
@@ -352,14 +352,14 @@ operator-managed.
 
 Values written or referenced by the generated systemd unit:
 
-| Var                            | Default                   | Purpose                                               |
-| ------------------------------ | ------------------------- | ----------------------------------------------------- |
-| `OPENCLAW_STATE_DIR`           | `/var/lib/pqc-openclaw`   | sqlite, audit log, key fallback, auth-profile secrets |
-| `OPENCLAW_GATEWAY_TOKEN`       | (random 32 bytes)         | client auth                                           |
-| `OPENCLAW_WRAP_KEY_FILE`       | `$STATE_DIR/wrap-key.b64` | 32 raw bytes, base64url-encoded                       |
-| `OPENCLAW_WRAP_KEY_OS_SERVICE` | `pqc-openclaw`            | optional OS-keyring service identifier                |
-| `OPENCLAW_WRAP_KEY_OS_ACCOUNT` | `wrap-key-YYYY-MM`        | generated OS-keyring account identifier               |
-| `OPENCLAW_WRAP_KEY_OS_ID`      | `wrap-key-YYYY-MM`        | generated OS-keyring key id                           |
+| Var                            | Default                   | Purpose                                    |
+| ------------------------------ | ------------------------- | ------------------------------------------ |
+| `OPENCLAW_STATE_DIR`           | `/var/lib/pqc-openclaw`   | sqlite, key fallback, auth-profile secrets |
+| `OPENCLAW_GATEWAY_TOKEN`       | (random 32 bytes)         | client auth                                |
+| `OPENCLAW_WRAP_KEY_FILE`       | `$STATE_DIR/wrap-key.b64` | 32 raw bytes, base64url-encoded            |
+| `OPENCLAW_WRAP_KEY_OS_SERVICE` | `pqc-openclaw`            | optional OS-keyring service identifier     |
+| `OPENCLAW_WRAP_KEY_OS_ACCOUNT` | `wrap-key-YYYY-MM`        | generated OS-keyring account identifier    |
+| `OPENCLAW_WRAP_KEY_OS_ID`      | `wrap-key-YYYY-MM`        | generated OS-keyring key id                |
 
 Read by `healthcheck-pqc.sh` (defaults shown):
 
