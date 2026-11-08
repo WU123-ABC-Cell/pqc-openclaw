@@ -13,9 +13,9 @@ Proves the full backup pipeline on a fake /tmp state directory:
   7. concurrent lock            → a held .backup.lock/pid makes a
                                    second run fail with a [FAIL] lock
                                    line that names the holder's PID
-  8. retention                  → old archives are pruned only after success
-                                   run real backup, expect 5-6 to be
-                                   pruned (keep 11 = 7 daily + 4 weekly)
+  8. retention                  → old archives are pruned only after success;
+                                   17 real dated backups leave 7 daily and
+                                   4 older weekly archives, all restorable
 
 Run from the fork repo root:
   python3 scripts/pqc-e2e/backup.py
@@ -31,7 +31,7 @@ Why this exists: the script is meant to be invoked from a daily cron
 on the production host, where a silent failure (broken tar, corrupt
 db, retention too aggressive, concurrent run clobbering the lock)
 would surface only when an operator tries to restore. This harness
-catches those failures on a developer's workstation in <5 seconds.
+catches those failures on a developer's workstation without production state.
 """
 import argparse
 import datetime
@@ -91,6 +91,104 @@ def run(script, *args, env=None):
         isolated_env.update(env)
     r = subprocess.run(["bash", script, *args], capture_output=True, text=True, env=isolated_env)
     return r
+
+
+def check_restorable_retention(script):
+    """Prove each retained day/week is an intact, distinct recovery point."""
+    log("8c. real backups retain seven restorable dates and four older ISO weeks")
+    old_week_days = (
+        "2025-12-01", "2025-12-04", "2025-12-08", "2025-12-11",
+        "2025-12-15", "2025-12-18", "2025-12-22", "2025-12-25",
+        "2025-12-29", "2026-01-01",
+    )
+    old_weeks = [f"{day}T030000Z" for day in old_week_days]
+    daily = [f"2026-01-{day:02d}T030000Z" for day in range(5, 12)]
+    stamps = old_weeks + daily
+    with tempfile.TemporaryDirectory(prefix="pqc-e2e-recoverable-retention-") as root:
+        state = os.path.join(root, "state")
+        backup = os.path.join(root, "backups")
+        os.makedirs(os.path.join(state, "state"))
+        db_path = os.path.join(state, "state", "openclaw.sqlite")
+        with sqlite3.connect(db_path) as database:
+            database.execute("CREATE TABLE recovery_marker (value TEXT NOT NULL)")
+        key_path = os.path.join(state, "wrap-key.b64")
+        with open(key_path, "w") as key_file:
+            key_file.write("test-only-wrapping-key")
+        os.chmod(key_path, 0o600)
+
+        fake_bin = os.path.join(root, "bin")
+        os.mkdir(fake_bin)
+        real_date = shutil.which("date")
+        if not real_date:
+            fail("date command unavailable for retention fixture")
+        fake_date = os.path.join(fake_bin, "date")
+        with open(fake_date, "w") as date_script:
+            date_script.write(
+                '#!/usr/bin/env bash\n'
+                'if [[ "$1" == "-u" && "$2" == "+%Y-%m-%dT%H%M%SZ" ]]; then\n'
+                '  printf "%s\\n" "$PQC_TEST_BACKUP_TS"\n'
+                'else\n'
+                '  exec "$PQC_TEST_REAL_DATE" "$@"\n'
+                'fi\n'
+            )
+        os.chmod(fake_date, 0o700)
+
+        archives = {}
+        for stamp in stamps:
+            with sqlite3.connect(db_path) as database:
+                database.execute("DELETE FROM recovery_marker")
+                database.execute("INSERT INTO recovery_marker VALUES (?)", (stamp,))
+            options = ["--state-dir", state, "--backup-dir", backup,
+                       "--skip-healthcheck", "--skip-s3", "--label", "recovery"]
+            daily_limit, weekly_limit = ("7", "4") if stamp == stamps[-1] else ("99", "99")
+            options += ["--retention-daily", daily_limit,
+                        "--retention-weekly", weekly_limit]
+            result = run(script, *options, env={
+                "PATH": fake_bin + os.pathsep + os.environ["PATH"],
+                "PQC_TEST_BACKUP_TS": stamp,
+                "PQC_TEST_REAL_DATE": real_date,
+            })
+            if result.returncode not in (0, 2):
+                fail(f"real backup at {stamp} failed: {result.stdout} {result.stderr}")
+            archive = os.path.join(backup, f"pqc-openclaw-{stamp}.recovery.tar.gz")
+            if not os.path.isfile(archive):
+                fail(f"real backup at {stamp} did not publish its archive")
+            archives[archive] = stamp
+
+        kept_week_stamps = {f"{day}T030000Z" for day in (
+            "2025-12-11", "2025-12-18", "2025-12-25", "2026-01-01"
+        )}
+        expected = {archive for archive, stamp in archives.items()
+                    if stamp in kept_week_stamps or stamp in daily}
+        retained = set(glob.glob(os.path.join(backup, "*.tar.gz")))
+        if retained != expected or any(
+            os.path.lexists(archive + ".sha256") for archive in set(archives) - expected
+        ):
+            fail(f"real backup retention did not preserve seven dates plus four weeks: {retained}")
+        for archive in sorted(retained):
+            if not os.path.isfile(archive + ".sha256"):
+                fail(f"retained recovery point has no checksum: {archive}")
+            verified = run(script, "--verify", archive)
+            if verified.returncode != 0:
+                fail(f"retained recovery point failed --verify: {archive}: {verified.stderr}")
+            with tempfile.TemporaryDirectory(prefix="pqc-e2e-restore-") as restored:
+                extracted = subprocess.run(
+                    ["tar", "-xzf", archive, "-C", restored, "--strip-components=1"],
+                    capture_output=True, text=True,
+                )
+                if extracted.returncode != 0:
+                    fail(f"retained recovery point failed extraction: {extracted.stderr}")
+                restored_db = os.path.join(restored, "state", "openclaw.sqlite")
+                if not os.path.isfile(restored_db):
+                    fail(f"retained recovery point has no SQLite database: {archive}")
+                with sqlite3.connect(restored_db) as database:
+                    integrity = database.execute("PRAGMA integrity_check").fetchone()[0]
+                    marker = database.execute("SELECT value FROM recovery_marker").fetchone()[0]
+                if integrity != "ok" or marker != archives[archive]:
+                    fail(f"retained recovery point restored wrong SQLite state: {archive}")
+                if os.path.lexists(os.path.join(restored, "wrap-key.b64")):
+                    fail(f"retained recovery point co-located the wrapping key: {archive}")
+        log("  11 distinct archives verified and restored; fifth week and older same-week copies pruned: OK")
 
 
 def python_shim(directory, injection):
@@ -709,6 +807,8 @@ def main():
             remaining = glob.glob(os.path.join(sparse_dir, "*.tar.gz"))
             if len(remaining) != 1 or "keep-new-only" not in remaining[0]:
                 fail("zero limits must still retain the newly verified archive")
+
+        check_restorable_retention(args.script)
 
         r = run(
             args.script, "--state-dir", state, "--backup-dir", backup,
