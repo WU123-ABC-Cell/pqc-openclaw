@@ -1,6 +1,8 @@
 node_modules
 **/node_modules/
 .env
+# Local Compose file secrets must never be staged by a routine git add.
+/secrets/
 docker-compose.override.yml
 docker-compose.extra.yml
 docker-compose.sandbox.yml
