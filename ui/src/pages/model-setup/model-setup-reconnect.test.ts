@@ -118,6 +118,76 @@ describe("ModelSetupPage Gateway reconnect ownership", () => {
     vi.restoreAllMocks();
   });
 
+  it("reloads stale route data delivered after an already-connected page mount", async () => {
+    const { context, request, runtimeConfig } = createFixture();
+    request.mockImplementation(async (method) =>
+      method === "openclaw.setup.detect"
+        ? { ...detection, configuredModel: "provider/fresh-model", setupComplete: true }
+        : {},
+    );
+    const provider = createApplicationContextProvider(context);
+    const page = document.createElement("openclaw-model-setup-page") as TestModelSetupPage;
+    provider.append(page);
+    document.body.append(provider);
+    await page.updateComplete;
+    expect(request).not.toHaveBeenCalled();
+
+    page.routeData = {
+      state: { phase: "loading" },
+      connection: { client: null, hello: null },
+      firstRun: false,
+    };
+    await page.updateComplete;
+
+    await vi.waitFor(() => expect(selectedModelDetail(page)).toBe("fresh-model"));
+    expect(
+      request.mock.calls.filter(([method]) => method === "openclaw.setup.detect"),
+    ).toHaveLength(1);
+    runtimeConfig.dispose();
+  });
+
+  it("does not restart an in-flight reconnect detection for late stale route data", async () => {
+    const { client, context, request, runtimeConfig, setGatewayPhase } = createFixture();
+    let releaseDetection!: () => void;
+    const detectionPaused = new Promise<void>((resolve) => {
+      releaseDetection = resolve;
+    });
+    request.mockImplementation(async (method) => {
+      if (method === "openclaw.setup.detect") {
+        await detectionPaused;
+        return { ...detection, configuredModel: "provider/current-model", setupComplete: true };
+      }
+      return {};
+    });
+    const staleHello = context.gateway.snapshot.hello;
+    const page = await mountPage(context, client);
+    try {
+      setGatewayPhase("reconnecting");
+      setGatewayPhase("connected");
+      await vi.waitFor(() => {
+        expect(
+          request.mock.calls.filter(([method]) => method === "openclaw.setup.detect"),
+        ).toHaveLength(1);
+      });
+
+      page.routeData = {
+        state: { phase: "loading" },
+        connection: { client, hello: staleHello },
+        firstRun: false,
+      };
+      await page.updateComplete;
+      expect(
+        request.mock.calls.filter(([method]) => method === "openclaw.setup.detect"),
+      ).toHaveLength(1);
+
+      releaseDetection();
+      await vi.waitFor(() => expect(selectedModelDetail(page)).toBe("current-model"));
+    } finally {
+      releaseDetection();
+      runtimeConfig.dispose();
+    }
+  });
+
   it("does not expose stale route data when the page mounts during reconnect", async () => {
     const { client, context, request, runtimeConfig, setGatewayPhase } = createFixture();
     request.mockImplementation(async (method) =>

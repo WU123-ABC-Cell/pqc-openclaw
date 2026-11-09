@@ -1,5 +1,5 @@
 import { consume } from "@lit/context";
-import { initialState, Task } from "@lit/task";
+import { initialState, Task, TaskStatus } from "@lit/task";
 import { html, type PropertyValues } from "lit";
 import { property, state } from "lit/decorators.js";
 import type { GatewayBrowserClient } from "../../api/gateway.ts";
@@ -254,6 +254,17 @@ export class ModelSetupPage extends OpenClawLightDomElement {
         this.pageState = this.routeData.state;
         this.observedConnection = { ...connection, connected: true };
         this.syncManualProvider(this.pageState);
+      } else if (
+        this.observedConnection?.connected &&
+        this.observedConnection.client === snapshot.client &&
+        this.observedConnection.hello === snapshot.hello &&
+        this.pageState.phase === "loading" &&
+        this.detectTask.status === TaskStatus.INITIAL &&
+        this.canUseSetup(snapshot.client)
+      ) {
+        // The router can mount the page before a stale loader result arrives.
+        // Recover once when the current connection was already observed.
+        void this.detect();
       }
     }
   }
