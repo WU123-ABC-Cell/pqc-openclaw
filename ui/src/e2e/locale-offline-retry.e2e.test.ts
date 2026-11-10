@@ -87,17 +87,21 @@ suite.define(() => {
     }
   });
 
-  it("applies a locale whose first chunk request failed after the Gateway reconnects", async () => {
+  it("reloads after repeated locale chunk failures when the Gateway reconnects", async () => {
     const context = await createContext();
     const page = await context.newPage();
     const gateway = await installMockGateway(page);
+    let navigationCount = 0;
     let abortedLocaleRequests = 0;
     const abortFrenchLocale = async (route: Route) => {
+      if (navigationCount > 0) {
+        await route.continue();
+        return;
+      }
       abortedLocaleRequests += 1;
       await route.abort("internetdisconnected");
     };
     await page.route(frenchLocaleModule, abortFrenchLocale);
-    let navigationCount = 0;
 
     try {
       const response = await page.goto(`${suite.server.baseUrl}settings/appearance`);
@@ -127,7 +131,6 @@ suite.define(() => {
       expect(await documentMarker(page)).toBe("same-document");
       expect(navigationCount).toBe(0);
 
-      await page.unroute(frenchLocaleModule, abortFrenchLocale);
       await reconnect(page, gateway);
 
       await page
