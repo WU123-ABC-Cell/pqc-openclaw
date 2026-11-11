@@ -65,6 +65,7 @@ class LogsPage extends OpenClawLightDomElement {
   private hasBoundGatewaySource = false;
   private gatewaySource: ApplicationContext["gateway"] | null = null;
   private logsTaskQuiet = false;
+  private initialLogsLoad: Promise<boolean> | null = null;
   private logsTaskArgs(opts?: { reset?: boolean; quiet?: boolean }) {
     return [
       this.connected ? this.gatewaySource : null,
@@ -184,6 +185,7 @@ class LogsPage extends OpenClawLightDomElement {
   override disconnectedCallback() {
     this.subscriptions.clear();
     this.logsTaskQuiet = false;
+    this.initialLogsLoad = null;
     void this.logsTask.run([null, null, null, false, false]);
     this.gatewaySource = null;
     if (this.contentScrollFrame !== null) {
@@ -206,6 +208,7 @@ class LogsPage extends OpenClawLightDomElement {
     const clientChanged = resetForSourceBind || snapshot.client !== this.client;
     if (clientChanged || connectionChanged) {
       this.logsTaskQuiet = false;
+      this.initialLogsLoad = null;
       void this.logsTask.run([null, null, null, false, false]);
     }
     this.client = snapshot.client;
@@ -235,14 +238,27 @@ class LogsPage extends OpenClawLightDomElement {
   }
 
   private ensureInitialLogs() {
-    if (!this.connected || !this.client || this.logsEntries.length > 0) {
+    if (!this.connected || !this.client || this.logsEntries.length > 0 || this.initialLogsLoad) {
       return;
     }
-    void this.loadLogs({ reset: true }).then((current) => {
-      if (current) {
-        this.streamFollow.schedule(true);
-      }
-    });
+    const load = this.loadLogs({ reset: true });
+    this.initialLogsLoad = load;
+    void load.then(
+      (current) => {
+        if (this.initialLogsLoad !== load) {
+          return;
+        }
+        this.initialLogsLoad = null;
+        if (current) {
+          this.streamFollow.schedule(true);
+        }
+      },
+      () => {
+        if (this.initialLogsLoad === load) {
+          this.initialLogsLoad = null;
+        }
+      },
+    );
   }
 
   private async loadLogs(opts?: { reset?: boolean; quiet?: boolean }): Promise<boolean> {

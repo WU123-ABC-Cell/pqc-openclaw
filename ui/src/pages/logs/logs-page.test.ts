@@ -178,6 +178,57 @@ describe("LogsPage lifecycle", () => {
     expect(page.logsEntries).toHaveLength(1);
   });
 
+  it("keeps the first log page when connected snapshots arrive before it completes", async () => {
+    const first = deferred<{ cursor: number; lines: string[]; reset: boolean }>();
+    const request = vi
+      .fn()
+      .mockImplementationOnce(() => first.promise)
+      .mockResolvedValueOnce({ cursor: 201, lines: ["line 201"], reset: false });
+    const client = { request } as unknown as GatewayBrowserClient;
+    const page = document.createElement("openclaw-logs-page") as TestLogsPage;
+    page.context = contextWithClient(client);
+    document.body.append(page);
+    await page.updateComplete;
+
+    const connected = { client, phase: "connected" } as ApplicationGatewaySnapshot;
+    page.applyGatewaySnapshot(connected);
+    page.applyGatewaySnapshot(connected);
+    expect(request).toHaveBeenCalledTimes(1);
+
+    first.resolve({
+      cursor: 200,
+      lines: Array.from({ length: 200 }, (_, index) => `line ${index + 1}`),
+      reset: true,
+    });
+    await vi.waitFor(() => expect(page.logsEntries).toHaveLength(200));
+    await page.loadLogs({ quiet: true });
+    expect(request.mock.calls[1]?.[1]).toMatchObject({ cursor: 200 });
+    expect(page.logsEntries).toHaveLength(201);
+  });
+
+  it("starts a fresh first read after a same-client reconnect", async () => {
+    const stale = deferred<{ cursor: number; lines: string[]; reset: boolean }>();
+    const request = vi
+      .fn()
+      .mockImplementationOnce(() => stale.promise)
+      .mockResolvedValueOnce({ cursor: 1, lines: ["current"], reset: true });
+    const client = { request } as unknown as GatewayBrowserClient;
+    const page = document.createElement("openclaw-logs-page") as TestLogsPage;
+    page.context = contextWithClient(client);
+    document.body.append(page);
+    await page.updateComplete;
+
+    page.applyGatewaySnapshot({ client, phase: "connected" } as ApplicationGatewaySnapshot);
+    page.applyGatewaySnapshot({ client, phase: "stopped" } as ApplicationGatewaySnapshot);
+    page.applyGatewaySnapshot({ client, phase: "connected" } as ApplicationGatewaySnapshot);
+    await vi.waitFor(() => expect(page.logsEntries).toHaveLength(1));
+    expect(request).toHaveBeenCalledTimes(2);
+
+    stale.resolve({ cursor: 1, lines: ["stale"], reset: true });
+    await Promise.resolve();
+    expect(page.logsEntries).toEqual([expect.objectContaining({ raw: "current" })]);
+  });
+
   it("retains loaded logs as stale after failure and clears the marker on retry success", async () => {
     const request = vi
       .fn()
