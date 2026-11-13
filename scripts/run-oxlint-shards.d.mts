@@ -58,12 +58,20 @@ export function main(extraArgs?: string[], runtimeEnv?: NodeJS.ProcessEnv): Prom
 export function parseShardRunnerArgs(args: string[]): {
   only: Set<string>;
   oxlintArgs: string[];
+  partition: { index: number; count: number } | null;
   splitCore: boolean;
 };
 /**
- * Filters shards by an optional comma-separated shard name list.
+ * Filters shards by optional shard names.
  */
 export function filterOxlintShards<T extends { name: string }>(shards: T[], only: Set<string>): T[];
+/**
+ * Partitions the selected shards in stable order without omitting a target.
+ */
+export function selectOxlintShardPartition<T>(
+  shards: T[],
+  partition: { index: number; count: number } | null,
+): T[];
 /**
  * Resolves shard concurrency from env, platform, and host resources.
  */

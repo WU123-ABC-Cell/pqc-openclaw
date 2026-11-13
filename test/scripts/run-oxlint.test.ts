@@ -9,6 +9,7 @@ import {
   createOxlintShards,
   filterOxlintShards,
   parseShardRunnerArgs,
+  selectOxlintShardPartition,
   createWindowsExtensionShards,
   resolveShardKillGraceMs,
   resolveShardHeartbeatMs,
@@ -140,7 +141,9 @@ async function waitFor(predicate: () => boolean, timeoutMs: number): Promise<voi
     if (predicate()) {
       return;
     }
-    await new Promise((resolvePoll) => setTimeout(resolvePoll, 5));
+    await new Promise((resolvePoll) => {
+      setTimeout(resolvePoll, 5);
+    });
   }
   throw new Error("condition was not met before timeout");
 }
@@ -488,11 +491,58 @@ describe("run-oxlint", () => {
   });
 
   it("parses shard runner flags without forwarding them to oxlint", () => {
-    const parsed = parseShardRunnerArgs(["--only=core", "--split-core", "--max-warnings", "0"]);
+    const parsed = parseShardRunnerArgs([
+      "--only=core",
+      "--split-core",
+      "--partition=2/3",
+      "--max-warnings",
+      "0",
+    ]);
 
     expect([...parsed.only]).toEqual(["core"]);
     expect(parsed.splitCore).toBe(true);
+    expect(parsed.partition).toEqual({ index: 2, count: 3 });
     expect(parsed.oxlintArgs).toEqual(["--max-warnings", "0"]);
+  });
+
+  it("assigns every selected oxlint shard to exactly one partition", () => {
+    const shards = createOxlintShards({
+      cwd: "/repo",
+      splitCore: true,
+      readDir: () =>
+        ["alpha", "beta", "gamma", "delta"].map((name) => ({
+          name,
+          isDirectory: () => true,
+          isFile: () => false,
+        })) as never,
+    });
+    const first = selectOxlintShardPartition(shards, { index: 1, count: 2 });
+    const second = selectOxlintShardPartition(shards, { index: 2, count: 2 });
+
+    expect(new Set([...first, ...second])).toEqual(new Set(shards));
+    expect(first).toHaveLength(Math.ceil(shards.length / 2));
+    expect(second).toHaveLength(Math.floor(shards.length / 2));
+    expect(first.every((shard) => !second.includes(shard))).toBe(true);
+    expect(selectOxlintShardPartition(shards, null)).toEqual(shards);
+  });
+
+  it.each([
+    "--partition",
+    "--partition=0/2",
+    "--partition=3/2",
+    "--partition=1/0",
+    "--partition=1/2/3",
+  ])("rejects invalid partition input: %s", (arg) => {
+    expect(() => parseShardRunnerArgs([arg])).toThrow("--partition requires");
+  });
+
+  it("rejects duplicate and empty shard partitions", () => {
+    expect(() => parseShardRunnerArgs(["--partition=1/2", "--partition=2/2"])).toThrow(
+      "--partition may only be specified once",
+    );
+    expect(() =>
+      selectOxlintShardPartition([oxlintShard("core", "core", "src")], { index: 2, count: 2 }),
+    ).toThrow("--partition selects no oxlint shards");
   });
 
   it.each([["--only"], ["--only", "--split-core"], ["--only="], ["--only=-h"]])(
@@ -538,6 +588,8 @@ describe("run-oxlint", () => {
     ["--only=-h"],
     ["--only=wat"],
     ["--only=core", "--only=wat"],
+    ["--partition=0/2"],
+    ["--partition=2/1"],
   ])("rejects invalid shard CLI input before starting work: %s", (...args) => {
     const tempDir = createTempDir("openclaw-oxlint-selector-");
     const result = spawnSync(process.execPath, [RUN_OXLINT_SHARDS_URL, ...args], {

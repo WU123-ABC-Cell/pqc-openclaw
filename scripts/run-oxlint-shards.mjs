@@ -257,7 +257,16 @@ export async function main(extraArgs = process.argv.slice(2), runtimeEnv = proce
       platform: process.platform,
       splitCore: shardArgs.splitCore,
     });
-    const selectedShards = filterOxlintShards(shards, shardArgs.only);
+    const selectedShards = selectOxlintShardPartition(
+      filterOxlintShards(shards, shardArgs.only),
+      shardArgs.partition,
+    );
+    if (shardArgs.partition) {
+      console.error(
+        `[oxlint] partition ${shardArgs.partition.index}/${shardArgs.partition.count}: ` +
+          selectedShards.map((shard) => shard.name).join(", "),
+      );
+    }
 
     ensureRepoToolNodeModulesLink(resolveRepoToolBinPath("oxlint"));
     const prepareResult = spawnSync(
@@ -323,6 +332,7 @@ export function parseShardRunnerArgs(args) {
   const only = new Set();
   const oxlintArgs = [];
   let splitCore = false;
+  let partition = null;
 
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
@@ -339,10 +349,46 @@ export function parseShardRunnerArgs(args) {
       only.add(requireShardSelector(arg.slice("--only=".length)));
       continue;
     }
+    if (arg === "--partition" || arg.startsWith("--partition=")) {
+      if (partition !== null) {
+        throw new Error("--partition may only be specified once");
+      }
+      partition = parseShardPartition(
+        arg === "--partition" ? args[++index] : arg.slice("--partition=".length),
+      );
+      continue;
+    }
     oxlintArgs.push(arg);
   }
 
-  return { only, oxlintArgs, splitCore };
+  return { only, oxlintArgs, partition, splitCore };
+}
+
+function parseShardPartition(value) {
+  const match = /^(\d+)\/(\d+)$/.exec(value ?? "");
+  if (!match) {
+    throw new Error("--partition requires an index/count pair");
+  }
+  const index = Number(match[1]);
+  const count = Number(match[2]);
+  if (!Number.isSafeInteger(index) || !Number.isSafeInteger(count) || index < 1 || index > count) {
+    throw new Error("--partition requires 1 <= index <= count");
+  }
+  return { index, count };
+}
+
+/** Partitions the selected shards in stable order without omitting a target. */
+export function selectOxlintShardPartition(shards, partition) {
+  if (partition === null) {
+    return shards;
+  }
+  const selected = shards.filter(
+    (_, position) => position % partition.count === partition.index - 1,
+  );
+  if (selected.length === 0) {
+    throw new Error("--partition selects no oxlint shards");
+  }
+  return selected;
 }
 
 /**

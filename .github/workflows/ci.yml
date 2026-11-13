@@ -2309,7 +2309,11 @@ jobs:
               # not just ui/src/i18n; any ui-touching diff (run_ui_tests) or
               # i18n-tooling diff must run it. oxlint always runs.
               lint_args=(--threads=8)
-              if [ "$(nproc)" -lt 8 ]; then
+              if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+                # Hosted manual runs have four cores. Divide the serial lint
+                # inventory across two jobs without changing its coverage.
+                lint_args=(--split-core --threads=1 --partition=1/2)
+              elif [ "$(nproc)" -lt 8 ]; then
                 # Fork PRs run on 4-core hosted runners with 16GB. Bound both
                 # the core process size and its threads so type-aware oxlint
                 # does not intermittently lose the runner under memory pressure.
@@ -2395,6 +2399,23 @@ jobs:
               exit 1
               ;;
           esac
+
+  check-lint-dispatch-remainder:
+    permissions:
+      contents: read
+    needs: [preflight]
+    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && needs.preflight.outputs.run_check == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - *linux_node_checkout_step
+      - name: Setup Node environment
+        uses: ./.github/actions/setup-node-env
+        with:
+          install-bun: "false"
+          use-actions-cache: "true"
+      - name: Run remaining oxlint shards
+        run: node scripts/run-oxlint-shards.mjs --split-core --threads=1 --partition=2/2
 
   check-additional-shard:
     permissions:
@@ -3628,6 +3649,7 @@ jobs:
       - checks-node-compat
       - checks-node-core-test-nondist-shard
       - check-shard
+      - check-lint-dispatch-remainder
       - check-additional-shard
       - check-docs
       - skills-python
@@ -3646,6 +3668,7 @@ jobs:
           REQUIRED_RESULTS: |
             preflight=${{ needs.preflight.result }}
             security-fast=${{ needs.security-fast.result }}
+            dispatch-lint=${{ github.event_name == 'workflow_dispatch' && needs.preflight.outputs.run_check == 'true' && needs.check-lint-dispatch-remainder.result || 'success' }}
           SELECTED_RESULTS: |
             pnpm-store-warmup=${{ needs.pnpm-store-warmup.result }}
             build-artifacts=${{ needs.build-artifacts.result }}
@@ -3718,6 +3741,7 @@ jobs:
       - checks-node-compat
       - checks-node-core-test-nondist-shard
       - check-shard
+      - check-lint-dispatch-remainder
       - check-additional-shard
       - check-docs
       - skills-python

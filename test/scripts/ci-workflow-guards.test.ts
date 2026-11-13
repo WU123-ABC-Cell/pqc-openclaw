@@ -4150,12 +4150,13 @@ printf '%s\n' "\${CURL_SUCCESS_IP:-203.0.113.7}"
         "bash",
         [
           "-c",
-          `set -euo pipefail\n${discoveryBlock}\nprintf 'result=%s\\n' "$CRABBOX_AWS_SSH_CIDRS"`,
+          `set -euo pipefail\nPATH="$FAKE_BIN:$PATH"\n${discoveryBlock}\nprintf 'result=%s\\n' "$CRABBOX_AWS_SSH_CIDRS"`,
         ],
         {
           encoding: "utf8",
           env: {
             CURL_CALL_COUNT: callCount,
+            FAKE_BIN: fakeBin,
             PATH: `${fakeBin}:${process.env.PATH}`,
           },
         },
@@ -4167,14 +4168,19 @@ printf '%s\n' "\${CURL_SUCCESS_IP:-203.0.113.7}"
 
       for (const invalidIp of ["999.0.0.1", "203.0.113.7."]) {
         writeFileSync(callCount, "0\n");
-        const invalidResult = spawnSync("bash", ["-c", `set -euo pipefail\n${discoveryBlock}`], {
-          encoding: "utf8",
-          env: {
-            CURL_CALL_COUNT: callCount,
-            CURL_SUCCESS_IP: invalidIp,
-            PATH: `${fakeBin}:${process.env.PATH}`,
+        const invalidResult = spawnSync(
+          "bash",
+          ["-c", `set -euo pipefail\nPATH="$FAKE_BIN:$PATH"\n${discoveryBlock}`],
+          {
+            encoding: "utf8",
+            env: {
+              CURL_CALL_COUNT: callCount,
+              CURL_SUCCESS_IP: invalidIp,
+              FAKE_BIN: fakeBin,
+              PATH: `${fakeBin}:${process.env.PATH}`,
+            },
           },
-        });
+        );
         expect(invalidResult.status).toBe(1);
         expect(invalidResult.stderr).toContain(
           "Could not resolve GitHub runner public IPv4 for AWS SSH ingress.",
@@ -4361,11 +4367,19 @@ printf '%s\n' "\${CURL_SUCCESS_IP:-203.0.113.7}"
     const checkShardRun = workflow.jobs["check-shard"].steps.find(
       (step: WorkflowStep) => step.name === "Run check shard",
     ).run;
+    const dispatchRemainder = workflow.jobs["check-lint-dispatch-remainder"];
 
-    expect(checkShardRun).toContain('if [ "$(nproc)" -lt 8 ]; then');
+    expect(checkShardRun).toContain('if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then');
+    expect(checkShardRun).toContain("lint_args=(--split-core --threads=1 --partition=1/2)");
+    expect(checkShardRun).toContain('elif [ "$(nproc)" -lt 8 ]; then');
     expect(checkShardRun).toContain("lint_args=(--split-core --threads=1)");
     expect(checkShardRun).toContain('pnpm lint "${lint_args[@]}"');
     expect(checkShardRun).toContain('node scripts/run-oxlint-shards.mjs "${lint_args[@]}"');
+    expect(dispatchRemainder.if).toContain("github.event_name == 'workflow_dispatch'");
+    expect(dispatchRemainder.steps.at(-1).run).toBe(
+      "node scripts/run-oxlint-shards.mjs --split-core --threads=1 --partition=2/2",
+    );
+    expect(workflow.jobs["ci-gate"].needs).toContain("check-lint-dispatch-remainder");
   });
 
   it("runs the suppression-baseline max-lines ratchet against the exact tested tree", () => {
@@ -5251,6 +5265,7 @@ printf '%s\n' "\${CURL_SUCCESS_IP:-203.0.113.7}"
       "checks-node-compat",
       "checks-node-core-test-nondist-shard",
       "check-shard",
+      "check-lint-dispatch-remainder",
       "check-additional-shard",
       "check-docs",
       "skills-python",
@@ -5285,7 +5300,13 @@ printf '%s\n' "\${CURL_SUCCESS_IP:-203.0.113.7}"
     for (const job of requiredJobs) {
       expect(verifyStep.env.REQUIRED_RESULTS).toContain(`${job}=\${{ needs.${job}.result }}`);
     }
+    expect(verifyStep.env.REQUIRED_RESULTS).toContain(
+      "dispatch-lint=${{ github.event_name == 'workflow_dispatch' && needs.preflight.outputs.run_check == 'true' && needs.check-lint-dispatch-remainder.result || 'success' }}",
+    );
     for (const job of selectedJobs) {
+      if (job === "check-lint-dispatch-remainder") {
+        continue;
+      }
       expect(verifyStep.env.SELECTED_RESULTS).toContain(`${job}=\${{ needs.${job}.result }}`);
     }
     expect(verifyStep.run).toContain("Required CI job did not succeed");
@@ -5308,6 +5329,13 @@ printf '%s\n' "\${CURL_SUCCESS_IP:-203.0.113.7}"
       );
       expect(skippedRequired.status).not.toBe(0);
       expect(skippedRequired.stdout).toContain("preflight finished with skipped");
+
+      const skippedDispatchLint = runCiGateFixture(
+        "preflight=success\nsecurity-fast=success\ndispatch-lint=skipped",
+        "checks-ui=success",
+      );
+      expect(skippedDispatchLint.status).not.toBe(0);
+      expect(skippedDispatchLint.stdout).toContain("dispatch-lint finished with skipped");
 
       const failedSelected = runCiGateFixture(
         "preflight=success\nsecurity-fast=success",
