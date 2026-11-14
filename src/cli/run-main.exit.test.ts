@@ -2189,6 +2189,7 @@ describe("runCli exit behavior", () => {
 
     await runCli(["node", "openclaw", "doctor", "--help"]);
 
+    expect(requestExitAfterOneShotOutputMock).toHaveBeenCalledOnce();
     expect(outputPrecomputedSubcommandHelpTextMock).toHaveBeenCalledWith("doctor");
     expect(tryRouteCliMock).not.toHaveBeenCalled();
     expect(buildProgramMock).not.toHaveBeenCalled();
@@ -2220,6 +2221,7 @@ describe("runCli exit behavior", () => {
 
     await runCli(["node", "openclaw", "--help"]);
 
+    expect(requestExitAfterOneShotOutputMock).toHaveBeenCalledOnce();
     expect(loadRootHelpRenderOptionsForConfigSensitivePluginsMock).toHaveBeenCalledTimes(1);
     expect(outputPrecomputedRootHelpTextMock).toHaveBeenCalledTimes(1);
     expect(hasEnvHttpProxyAgentConfiguredMock).not.toHaveBeenCalled();
@@ -2229,6 +2231,7 @@ describe("runCli exit behavior", () => {
   it("renders setup/onboard/configure help without building the full program", async () => {
     await runCli(["node", "openclaw", "setup", "--help"]);
 
+    expect(requestExitAfterOneShotOutputMock).toHaveBeenCalledOnce();
     expect(tryOutputSetupOnboardConfigureHelpMock).toHaveBeenCalledWith([
       "node",
       "openclaw",
@@ -4083,6 +4086,9 @@ describe("runCli exit behavior", () => {
 
     expect(requestExitAfterOneShotOutputMock).toHaveBeenCalledOnce();
     expect(flushExitAfterOneShotOutputMock).not.toHaveBeenCalled();
+    expect(listRegisteredAgentHarnessesMock).not.toHaveBeenCalled();
+    expect(getActiveMcpLoopbackRuntimeMock).not.toHaveBeenCalled();
+    expect(hasMemoryRuntimeMock).not.toHaveBeenCalled();
     expect(process.exitCode).toBe(0);
     process.exitCode = exitCode;
   });

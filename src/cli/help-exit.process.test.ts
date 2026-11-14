@@ -278,11 +278,14 @@ describe("CLI help process exit", () => {
     expect(result.stderr).toBe("");
     expect(result.stdout).toContain("Usage: openclaw backup [options] [command]");
   });
-  it("flushes explicitly requested entry traces on precomputed help", async () => {
+  it("flushes entry traces and exits after source gateway help", async () => {
+    // Source checkouts lack the generated help metadata in dist, so this reaches
+    // Commander and must exit even if an imported module retains a live handle.
     const result = await runCliProcess({
       args: ["gateway", "--help"],
       config: { logging: { consoleStyle: "json", level: "silent" } },
       env: { OPENCLAW_GATEWAY_STARTUP_TRACE: "1" },
+      keepAlive: true,
     });
 
     expect(parseJsonLines(result.stderr)).toEqual(

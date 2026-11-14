@@ -1322,6 +1322,7 @@ async function runCliWithPreparedOutputMode(
     });
   }
 
+  let completedHelpOrVersion = false;
   try {
     if (shouldUseRootHelpFastPath(normalizedArgv)) {
       const { loadRootHelpRenderOptionsForConfigSensitivePlugins } =
@@ -1332,15 +1333,21 @@ async function runCliWithPreparedOutputMode(
       if (!liveRootHelpOptions) {
         const { outputPrecomputedRootHelpText } = await loadRootHelpMetadataModule();
         if (outputPrecomputedRootHelpText()) {
+          completedHelpOrVersion = true;
+          requestExitAfterOneShotOutput();
           return;
         }
       }
       const { outputRootHelp } = await import("./program/root-help.js");
       await outputRootHelp(liveRootHelpOptions ?? undefined);
+      completedHelpOrVersion = true;
+      requestExitAfterOneShotOutput();
       return;
     }
 
     if (await tryOutputPrecomputedCommandHelp(normalizedArgv)) {
+      completedHelpOrVersion = true;
+      requestExitAfterOneShotOutput();
       return;
     }
 
@@ -1348,6 +1355,8 @@ async function runCliWithPreparedOutputMode(
       const { tryOutputSetupOnboardConfigureHelp } =
         await import("./setup-onboard-configure-help-fast-path.js");
       if (await tryOutputSetupOnboardConfigureHelp(normalizedArgv)) {
+        completedHelpOrVersion = true;
+        requestExitAfterOneShotOutput();
         return;
       }
     }
@@ -1624,7 +1633,6 @@ async function runCliWithPreparedOutputMode(
       );
       stopStartupProgress();
 
-      let completedHelpOrVersion = false;
       try {
         await startupTrace.measure("parse", () => program.parseAsync(parseArgv), {
           timeline: false,
@@ -1649,9 +1657,13 @@ async function runCliWithPreparedOutputMode(
   } finally {
     uninstallGatewayRunRuntimeHooks?.();
     await stopStartedProxy();
-    await disposeCliAgentHarnesses();
-    await closeCliMcpLoopbackServer();
-    await closeCliMemoryManagers();
+    if (!completedHelpOrVersion) {
+      // Help/version paths only render output. Avoid loading unrelated runtime
+      // registries before the outer one-shot finalizer can drain and exit.
+      await disposeCliAgentHarnesses();
+      await closeCliMcpLoopbackServer();
+      await closeCliMemoryManagers();
+    }
     pauseNonTtyStdinForCliExit();
   }
 }
