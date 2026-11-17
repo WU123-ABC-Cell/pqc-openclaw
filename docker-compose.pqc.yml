@@ -52,11 +52,6 @@ services:
     image: ${PQC_IMAGE:-pqc-openclaw:local}
     build:
       context: .
-      args:
-        # Pin the Node.js major version baked into the image. Production
-        # operators should rebuild against a digest of node:24.15-bookworm
-        # once they have validated mlock on Node 24.15+ in their env.
-        NODE_MAJOR: ${PQC_NODE_MAJOR:-22}
     secrets:
       - gateway_token
       - wrap_key
