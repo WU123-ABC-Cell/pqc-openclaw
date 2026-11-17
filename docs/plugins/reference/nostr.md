@@ -7,7 +7,7 @@ title: "Nostr plugin"
 
 # Nostr plugin
 
-OpenClaw Nostr channel plugin for the versioned OpenClaw PQC DM protocol over Nostr relays.
+OpenClaw Nostr channel plugin for authenticated ML-KEM-768 hybrid direct messages.
 
 ## Distribution
 
