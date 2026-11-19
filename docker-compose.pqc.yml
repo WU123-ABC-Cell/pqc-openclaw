@@ -1,4 +1,4 @@
-# docker-compose.pqc.yml — PQC OpenClaw fork production Compose file.
+# docker-compose.pqc.yml — PQC OpenClaw fork evaluation Compose file.
 #
 # This is the PQC-fork deployment recipe. It is intentionally a separate
 # file (not an `extends:` of upstream `docker-compose.yml`) so that:
@@ -10,20 +10,33 @@
 #      place instead of being scattered across an `extends:` chain.
 #
 # Prerequisites (see PQC-FORK.md for the fork deployment limits):
-#   - PQC fork image built locally:  `pnpm run build && docker build -t pqc-openclaw:local .`
+#   - Build the image: docker compose -f docker-compose.pqc.yml build openclaw-gateway
 #   - Two secret files on the host, readable by container UID 1000 only
 #     (for ordinary rootful Compose: owner UID 1000, mode 0400). File-backed
 #     Compose secrets retain host ownership and mode; verify inside container.
 #       ./secrets/gateway-token       # >= 32 bytes
 #       ./secrets/wrap-key.b64        # base64url of 32 raw wrap-key bytes
-#   - State directories on the host:
-#       ${OPENCLAW_STATE_DIR:-/var/lib/pqc-openclaw}
-#       ${OPENCLAW_BACKUP_DIR:-/var/backups/pqc-openclaw}
+#   - Create the mounted state and workspace directories and make them
+#     writable by UID 1000. Prepare the backup and auth-profile mount paths.
+#     Set PQC_HEALTHCHECK_PATH to an existing readable healthcheck-pqc.sh
+#     if the file is not installed at /usr/local/bin/healthcheck-pqc.sh.
 #
-# Bring up:
-#   OPENCLAW_STATE_DIR=/var/lib/pqc-openclaw \
-#   OPENCLAW_BACKUP_DIR=/var/backups/pqc-openclaw \
-#   docker compose -f docker-compose.pqc.yml up -d
+# First start with new state only (CLI-only evaluation):
+#   In the same shell and with the same mount settings as the later up command,
+#   write configuration with a one-off container using the gateway service:
+#   docker compose -f docker-compose.pqc.yml run --rm --no-deps -T \
+#     --entrypoint node openclaw-gateway dist/index.js config set --batch-json \
+#     '[{"path":"gateway.mode","value":"local"},{"path":"gateway.controlUi.enabled","value":false}]'
+#
+#   A plain up on empty state fails with Missing config. The CLI service
+#   depends on a healthy gateway, so do not use it for first initialization.
+#   Keep existing configuration on upgrades. For browser Control UI on LAN,
+#   configure explicit trusted gateway.controlUi.allowedOrigins before enabling it.
+#   Published ports are unchanged; use an isolated evaluation host or restrict ingress.
+#
+# Start the gateway with the same mount settings, then check from the CLI:
+#   docker compose -f docker-compose.pqc.yml up -d --wait openclaw-gateway
+#   docker compose -f docker-compose.pqc.yml run --rm -T openclaw-cli health
 #
 # Run the health check (same script install-pqc.sh installs into /usr/local/bin):
 #   bash scripts/healthcheck-pqc.sh
