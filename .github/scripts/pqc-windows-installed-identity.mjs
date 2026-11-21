@@ -205,3 +205,31 @@ async function readIdentityInNewCli(nativeMode) {
   assert.equal(digest(wrapKey), keyDigest);
   console.log("INSTALLED_CLI_NATIVE_OFF_REFUSES_IDENTITY_WITHOUT_KEY_CHANGE=PASS");
 }
+
+if (process.argv[4] === "--verify-multi-account-acl") {
+  const { stdout } = await exec(
+    "pwsh.exe",
+    [
+      "-NoProfile",
+      "-NonInteractive",
+      "-File",
+      path.join(import.meta.dirname, "pqc-windows-check-account-isolation.ps1"),
+      "-WrapKey",
+      wrapKey,
+    ],
+    {
+      cwd: root,
+      env: Object.fromEntries(
+        Object.entries(process.env).filter(
+          ([key]) => systemVars.test(key) || /^(GITHUB_ACTIONS|RUNNER_ENVIRONMENT)$/i.test(key),
+        ),
+      ),
+      windowsHide: true,
+      timeout: 90000,
+    },
+  );
+  assert.deepEqual(validateIdentity(await readIdentityInNewCli(undefined)), initial);
+  assert.equal(digest(wrapKey), keyDigest);
+  console.log(stdout.trim());
+  console.log("INSTALLED_OWNER_IDENTITY_AND_KEY_UNCHANGED_AFTER_ACCOUNT_CHECK=PASS");
+}

@@ -78,5 +78,5 @@ jobs:
           New-Item -ItemType Directory -Path $fixture | Out-Null
           npm.cmd install --prefix $fixture --registry=https://registry.npmjs.org --no-fund $archive
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node .github/scripts/pqc-windows-installed-identity.mjs $fixture $archive
+          node .github/scripts/pqc-windows-installed-identity.mjs $fixture $archive --verify-multi-account-acl
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
