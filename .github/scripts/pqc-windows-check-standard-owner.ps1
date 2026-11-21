@@ -65,7 +65,7 @@ try {
   try {
     $stdout = $process.StandardOutput.ReadToEndAsync()
     $stderr = $process.StandardError.ReadToEndAsync()
-    if (!$process.WaitForExit(720000)) {
+    if (!$process.WaitForExit(1020000)) {
       $process.Kill($true)
       [void] $process.WaitForExit(10000)
       throw 'Standard-account package smoke timed out.'

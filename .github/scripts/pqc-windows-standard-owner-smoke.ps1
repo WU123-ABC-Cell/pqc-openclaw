@@ -32,6 +32,6 @@ $npm = Join-Path (Split-Path -Parent $NodeExe) 'npm.cmd'
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 $env:PQC_SOURCE_SHA = $SourceSha
-& $NodeExe (Join-Path $PSScriptRoot 'pqc-windows-installed-identity.mjs') $fixture $archive
+& $NodeExe (Join-Path $PSScriptRoot 'pqc-windows-installed-identity.mjs') $fixture $archive --node-host
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 Write-Output 'INSTALLED_PACKAGE_LIFECYCLE_AS_STANDARD_OWNER=PASS'

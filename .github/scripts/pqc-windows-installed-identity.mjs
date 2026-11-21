@@ -159,14 +159,58 @@ function validateIdentity(result) {
 let initial;
 let keyDigest;
 assert.equal(fs.existsSync(wrapKey), false);
-await withGateway(async (callIdentity) => {
-  initial = validateIdentity(await callIdentity());
-  assert.equal(fs.statSync(identityDb).isFile(), true);
-  assert.equal(fs.statSync(wrapKey).isFile(), true);
-  assert.equal(readOwnerAndDacl(wrapKey).status, "supported");
-  keyDigest = digest(wrapKey);
+if (process.argv[4] === "--node-host") {
+  const listener = net.createServer((connection) => connection.destroy()).listen(0, "127.0.0.1");
+  await once(listener, "listening");
+  try {
+    const child = spawn(
+      process.execPath,
+      [cli, "node", "run", "--host", "127.0.0.1", "--port", String(listener.address().port)],
+      { cwd: root, env, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] },
+    );
+    const closed = once(child, "close");
+    let output = "";
+    const preserve = (chunk) => {
+      output = (output + String(chunk)).slice(-12000);
+    };
+    child.stdout.on("data", preserve);
+    child.stderr.on("data", preserve);
+    try {
+      const deadline = Date.now() + 90000;
+      let lastProbe;
+      while (Date.now() < deadline && child.exitCode === null && child.signalCode === null) {
+        if (fs.existsSync(identityDb) && fs.existsSync(wrapKey)) {
+          lastProbe = await readIdentityInNewCli(undefined);
+          if (lastProbe.ok) {
+            initial = validateIdentity(lastProbe);
+            break;
+          }
+        }
+        await delay(500);
+      }
+      if (!initial) {
+        throw new Error(
+          [lastProbe?.details, output].filter(Boolean).join("\n").replaceAll(token, "[REDACTED]"),
+        );
+      }
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill();
+      await closed;
+    }
+  } finally {
+    await new Promise((resolve, reject) => listener.close((e) => (e ? reject(e) : resolve())));
+  }
+  console.log("INSTALLED_NODE_HOST_CREATED_FIRST_ML_DSA_IDENTITY=PASS");
+} else {
+  await withGateway(async (callIdentity) => {
+    initial = validateIdentity(await callIdentity());
+  });
   console.log("INSTALLED_GATEWAY_HEALTH_AND_FIRST_ML_DSA_IDENTITY=PASS");
-});
+}
+assert.equal(fs.statSync(identityDb).isFile(), true);
+assert.equal(fs.statSync(wrapKey).isFile(), true);
+assert.equal(readOwnerAndDacl(wrapKey).status, "supported");
+keyDigest = digest(wrapKey);
 async function readIdentityInNewCli(nativeMode) {
   const childEnv = { ...env };
   if (nativeMode) childEnv.FS_SAFE_NATIVE_MODE = nativeMode;
