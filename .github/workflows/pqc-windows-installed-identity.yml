@@ -46,10 +46,14 @@ jobs:
           retention-days: 1
 
   windows-identity:
-    name: Verify installed Windows x64 identity
+    name: Verify standard-account isolation on ${{ matrix.runner }}
     needs: package
-    runs-on: windows-2025
-    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [windows-2025, windows-11-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
@@ -57,6 +61,7 @@ jobs:
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
         with:
           node-version: ${{ env.NODE_VERSION }}
+          architecture: x64
           package-manager-cache: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
@@ -74,9 +79,4 @@ jobs:
           if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ine $Matches[1]) {
             throw 'Package checksum mismatch'
           }
-          $fixture = Join-Path $env:USERPROFILE ('pqc-windows-install-' + [Guid]::NewGuid().ToString('N'))
-          New-Item -ItemType Directory -Path $fixture | Out-Null
-          npm.cmd install --prefix $fixture --registry=https://registry.npmjs.org --no-fund $archive
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node .github/scripts/pqc-windows-installed-identity.mjs $fixture $archive --verify-multi-account-acl
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./.github/scripts/pqc-windows-check-standard-owner.ps1 -Archive $archive
