@@ -2,6 +2,10 @@
 import fs from "node:fs";
 import { dirname } from "node:path";
 
+export const WINDOWS_FS_SAFE_NATIVE_DIR = "dist/native/win32-x64-msvc";
+export const WINDOWS_FS_SAFE_BINDING_OUTPUT = `${WINDOWS_FS_SAFE_NATIVE_DIR}/fs-safe-native.node`;
+export const WINDOWS_FS_SAFE_LICENSE_OUTPUT = `${WINDOWS_FS_SAFE_NATIVE_DIR}/LICENSE`;
+
 /**
  * Writes text only when contents changed and returns whether a write happened.
  */

@@ -5,7 +5,10 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
-import { writePackageDistInventory } from "../../scripts/lib/package-dist-inventory.ts";
+import {
+  writePackageDistInventory,
+  writePackageDistInventoryForPublish,
+} from "../../scripts/lib/package-dist-inventory.ts";
 import {
   applyBaileysEncryptedStreamFinishHotfix,
   collectLegacyPluginRuntimeDepsStateRoots,
@@ -18,6 +21,10 @@ import {
   runBundledPluginPostinstall,
   runPluginRegistryPostinstallMigration,
 } from "../../scripts/postinstall-bundled-plugins.mjs";
+import {
+  WINDOWS_FS_SAFE_BINDING_OUTPUT,
+  WINDOWS_FS_SAFE_LICENSE_OUTPUT,
+} from "../../scripts/runtime-postbuild-shared.mjs";
 import { createScriptTestHarness } from "./test-helpers.js";
 
 const { createTempDirAsync } = createScriptTestHarness();
@@ -28,6 +35,37 @@ async function expectPathExists(filePath: string) {
 async function expectPathMissing(filePath: string) {
   await expect(fs.access(filePath)).rejects.toHaveProperty("code", "ENOENT");
 }
+
+describe("publish dist inventory", () => {
+  const sidecars = [WINDOWS_FS_SAFE_BINDING_OUTPUT, WINDOWS_FS_SAFE_LICENSE_OUTPUT];
+
+  async function writePublishAssetFixture(root: string, file: string): Promise<void> {
+    const target = path.join(root, file);
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.writeFile(target, "fixture");
+  }
+
+  it.each(sidecars)("rejects prepared output missing %s", async (missing) => {
+    const root = await createTempDirAsync("openclaw-publish-inventory-");
+    for (const file of sidecars.filter((asset) => asset !== missing)) {
+      await writePublishAssetFixture(root, file);
+    }
+    await expect(writePackageDistInventoryForPublish(root)).rejects.toThrow(
+      `missing required package dist assets: ${missing}`,
+    );
+    await expectPathMissing(path.join(root, "dist", "postinstall-inventory.json"));
+  });
+
+  it("retains both Windows sidecars in a prepared publication", async () => {
+    const root = await createTempDirAsync("openclaw-publish-inventory-");
+    for (const file of sidecars) {
+      await writePublishAssetFixture(root, file);
+    }
+    await expect(writePackageDistInventoryForPublish(root)).resolves.toEqual(
+      expect.arrayContaining(sidecars),
+    );
+  });
+});
 
 async function writePluginPackage(
   extensionsDir: string,

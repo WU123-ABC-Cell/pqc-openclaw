@@ -9,6 +9,11 @@ import {
   discoverStaticExtensionAssets,
 } from "../../scripts/lib/static-extension-assets.mjs";
 import {
+  WINDOWS_FS_SAFE_BINDING_OUTPUT,
+  WINDOWS_FS_SAFE_LICENSE_OUTPUT,
+} from "../../scripts/runtime-postbuild-shared.mjs";
+import {
+  listCoreRuntimePostBuildOutputs,
   listStaticExtensionAssetOutputs,
   rewriteRootRuntimeImportsToStableAliases,
   runRuntimePostBuild,
@@ -36,7 +41,21 @@ async function expectPathMissing(targetPath: string): Promise<void> {
   expect(Reflect.get(statError, "code")).toBe("ENOENT");
 }
 
+async function writeFsSafeBuildFixture(rootDir: string): Promise<void> {
+  const packageRoot = path.join(rootDir, "node_modules", "@openclaw", "fs-safe");
+  const binding = path.join(packageRoot, WINDOWS_FS_SAFE_BINDING_OUTPUT);
+  await fs.mkdir(path.dirname(binding), { recursive: true });
+  await Promise.all([
+    fs.writeFile(
+      path.join(packageRoot, "package.json"),
+      JSON.stringify({ exports: { "./package.json": "./package.json" } }),
+    ),
+    fs.writeFile(binding, "alternate root binding"),
+    fs.writeFile(path.join(packageRoot, "LICENSE"), "alternate root license"),
+  ]);
+}
 async function writeExportHtmlBuildFixture(rootDir: string): Promise<void> {
+  await writeFsSafeBuildFixture(rootDir);
   const sourceDir = path.join(rootDir, "src", "auto-reply", "reply", "export-html");
   await fs.mkdir(sourceDir, { recursive: true });
   await fs.writeFile(path.join(sourceDir, "template.html"), "<html></html>\n", "utf8");
@@ -221,6 +240,7 @@ describe("runtime postbuild static assets", () => {
 
   it("stages copied static assets byte-for-byte during the same postbuild run", async () => {
     const rootDir = createTempDir("openclaw-runtime-postbuild-");
+    await writeFsSafeBuildFixture(rootDir);
     const source = "extensions/diffs/assets/viewer-runtime.js";
     const output = "assets/viewer-runtime.js";
     const distAsset = "dist/extensions/diffs/assets/viewer-runtime.js";
@@ -260,6 +280,16 @@ describe("runtime postbuild static assets", () => {
     await expect(fs.readFile(path.join(rootDir, runtimeAsset), "utf8")).resolves.toBe(
       "export const viewer = true;\n",
     );
+
+    expect(listCoreRuntimePostBuildOutputs({ rootDir })).toEqual(
+      expect.arrayContaining([WINDOWS_FS_SAFE_BINDING_OUTPUT, WINDOWS_FS_SAFE_LICENSE_OUTPUT]),
+    );
+    await expect(
+      fs.readFile(path.join(rootDir, WINDOWS_FS_SAFE_BINDING_OUTPUT), "utf8"),
+    ).resolves.toBe("alternate root binding");
+    await expect(
+      fs.readFile(path.join(rootDir, WINDOWS_FS_SAFE_LICENSE_OUTPUT), "utf8"),
+    ).resolves.toBe("alternate root license");
   });
 
   it("writes every phase beneath the cwd-only caller root", async () => {
@@ -354,6 +384,7 @@ describe("runtime postbuild static assets", () => {
 
   it("preserves restored dist static assets when plugin sources are absent", async () => {
     const rootDir = createTempDir("openclaw-runtime-postbuild-");
+    await writeFsSafeBuildFixture(rootDir);
     const output = "assets/viewer-runtime.js";
     const distPluginDir = path.join(rootDir, "dist", "extensions", "diffs");
     const runtimeAsset = path.join(rootDir, "dist-runtime", "extensions", "diffs", output);
@@ -392,6 +423,7 @@ describe("runtime postbuild static assets", () => {
 
   it("can skip static asset copies for minimal runtime builds", async () => {
     const rootDir = createTempDir("openclaw-runtime-postbuild-");
+    await writeFsSafeBuildFixture(rootDir);
     const warn = vi.fn();
     const output = "assets/viewer-runtime.js";
 

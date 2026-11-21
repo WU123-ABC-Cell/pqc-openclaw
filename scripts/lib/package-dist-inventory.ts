@@ -6,6 +6,10 @@ import {
   collectPackageDistInventory,
   PACKAGE_DIST_INVENTORY_RELATIVE_PATH,
 } from "../../src/infra/package-dist-inventory.ts";
+import {
+  WINDOWS_FS_SAFE_BINDING_OUTPUT,
+  WINDOWS_FS_SAFE_LICENSE_OUTPUT,
+} from "../runtime-postbuild-shared.mjs";
 
 export { LOCAL_BUILD_METADATA_DIST_PATHS } from "./local-build-metadata-paths.mjs";
 export { PACKAGE_DIST_INVENTORY_RELATIVE_PATH };
@@ -132,9 +136,17 @@ async function writePackageDistInventoryFile(
   return inventory;
 }
 
-export async function writePackageDistInventory(packageRoot: string): Promise<string[]> {
+export async function writePackageDistInventory(
+  packageRoot: string,
+  requiredPaths: readonly string[] = [],
+): Promise<string[]> {
   await assertNoLegacyPluginDependencyStagingDebris(packageRoot);
-  return writePackageDistInventoryFile(packageRoot, await collectPackageDistInventory(packageRoot));
+  const entries = await collectPackageDistInventory(packageRoot);
+  const missing = requiredPaths.filter((entry) => !entries.includes(entry));
+  if (missing.length > 0) {
+    throw new Error(`missing required package dist assets: ${missing.join(", ")}`);
+  }
+  return writePackageDistInventoryFile(packageRoot, entries);
 }
 
 async function writePackageInstallGuardMarker(packageRoot: string): Promise<void> {
@@ -144,7 +156,10 @@ async function writePackageInstallGuardMarker(packageRoot: string): Promise<void
 }
 
 export async function writePackageDistInventoryForPublish(packageRoot: string): Promise<string[]> {
-  const inventory = await writePackageDistInventory(packageRoot);
+  const inventory = await writePackageDistInventory(packageRoot, [
+    WINDOWS_FS_SAFE_BINDING_OUTPUT,
+    WINDOWS_FS_SAFE_LICENSE_OUTPUT,
+  ]);
   await writePackageInstallGuardMarker(packageRoot);
   return inventory;
 }
