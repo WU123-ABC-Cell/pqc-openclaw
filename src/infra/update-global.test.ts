@@ -862,9 +862,47 @@ describe("update global helpers", () => {
     });
   });
 
+  it("requires the staged Windows x64 binding declared by the package before activation", async () => {
+    await withTempDir({ prefix: "openclaw-update-global-fs-safe-" }, async (packageRoot) => {
+      const nativePackage = "@openclaw/fs-safe-win32-x64-msvc";
+      const error =
+        "missing or mismatched Windows x64 native dependency " + nativePackage + "@0.12.0";
+      const params = { packageRoot, platform: "win32" as const, arch: "x64" as const };
+      await fs.writeFile(
+        path.join(packageRoot, "package.json"),
+        JSON.stringify({ optionalDependencies: { [nativePackage]: "0.12.0" } }),
+      );
+      await expect(collectInstalledGlobalPackageErrors(params)).resolves.toContain(error);
+      await expect(
+        collectInstalledGlobalPackageErrors({ ...params, platform: "linux" }),
+      ).resolves.not.toContain(error);
+
+      const nativeRoot = path.join(packageRoot, "node_modules", nativePackage);
+      await fs.mkdir(nativeRoot, { recursive: true });
+      await fs.writeFile(path.join(nativeRoot, "fs-safe-native.node"), "");
+      const writeNativeManifest = (version: string) =>
+        fs.writeFile(
+          path.join(nativeRoot, "package.json"),
+          JSON.stringify({ version, main: "fs-safe-native.node" }),
+        );
+      await writeNativeManifest("0.11.0");
+      await expect(collectInstalledGlobalPackageErrors(params)).resolves.toContain(error);
+      await writeNativeManifest("0.12.0");
+      await expect(collectInstalledGlobalPackageErrors(params)).resolves.not.toContain(error);
+    });
+  });
+
   it("rejects a staged package when lifecycle scripts leave the install guard", async () => {
     await withTempDir({ prefix: "openclaw-update-global-guard-" }, async (packageRoot) => {
-      await writeGlobalPackageJson(packageRoot, "2026.7.2");
+      await fs.writeFile(
+        path.join(packageRoot, "package.json"),
+        JSON.stringify({
+          name: "openclaw",
+          version: "2026.7.2",
+          dependencies: { "@openclaw/fs-safe": "0.12.0" },
+          optionalDependencies: { "@openclaw/fs-safe-win32-x64-msvc": "0.12.0" },
+        }),
+      );
       for (const relativePath of BUNDLED_RUNTIME_SIDECAR_PATHS) {
         const absolutePath = path.join(packageRoot, relativePath);
         await fs.mkdir(path.dirname(absolutePath), { recursive: true });

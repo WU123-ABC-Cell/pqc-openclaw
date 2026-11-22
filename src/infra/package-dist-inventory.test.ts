@@ -49,6 +49,13 @@ describe("package dist inventory", () => {
       await fs.mkdir(path.dirname(currentFile), { recursive: true });
       await fs.writeFile(currentFile, "export {};\n", "utf8");
 
+      await fs.writeFile(
+        path.join(packageRoot, "package.json"),
+        JSON.stringify({
+          dependencies: { "@openclaw/fs-safe": "0.12.0" },
+          optionalDependencies: { "@openclaw/fs-safe-win32-x64-msvc": "0.12.0" },
+        }),
+      );
       await expect(writePackageDistInventoryForPublish(packageRoot)).resolves.toEqual([
         "dist/current.js",
       ]);

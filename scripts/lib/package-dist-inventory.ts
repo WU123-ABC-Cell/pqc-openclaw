@@ -6,10 +6,6 @@ import {
   collectPackageDistInventory,
   PACKAGE_DIST_INVENTORY_RELATIVE_PATH,
 } from "../../src/infra/package-dist-inventory.ts";
-import {
-  WINDOWS_FS_SAFE_BINDING_OUTPUT,
-  WINDOWS_FS_SAFE_LICENSE_OUTPUT,
-} from "../runtime-postbuild-shared.mjs";
 
 export { LOCAL_BUILD_METADATA_DIST_PATHS } from "./local-build-metadata-paths.mjs";
 export { PACKAGE_DIST_INVENTORY_RELATIVE_PATH };
@@ -156,10 +152,17 @@ async function writePackageInstallGuardMarker(packageRoot: string): Promise<void
 }
 
 export async function writePackageDistInventoryForPublish(packageRoot: string): Promise<string[]> {
-  const inventory = await writePackageDistInventory(packageRoot, [
-    WINDOWS_FS_SAFE_BINDING_OUTPUT,
-    WINDOWS_FS_SAFE_LICENSE_OUTPUT,
-  ]);
+  const manifest = JSON.parse(await fs.readFile(path.join(packageRoot, "package.json"), "utf8"));
+  const fsSafeVersion = manifest.dependencies?.["@openclaw/fs-safe"];
+  // The inlined loader resolves the native package from OpenClaw's own dependency scope.
+  if (
+    typeof fsSafeVersion !== "string" ||
+    !/^\d+\.\d+\.\d+$/u.test(fsSafeVersion) ||
+    manifest.optionalDependencies?.["@openclaw/fs-safe-win32-x64-msvc"] !== fsSafeVersion
+  ) {
+    throw new Error("package manifest must pin the matching optional Windows x64 fs-safe binding");
+  }
+  const inventory = await writePackageDistInventory(packageRoot);
   await writePackageInstallGuardMarker(packageRoot);
   return inventory;
 }

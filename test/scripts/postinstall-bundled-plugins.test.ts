@@ -21,10 +21,6 @@ import {
   runBundledPluginPostinstall,
   runPluginRegistryPostinstallMigration,
 } from "../../scripts/postinstall-bundled-plugins.mjs";
-import {
-  WINDOWS_FS_SAFE_BINDING_OUTPUT,
-  WINDOWS_FS_SAFE_LICENSE_OUTPUT,
-} from "../../scripts/runtime-postbuild-shared.mjs";
 import { createScriptTestHarness } from "./test-helpers.js";
 
 const { createTempDirAsync } = createScriptTestHarness();
@@ -37,33 +33,34 @@ async function expectPathMissing(filePath: string) {
 }
 
 describe("publish dist inventory", () => {
-  const sidecars = [WINDOWS_FS_SAFE_BINDING_OUTPUT, WINDOWS_FS_SAFE_LICENSE_OUTPUT];
-
-  async function writePublishAssetFixture(root: string, file: string): Promise<void> {
-    const target = path.join(root, file);
-    await fs.mkdir(path.dirname(target), { recursive: true });
-    await fs.writeFile(target, "fixture");
+  async function writePublishFixture(root: string, nativeVersion?: string): Promise<void> {
+    await fs.writeFile(
+      path.join(root, "package.json"),
+      JSON.stringify({
+        dependencies: { "@openclaw/fs-safe": "0.12.0" },
+        optionalDependencies: { "@openclaw/fs-safe-win32-x64-msvc": nativeVersion },
+      }),
+    );
+    await fs.mkdir(path.join(root, "dist"));
+    await fs.writeFile(path.join(root, "dist", "index.js"), "");
   }
 
-  it.each(sidecars)("rejects prepared output missing %s", async (missing) => {
-    const root = await createTempDirAsync("openclaw-publish-inventory-");
-    for (const file of sidecars.filter((asset) => asset !== missing)) {
-      await writePublishAssetFixture(root, file);
-    }
-    await expect(writePackageDistInventoryForPublish(root)).rejects.toThrow(
-      `missing required package dist assets: ${missing}`,
-    );
-    await expectPathMissing(path.join(root, "dist", "postinstall-inventory.json"));
-  });
+  it.each([undefined, "0.11.0", "^0.12.0"])(
+    "rejects a missing or mismatched Windows binding (%s)",
+    async (nativeVersion) => {
+      const root = await createTempDirAsync("openclaw-publish-inventory-");
+      await writePublishFixture(root, nativeVersion);
+      await expect(writePackageDistInventoryForPublish(root)).rejects.toThrow(
+        "package manifest must pin the matching optional Windows x64 fs-safe binding",
+      );
+      await expectPathMissing(path.join(root, "dist", "postinstall-inventory.json"));
+    },
+  );
 
-  it("retains both Windows sidecars in a prepared publication", async () => {
+  it("prepares a publication using the matching optional Windows binding", async () => {
     const root = await createTempDirAsync("openclaw-publish-inventory-");
-    for (const file of sidecars) {
-      await writePublishAssetFixture(root, file);
-    }
-    await expect(writePackageDistInventoryForPublish(root)).resolves.toEqual(
-      expect.arrayContaining(sidecars),
-    );
+    await writePublishFixture(root, "0.12.0");
+    await expect(writePackageDistInventoryForPublish(root)).resolves.toContain("dist/index.js");
   });
 });
 

@@ -1,12 +1,14 @@
 // Runs package-manager based global update and install flows.
 import fsSync from "node:fs";
 import fs from "node:fs/promises";
+import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
 import { valid as validSemver } from "semver";
 import { BUNDLED_RUNTIME_SIDECAR_PATHS } from "../plugins/runtime-sidecar-paths.js";
 import { pathExists } from "../utils.js";
+import { tryReadJson } from "./json-files.js";
 import {
   applyNpmFreshnessBypassEnv,
   applyPosixNpmScriptShellEnv,
@@ -213,6 +215,8 @@ export function resolveExpectedInstalledVersionFromSpec(
 export async function collectInstalledGlobalPackageErrors(params: {
   packageRoot: string;
   expectedVersion?: string | null;
+  platform?: NodeJS.Platform;
+  arch?: typeof process.arch;
 }): Promise<string[]> {
   const errors: string[] = [];
   errors.push(...(await collectSourceCheckoutInstallErrors(params.packageRoot)));
@@ -231,7 +235,44 @@ export async function collectInstalledGlobalPackageErrors(params: {
       expectedVersion: params.expectedVersion,
     })),
   );
+  if (
+    (params.platform ?? process.platform) === "win32" &&
+    (params.arch ?? process.arch) === "x64"
+  ) {
+    const error = await verifyInstalledWindowsFsSafeBinding(params.packageRoot);
+    if (error) {
+      errors.push(error);
+    }
+  }
   return errors;
+}
+
+async function verifyInstalledWindowsFsSafeBinding(
+  packageRoot: string,
+): Promise<string | undefined> {
+  const nativePackage = "@openclaw/fs-safe-win32-x64-msvc";
+  const manifest = await tryReadJson<{ optionalDependencies?: Record<string, string> }>(
+    path.join(packageRoot, "package.json"),
+  );
+  const expectedVersion = manifest?.optionalDependencies?.[nativePackage];
+  if (!expectedVersion) {
+    return;
+  }
+  // npm may succeed after skipping optional dependencies. The staged package
+  // must resolve the same native entry as the bundled runtime before activation.
+  try {
+    const resolveFromDist = createRequire(path.join(packageRoot, "dist", "index.js")).resolve;
+    const binding = resolveFromDist(nativePackage);
+    if (
+      path.basename(binding) === "fs-safe-native.node" &&
+      (await readPackageVersion(path.dirname(binding))) === expectedVersion
+    ) {
+      return;
+    }
+  } catch {
+    // Missing or unresolvable native dependencies leave the current install active.
+  }
+  return `missing or mismatched Windows x64 native dependency ${nativePackage}@${expectedVersion}`;
 }
 
 async function collectSourceCheckoutInstallErrors(packageRoot: string): Promise<string[]> {

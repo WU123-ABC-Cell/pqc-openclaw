@@ -15,12 +15,7 @@ import {
   copyStaticExtensionAssetsToRuntimeOverlay,
   listStaticExtensionAssetOutputs,
 } from "./lib/static-extension-assets.mjs";
-import {
-  WINDOWS_FS_SAFE_BINDING_OUTPUT,
-  WINDOWS_FS_SAFE_LICENSE_OUTPUT,
-  WINDOWS_FS_SAFE_NATIVE_DIR,
-  writeTextFileIfChanged,
-} from "./runtime-postbuild-shared.mjs";
+import { writeTextFileIfChanged } from "./runtime-postbuild-shared.mjs";
 import { stageBundledPluginRuntime } from "./stage-bundled-plugin-runtime.mjs";
 import { writeOfficialChannelCatalog } from "./write-official-channel-catalog.mjs";
 
@@ -318,8 +313,6 @@ function listLegacyRootRuntimeCompatOutputs(params = {}) {
  */
 export function listCoreRuntimePostBuildOutputs(params = {}) {
   return [
-    WINDOWS_FS_SAFE_BINDING_OUTPUT,
-    WINDOWS_FS_SAFE_LICENSE_OUTPUT,
     ...listOfficialChannelCatalogOutputs(),
     ...listExportHtmlTemplateOutputs(params),
     ...listStableRootRuntimeAliasOutputs(params),
@@ -645,22 +638,6 @@ export function writeLegacyCliExitCompatChunks(params = {}) {
   }
 }
 
-function copyWindowsFsSafeBinding(rootDir, fsImpl) {
-  // The bundled loader resolves its native binding relative to OpenClaw's dist.
-  const packageRequire = createRequire(path.join(rootDir, "package.json"));
-  const packageRoot = path.dirname(packageRequire.resolve("@openclaw/fs-safe/package.json"));
-  const outputDir = path.join(rootDir, WINDOWS_FS_SAFE_NATIVE_DIR);
-  const bindingDest = path.join(rootDir, WINDOWS_FS_SAFE_BINDING_OUTPUT);
-  const licenseDest = path.join(rootDir, WINDOWS_FS_SAFE_LICENSE_OUTPUT);
-  assertRealOutputRoot(path.dirname(outputDir), { fs: fsImpl });
-  assertRealOutputRoot(outputDir, { fs: fsImpl });
-  assertRealOutputRoot(bindingDest, { fs: fsImpl });
-  assertRealOutputRoot(licenseDest, { fs: fsImpl });
-  fsImpl.mkdirSync(outputDir, { recursive: true });
-  fsImpl.copyFileSync(path.join(packageRoot, WINDOWS_FS_SAFE_BINDING_OUTPUT), bindingDest);
-  fsImpl.copyFileSync(path.join(packageRoot, "LICENSE"), licenseDest);
-}
-
 function shouldCopyStaticExtensionAssets(params) {
   const env = params.env ?? process.env;
   return env.OPENCLAW_RUNTIME_POSTBUILD_STATIC_ASSETS !== "0";
@@ -707,7 +684,6 @@ export function runRuntimePostBuild(params = {}) {
       `runtime-postbuild: ${phaseTimings.length} phases completed in ${totalMs}ms (slowest: ${slowest.label} ${slowest.durationMs}ms)`,
     );
   };
-  runPhase("Windows fs-safe native binding", () => copyWindowsFsSafeBinding(rootDir, fsImpl));
   runPhase("bundled plugin metadata", () => copyBundledPluginMetadata(phaseParams));
   runPhase("official channel catalog", () => writeOfficialChannelCatalog(phaseParams));
   runPhase("export HTML assets", () => copyExportHtmlTemplates(phaseParams));

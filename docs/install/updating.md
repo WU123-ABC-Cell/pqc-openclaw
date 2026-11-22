@@ -197,7 +197,9 @@ swap. On npm 12 and newer, the updater approves only the candidate OpenClaw
 lifecycle; transitive dependency scripts remain blocked. This avoids npm
 overlaying a new package onto stale files from the old one. If the install
 command fails, OpenClaw retries once with `--omit=optional`, which helps hosts
-where native optional dependencies cannot compile.
+where native optional dependencies cannot compile. On Windows x64, a candidate
+that declares the native fs-safe binding must resolve the matching installed
+binding before activation.
 
 OpenClaw-managed npm update and plugin-update commands also clear npm's
 `min-release-age` supply-chain quarantine (or the older `before` config key)
