@@ -1,0 +1,78 @@
+name: PQC Windows x64 standard-account gateway
+
+on:
+  push:
+    branches: [review/windows-fs-safe-012]
+
+permissions:
+  contents: read
+
+env:
+  PQC_SOURCE_SHA: ea28a2afba5989a602faf494cc26500386bbacd3
+  NODE_VERSION: "24.16.0"
+
+jobs:
+  package:
+    name: Build package from pinned PQC commit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ env.PQC_SOURCE_SHA }}
+          persist-credentials: false
+      - name: Verify source revision
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$PQC_SOURCE_SHA"
+      - uses: ./.github/actions/setup-node-env
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          install-bun: "false"
+      - name: Build and validate the npm package
+        shell: bash
+        env:
+          GOMAXPROCS: "2"
+        run: |
+          output="$RUNNER_TEMP/pqc-windows-package"
+          node scripts/package-openclaw-for-docker.mjs --allow-unreleased-changelog \
+            --output-dir "$output" --output-name openclaw-pqc.tgz
+          cd "$output"
+          sha256sum openclaw-pqc.tgz > SHA256SUMS
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pqc-windows-package
+          path: ${{ runner.temp }}/pqc-windows-package
+          if-no-files-found: error
+          retention-days: 1
+
+  windows-identity:
+    name: Verify standard-account gateway and wrapping key isolation
+    needs: package
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          architecture: x64
+          package-manager-cache: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: pqc-windows-package
+          path: ${{ runner.temp }}/pqc-windows-package
+      - name: Install the checked package and exercise its device identity
+        shell: pwsh
+        run: |
+          $payload = Join-Path $env:RUNNER_TEMP 'pqc-windows-package'
+          $archive = Join-Path $payload 'openclaw-pqc.tgz'
+          $checksum = (Get-Content -LiteralPath (Join-Path $payload 'SHA256SUMS') -Raw).Trim()
+          if ($checksum -notmatch '^([a-f0-9]{64})  openclaw-pqc\.tgz$') {
+            throw 'Missing package checksum'
+          }
+          if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ine $Matches[1]) {
+            throw 'Package checksum mismatch'
+          }
+          ./.github/scripts/pqc-windows-check-standard-owner.ps1 -Archive $archive
