@@ -58,8 +58,8 @@ import {
   resolveGatewayRestartIntentOptions,
 } from "./lifecycle-safe-restart.js";
 import { createDaemonActionContext, createNullWriter } from "./response.js";
+import { resolvePlatformRestartHealthAttempts } from "./restart-health.constants.js";
 import {
-  DEFAULT_RESTART_HEALTH_ATTEMPTS,
   DEFAULT_RESTART_HEALTH_DELAY_MS,
   type GatewayRestartSnapshot,
   renderGatewayPortHealthDiagnostics,
@@ -72,15 +72,7 @@ import { parsePortFromArgs, renderGatewayServiceStartHints } from "./shared.js";
 import { repairLoadedGatewayServiceForStart } from "./start-repair.js";
 import type { DaemonLifecycleOptions } from "./types.js";
 
-const POST_RESTART_HEALTH_ATTEMPTS = DEFAULT_RESTART_HEALTH_ATTEMPTS;
 const POST_RESTART_HEALTH_DELAY_MS = DEFAULT_RESTART_HEALTH_DELAY_MS;
-const WINDOWS_POST_RESTART_HEALTH_TIMEOUT_MS = 180_000;
-
-function postRestartHealthAttempts(): number {
-  return process.platform === "win32"
-    ? Math.ceil(WINDOWS_POST_RESTART_HEALTH_TIMEOUT_MS / POST_RESTART_HEALTH_DELAY_MS)
-    : POST_RESTART_HEALTH_ATTEMPTS;
-}
 
 function formatRestartFailure(params: {
   health: GatewayRestartSnapshot;
@@ -251,7 +243,7 @@ async function resolveRestartListenerHealthWait(
     drainTimeoutMs = resolveGatewayRestartDeferralTimeoutMs();
   }
 
-  const replacementHealthAttempts = postRestartHealthAttempts();
+  const replacementHealthAttempts = resolvePlatformRestartHealthAttempts();
   if (drainTimeoutMs === undefined) {
     return {
       attempts: replacementHealthAttempts,
@@ -576,7 +568,7 @@ export async function runDaemonRestart(opts: DaemonLifecycleOptions = {}): Promi
   // health proof or a valid CLI/env override looks like a failed restart.
   const unmanagedPort =
     (await readActiveGatewayLockPort().catch(() => undefined)) ?? managedRestartPort;
-  const restartHealthAttempts = postRestartHealthAttempts();
+  const restartHealthAttempts = resolvePlatformRestartHealthAttempts();
   const restartWaitMs = restartHealthAttempts * POST_RESTART_HEALTH_DELAY_MS;
   const restartWaitSeconds = Math.round(restartWaitMs / 1000);
   let unmanagedRestartHealthAttempts = restartHealthAttempts;

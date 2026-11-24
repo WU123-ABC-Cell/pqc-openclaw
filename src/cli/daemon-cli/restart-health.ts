@@ -17,8 +17,8 @@ import {
   type GatewayRestartProbeAuth,
 } from "./restart-health-probe.js";
 import {
-  DEFAULT_RESTART_HEALTH_ATTEMPTS,
   DEFAULT_RESTART_HEALTH_DELAY_MS,
+  resolvePlatformRestartHealthAttempts,
 } from "./restart-health.constants.js";
 import type { GatewayRestartSnapshot, GatewayRestartWaitOutcome } from "./restart-health.types.js";
 import { hasListenerAttributionGap, listenerOwnedByRuntimePid } from "./restart-port-ownership.js";
@@ -294,7 +294,7 @@ export async function waitForGatewayHealthyRestart(params: {
   probeHosts?: readonly string[];
 }): Promise<GatewayRestartSnapshot> {
   const startedAtMs = performance.now();
-  const attempts = params.attempts ?? DEFAULT_RESTART_HEALTH_ATTEMPTS;
+  const attempts = params.attempts ?? resolvePlatformRestartHealthAttempts();
   const delayMs = params.delayMs ?? DEFAULT_RESTART_HEALTH_DELAY_MS;
   const standardDeadlineMs = attempts * delayMs;
 

@@ -312,6 +312,40 @@ describe("restart health", () => {
     expect(snapshot.elapsedMs).toBe(13_000);
   });
 
+  it.each([
+    { platform: "win32", readyAt: 100_000, outcome: "healthy", elapsedMs: 100_000 },
+    { platform: "win32", readyAt: Infinity, outcome: "timeout", elapsedMs: 180_000 },
+    { platform: "linux", readyAt: Infinity, outcome: "timeout", elapsedMs: 60_000 },
+  ])("uses a bounded default restart wait on $platform ($outcome)", async (testCase) => {
+    Object.defineProperty(process, "platform", { value: testCase.platform, configurable: true });
+    inspectPortUsage.mockImplementation(async () =>
+      monotonicClock.nowMs < testCase.readyAt
+        ? { port: 18789, status: "free", listeners: [], hints: [] }
+        : {
+            port: 18789,
+            status: "busy",
+            listeners: [{ pid: 8000, commandLine: "openclaw-gateway" }],
+            hints: [],
+          },
+    );
+    probeGateway.mockResolvedValue({
+      ok: true,
+      close: null,
+      server: { version: "2026.7.2", connId: "new" },
+    });
+
+    const { waitForGatewayHealthyRestart } = await import("./restart-health.js");
+    const snapshot = await waitForGatewayHealthyRestart({
+      service: makeGatewayService({ status: "running", pid: 8000 }),
+      port: 18789,
+      expectedVersion: "2026.7.2",
+      isStartupMigrationActive: () => false,
+    });
+
+    expect(snapshot.waitOutcome).toBe(testCase.outcome);
+    expect(snapshot.elapsedMs).toBe(testCase.elapsedMs);
+  });
+
   it("waits longer before stopped-free early exit on Windows", async () => {
     Object.defineProperty(process, "platform", { value: "win32", configurable: true });
 
