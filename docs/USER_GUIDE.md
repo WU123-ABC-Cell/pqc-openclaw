@@ -443,8 +443,8 @@ sudo systemctl stop pqc-openclaw
 cd /opt/pqc-openclaw
 sudo -u pqc-openclaw pnpm build:native
 
-# 3. Verify the addon reports available
-node -e 'const a=require("./src/security/native/mlock-addon.cjs"); process.exit(a.isAvailable()?0:1)'
+# 3. Run the compiled probe and look for mlock-probe:verified
+node dist/docker-healthcheck.js --probe-mlock
 
 # 4. Restart and verify
 sudo systemctl start pqc-openclaw

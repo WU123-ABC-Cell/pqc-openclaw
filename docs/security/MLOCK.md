@@ -77,8 +77,8 @@ From the repository root on Linux:
 
 ```bash
 pnpm build:native
-node - <<'NODE'
-const addon = require("./src/security/native/mlock-addon.cjs");
+node --import tsx --input-type=module - <<'NODE'
+import addon from "./src/security/native/mlock-addon.ts";
 const source = Buffer.alloc(32, 0x41);
 if (!addon.isAvailable()) throw new Error("native mlock addon unavailable");
 const key = addon.secureCopySync(source);
@@ -98,7 +98,7 @@ Linux x64 / Node 24.16.0. The probe observed `VmLck` rise by 64 KiB, a mapping
 with both `lo` and `dd` flags, and return to baseline after finalization. These
 local results do not imply that hosted GitHub Actions ran successfully.
 
-The healthcheck probes the runtime API first and the native addon second:
+The healthcheck runs the compiled locking probe on a synthetic buffer:
 
 ```bash
 /usr/local/bin/healthcheck-pqc.sh --skip-keyring
