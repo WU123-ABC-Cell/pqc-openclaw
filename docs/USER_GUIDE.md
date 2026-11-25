@@ -193,14 +193,17 @@ Example (abridged):
   "summary": {"pass": 6, "warn": 2, "fail": 0},
   "checks": [
     {"check": "node-version", "status": "ok", "detail": "supported"},
-    {"check": "mlock", "status": "warn", "detail": "no locking backend available"},
+    {"check": "mlock", "status": "warn", "detail": "unavailable: no process or native locking backend loaded"},
     ...
   ]
 }
 ```
 
-An `mlock` warning means neither the process hook nor native addon could lock
-the cached key. The default at-rest source remains the mode-0600 file. See
+The `mlock` check attempts to lock a synthetic buffer in the healthcheck
+process. A `verified` result confirms that operation. An `unavailable` result
+means no backend loaded or the operation failed. A `skipped` result means the
+compiled probe could not report an outcome. The gateway's live key pages are
+outside this check. The default at-rest source remains the mode-0600 file. See
 [OPERATIONS](/security/OPERATIONS#5-when-to-page-the-security-team)
 for the threat-model reasoning.
 

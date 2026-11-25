@@ -126,9 +126,9 @@ function checkMlockAvailable(): boolean {
  * `OsKeyring.getActiveKey()` / `FileKeyring.readKey()` so the lock
  * covers the entire lifetime of the cached buffer.
  */
-export function mlockKey(buf: Buffer | null | undefined, label: string): void {
+export function mlockKey(buf: Buffer | null | undefined, label: string): boolean {
   if (!buf || !Buffer.isBuffer(buf) || buf.length === 0) {
-    return;
+    return false;
   }
   if (buf.length > MAX_MLOCK_BYTES) {
     if (!warnedOversize) {
@@ -143,22 +143,22 @@ export function mlockKey(buf: Buffer | null | undefined, label: string): void {
           `Mlock once per process; check for missing size validation upstream.`,
       } satisfies PqcLogPayload);
     }
-    return;
+    return false;
   }
   if (!checkMlockAvailable()) {
-    return;
+    return false;
   }
   const backend = detectBackend();
   if (backend === null) {
     mlockAvailableCache = false;
-    return;
+    return false;
   }
   try {
     if (backend === "process") {
       const proc = process as unknown as MlockCapableProcess;
       if (typeof proc.mlock !== "function") {
         mlockAvailableCache = false;
-        return;
+        return false;
       }
       proc.mlock(buf);
     } else {
@@ -176,6 +176,7 @@ export function mlockKey(buf: Buffer | null | undefined, label: string): void {
       byteLength: buf.length,
       detail: `${process.platform}/${process.arch} node=${process.version}`,
     } satisfies PqcLogPayload);
+    return true;
   } catch (error) {
     pqcLog.warn(PQC_EVENT.Mlock, {
       status: "fail",
@@ -187,6 +188,7 @@ export function mlockKey(buf: Buffer | null | undefined, label: string): void {
         `Operator action: set RLIMIT_MEMLOCK >= ${buf.length} ` +
         `(e.g. 'ulimit -l unlimited' as root, or grant CAP_IPC_LOCK).`,
     } satisfies PqcLogPayload);
+    return false;
   }
 }
 
@@ -198,10 +200,9 @@ export function mlockKey(buf: Buffer | null | undefined, label: string): void {
  * Buffer is zeroed immediately after a successful copy. Hosts without a built
  * addon retain the existing in-place mlock/no-op behavior.
  */
-export function protectKey(buf: Buffer, label: string): Buffer {
+function protectKeyWithResult(buf: Buffer, label: string): { key: Buffer; locked: boolean } {
   if (!Buffer.isBuffer(buf) || buf.length === 0 || buf.length > MAX_MLOCK_BYTES) {
-    mlockKey(buf, label);
-    return buf;
+    return { key: buf, locked: mlockKey(buf, label) };
   }
   if (nativeAddon.isAvailable()) {
     let secure: Buffer;
@@ -214,8 +215,7 @@ export function protectKey(buf: Buffer, label: string): Buffer {
         byteLength: buf.length,
         detail: `secure mapping allocation failed; falling back to in-place mlock: ${(error as Error).message}`,
       } satisfies PqcLogPayload);
-      mlockKey(buf, label);
-      return buf;
+      return { key: buf, locked: mlockKey(buf, label) };
     }
 
     // Once the protected copy exists, never fall back to the source. Even if
@@ -232,10 +232,30 @@ export function protectKey(buf: Buffer, label: string): Buffer {
       byteLength: secure.length,
       detail: `${process.platform}/${process.arch} node=${process.version}`,
     } satisfies PqcLogPayload);
-    return secure;
+    return { key: secure, locked: true };
   }
-  mlockKey(buf, label);
-  return buf;
+  return { key: buf, locked: mlockKey(buf, label) };
+}
+
+export function protectKey(buf: Buffer, label: string): Buffer {
+  return protectKeyWithResult(buf, label).key;
+}
+
+// Run from the short-lived diagnostic process. Native mappings are reclaimed at exit.
+export function probeMlock(): "verified" | "unavailable" | "failed" {
+  if (!nativeAddon.isAvailable() && detectBackend() === null) {
+    return "unavailable";
+  }
+
+  const input = Buffer.alloc(32);
+  const { key, locked } = protectKeyWithResult(input, "healthcheck");
+  if (!locked) {
+    return "failed";
+  }
+  if (key === input) {
+    munlockKey(key, "healthcheck");
+  }
+  return "verified";
 }
 
 /**

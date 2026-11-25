@@ -61,7 +61,12 @@ if (
     currentFile: fileURLToPath(import.meta.url),
   })
 ) {
-  void probeDockerGatewayHealth().then((healthy) => {
-    process.exitCode = healthy ? 0 : 1;
-  });
+  if (process.argv[2] === "--probe-mlock") {
+    const { probeMlock } = await import("./security/mlock-helper.js");
+    process.stdout.write(`mlock-probe:${probeMlock()}\n`);
+  } else {
+    void probeDockerGatewayHealth().then((healthy) => {
+      process.exitCode = healthy ? 0 : 1;
+    });
+  }
 }

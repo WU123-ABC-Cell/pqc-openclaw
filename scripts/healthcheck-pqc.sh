@@ -169,19 +169,17 @@ fi
 # Check 2: feature-detected mlock availability — non-critical warning
 # ----------------------------------------------------------------------
 
-if [[ -d "$INSTALL_ROOT" ]] && [[ -f "$INSTALL_ROOT/src/security/mlock-helper.ts" ]]; then
-  if node -e 'process.exit(typeof process.mlock === "function" && typeof process.munlock === "function" ? 0 : 1)' >/dev/null 2>&1; then
-    ok "mlock" "process.mlock/process.munlock available"
-  elif [[ -f "$INSTALL_ROOT/src/security/native/mlock-addon.cjs" ]] && (
-    cd "$INSTALL_ROOT" &&
-      node -e 'const addon=require("./src/security/native/mlock-addon.cjs"); process.exit(addon.isAvailable() ? 0 : 1)'
-  ) >/dev/null 2>&1; then
-    ok "mlock" "native N-API mlock backend available"
-  else
-    warn "mlock" "process and native mlock backends unavailable; wrap key is not pinned in physical RAM"
-  fi
+if [[ ! -f "$INSTALL_ROOT/dist/docker-healthcheck.js" ]]; then
+  warn "mlock" "skipped: compiled mlock probe not found"
+elif ! mlock_probe=$(node -- "$INSTALL_ROOT/dist/docker-healthcheck.js" --probe-mlock 2>/dev/null); then
+  warn "mlock" "skipped: compiled mlock probe could not run"
 else
-  warn "mlock" "install root not found; skipping mlock check"
+  case "${mlock_probe##*$'\n'}" in
+    mlock-probe:verified)    ok "mlock" "verified: locked a test buffer in the healthcheck process" ;;
+    mlock-probe:unavailable) warn "mlock" "unavailable: no process or native locking backend loaded" ;;
+    mlock-probe:failed)      warn "mlock" "unavailable: locking a test buffer failed" ;;
+    *)                      warn "mlock" "skipped: compiled mlock probe did not report a result" ;;
+  esac
 fi
 
 # ----------------------------------------------------------------------

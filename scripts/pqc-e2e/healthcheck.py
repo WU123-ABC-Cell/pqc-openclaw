@@ -61,19 +61,8 @@ def make_fake_deployment(missing_wrap_key=False, missing_state_db=False):
     base = tempfile.mkdtemp(prefix="pqc-e2e-hc-")
     install_root = os.path.join(base, "install")
     state_dir = os.path.join(base, "state")
-    os.makedirs(os.path.join(install_root, "src/security"), exist_ok=True)
+    os.makedirs(os.path.join(install_root, "dist"), exist_ok=True)
     os.makedirs(os.path.join(state_dir, "state"), exist_ok=True)
-    os.makedirs(state_dir, exist_ok=True)
-
-    # A dummy mlock-helper.ts so check 2 runs the mlock check (warn on
-    # node 22, ok on 24.15+). We use a real source file copied from
-    # the current cwd if available, else a stub.
-    src = "src/security/mlock-helper.ts"
-    if os.path.isfile(src):
-        shutil.copyfile(src, os.path.join(install_root, src))
-    else:
-        with open(os.path.join(install_root, src), "w") as f:
-            f.write("// stub for e2e harness\n")
 
     # Wrap key file with mode 0600
     wrap_key_file = os.path.join(state_dir, "wrap-key.b64")
@@ -300,6 +289,36 @@ def main():
             if mode_result.returncode not in allowed_exits:
                 fail(f"mode {mode:o} returned {mode_result.returncode}, expected {allowed_exits}")
         log("  0400 key accepted; 0644 key rejected without arithmetic error")
+
+        os.chmod(wrap_key_file, 0o400)
+        probe = os.path.join(install_root, "dist", "docker-healthcheck.js")
+        for script_text, expected_status, expected_detail in (
+            (None, "warn", "skipped: compiled mlock probe not found"),
+            ("", "warn", "skipped: compiled mlock probe did not report a result"),
+            ('console.log("mlock-probe:verified"); process.exitCode = 1',
+             "warn", "skipped: compiled mlock probe could not run"),
+            ('console.log("mlock-probe:unavailable")', "warn", "unavailable: no process"),
+            ('console.log("mlock-probe:failed")', "warn", "unavailable: locking a test buffer failed"),
+            ('console.log("mlock-probe:verified")', "ok", "verified: locked a test buffer"),
+        ):
+            if script_text is not None:
+                with open(probe, "w", encoding="utf8") as stub:
+                    stub.write(script_text)
+            probe_result = run(
+                args.script,
+                "--install-root", install_root,
+                "--state-dir", state_dir,
+                "--wrap-key-file", wrap_key_file,
+                "--port", str(port),
+                "--json", "--skip-keyring",
+            )
+            doc = json.loads(probe_result.stdout)
+            check = next(check for check in doc["checks"] if check["check"] == "mlock")
+            if check["status"] != expected_status or not check["detail"].startswith(expected_detail):
+                fail(f"unexpected mlock result: {check}, expected {expected_status}/{expected_detail}")
+            if probe_result.returncode not in (0, 2):
+                fail(f"mlock diagnostic unexpectedly failed gateway health: {probe_result.stderr}")
+        log("  mlock verified, unavailable, failed and skipped outcomes match the health contract")
     finally:
         gateway.terminate()
         gateway.wait(timeout=5)
