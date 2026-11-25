@@ -29,7 +29,9 @@ npx node-gyp build     --directory=src/security/native
 
 The compiled binary lands at
 `src/security/native/build/Release/mlock_addon.node`. The `build/` directory is
-gitignored because the binary is host-specific; rebuild after pulling.
+gitignored because the binary is host-specific; rebuild after pulling. The
+loader uses this same path relative to the OpenClaw package root from source
+and compiled installations.
 
 ## Runtime path selection
 
@@ -48,12 +50,12 @@ status log.
 
 ## File map
 
-| File                             | Role                                                                                                                       |
-| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `mlock-addon.cc`                 | Cross-platform lock/unlock, dedicated secure allocation, native zeroing, and finalizer cleanup                             |
-| `binding.gyp`                    | `node-gyp` build config; pulls `node-addon-api` headers                                                                    |
-| `mlock-addon.cjs`                | CommonJS wrapper: lazy `require()` of the binary, `isAvailable()` / `loadError()` diagnostics, throws on use without build |
-| `build/Release/mlock_addon.node` | Compiled binary (gitignored)                                                                                               |
+| File                             | Role                                                                                           |
+| -------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `mlock-addon.cc`                 | Cross-platform lock/unlock, dedicated secure allocation, native zeroing, and finalizer cleanup |
+| `binding.gyp`                    | `node-gyp` build config; pulls `node-addon-api` headers                                        |
+| `mlock-addon.ts`                 | Package-relative native loader and backend availability diagnostics                            |
+| `build/Release/mlock_addon.node` | Compiled binary (gitignored)                                                                   |
 
 ## Platform support
 

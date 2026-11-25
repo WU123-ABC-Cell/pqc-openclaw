@@ -1,45 +1,39 @@
-// mlock-addon.cjs — lazy loader for the native mlock(2) N-API addon.
-//
-// Why lazy: production builds on Node 22 must work without the addon
-// being built (e.g. developer machines, CI runners that only run
-// vitest, or any host that does not have g++ / Python 3 in PATH).
-// The addon is *only* used as a fallback when `process.mlock` is
-// missing (i.e. on Node < 24.0.0 stable, or on Node 24.x builds where
-// the mlock API was removed — verified for 24.15.0 on 2026-09-04).
-//
-// The addon is built via `pnpm run build:native` (or
-// `npx node-gyp configure build` from src/security/native/) and the
-// resulting `build/Release/mlock_addon.node` is loaded by `require()`
-// on first call to `mlockSync` / `munlockSync`.
-//
-// If the build is missing or fails to load (e.g. native binary does
-// not match the host's Node ABI), `isAvailable()` returns `false`,
-// `loadError()` exposes the underlying error, and the synchronous
-// helpers throw with the same `loadError()` message. The caller in
-// mlock-helper.ts treats that as a transient no-op and logs once
-// per process.
-//
-// Reference: PQC whitepaper §6.3 v2 (M6.B v2 mlock N-API fallback).
+import { createRequire } from "node:module";
+import path from "node:path";
+import { resolveOpenClawPackageRootSync } from "../../infra/openclaw-root.js";
 
-"use strict";
+type NativeMlockBinding = {
+  mlock(buf: Buffer): number;
+  munlock(buf: Buffer): number;
+  secureCopy(buf: Buffer): Buffer;
+  secureMemzero(buf: Buffer): number;
+};
 
-let addon = null;
-let loadError = null;
-
+// Anchor the lookup to this package. Bundling moves this module to dist,
+// while node-gyp always produces the optional binary in the source tree.
+const require = createRequire(import.meta.url);
+const packageRoot = resolveOpenClawPackageRootSync({ moduleUrl: import.meta.url });
+let addon: NativeMlockBinding | null = null;
+let loadError: Error | null = null;
 try {
-  addon = require("./build/Release/mlock_addon.node");
-} catch (err) {
-  loadError = err;
+  if (!packageRoot) {
+    throw new Error("OpenClaw package root not found");
+  }
+  addon = require(
+    path.join(packageRoot, "src", "security", "native", "build", "Release", "mlock_addon.node"),
+  ) as NativeMlockBinding;
+} catch (error) {
+  loadError = error instanceof Error ? error : new Error(String(error));
 }
 
 function notBuiltError() {
-  const detail = loadError && loadError.message ? loadError.message : "unknown";
+  const detail = loadError?.message ?? "unknown";
   return new Error(
     `mlock_addon not built (run \`pnpm run build:native\` from repo root): ${detail}`,
   );
 }
 
-module.exports = {
+export default {
   /**
    * True if the native mlock(2) addon is loaded and ready to use.
    * Equivalent to a feature-detect: if false, the synchronous
@@ -54,7 +48,7 @@ module.exports = {
    * Useful for diagnostic logging in the [PQC] channel.
    */
   loadError() {
-    return loadError && loadError.message ? loadError.message : null;
+    return loadError?.message ?? null;
   },
 
   /**
@@ -67,7 +61,7 @@ module.exports = {
    * @param {Buffer} buf — buffer to pin
    * @returns {number} — number of bytes mlocked
    */
-  mlockSync(buf) {
+  mlockSync(buf: Buffer) {
     if (!addon) {
       throw notBuiltError();
     }
@@ -81,7 +75,7 @@ module.exports = {
    * @param {Buffer} buf — buffer to unpin
    * @returns {number} — number of bytes munlocked
    */
-  munlockSync(buf) {
+  munlockSync(buf: Buffer) {
     if (!addon) {
       throw notBuiltError();
     }
@@ -94,7 +88,7 @@ module.exports = {
    * @param {Buffer} buf
    * @returns {Buffer}
    */
-  secureCopySync(buf) {
+  secureCopySync(buf: Buffer) {
     if (!addon) {
       throw notBuiltError();
     }
@@ -105,7 +99,7 @@ module.exports = {
    * @param {Buffer} buf
    * @returns {number}
    */
-  secureZeroSync(buf) {
+  secureZeroSync(buf: Buffer) {
     if (!addon) {
       throw notBuiltError();
     }

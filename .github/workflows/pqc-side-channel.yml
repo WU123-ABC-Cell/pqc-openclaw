@@ -44,13 +44,13 @@ jobs:
 
       - name: Require a real secure-mapping round trip
         run: |
-          node --expose-gc <<'NODE'
+          node --expose-gc --import tsx --input-type=module <<'NODE'
           (async () => {
-          const addon = require("./src/security/native/mlock-addon.cjs");
+          const { default: addon } = await import("./src/security/native/mlock-addon.ts");
           if (!addon.isAvailable()) {
             throw new Error(`native addon unavailable: ${addon.loadError()}`);
           }
-          const fs = require("node:fs");
+          const fs = await import("node:fs");
           const lockedKiB = () => Number(/VmLck:\s+(\d+) kB/.exec(
             fs.readFileSync("/proc/self/status", "utf8"))?.[1] ?? -1);
           const lockedBefore = lockedKiB();

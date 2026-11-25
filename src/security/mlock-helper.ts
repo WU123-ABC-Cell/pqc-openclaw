@@ -34,7 +34,7 @@
 // The point is to raise the bar against passive attacks (cold-boot,
 // disk image after theft, kernel-privileged attacker without ptrace).
 import { pqcLog, PQC_EVENT, type PqcLogPayload } from "../logging/pqc-log.js";
-import nativeAddon from "./native/mlock-addon.cjs";
+import nativeAddon from "./native/mlock-addon.js";
 
 /** Node version where process.mlock became stable (24.0.0). */
 const MLOCK_AVAILABLE_FROM_NODE = "v24.0.0";

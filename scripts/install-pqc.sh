@@ -322,9 +322,9 @@ log "step 4/6: pnpm install"
 if [[ $SKIP_BUILD -eq 0 ]]; then
   log "step 5/6: pnpm build + native secure-memory addon"
   (
-    cd "$INSTALL_ROOT"
-    pnpm run build
-    pnpm run build:native
+    cd "$INSTALL_ROOT" &&
+      pnpm run build &&
+      pnpm run build:native
   ) || die "build failed (native addon requires python3, make, and a C++17 compiler)"
   ok "dist tree and native secure-memory addon built"
 else

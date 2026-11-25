@@ -26,7 +26,7 @@ import {
   resetMlockCacheForTests,
   MAX_MLOCK_BYTES,
 } from "./mlock-helper.js";
-import nativeAddon from "./native/mlock-addon.cjs";
+import nativeAddon from "./native/mlock-addon.js";
 
 interface CapturedEvent {
   level: LogLevel;

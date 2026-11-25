@@ -58,8 +58,9 @@ transactional rewrap procedure is available.
 
 `src/security/mlock-helper.ts` chooses the first available backend:
 
-1. a future `process.mlock` / `process.munlock` pair;
-2. `src/security/native/mlock-addon.cjs` on a supported Linux build; or
+1. the package-relative native addon for wrap-key secure mappings;
+2. an in-place lock using `process.mlock` / `process.munlock` when available,
+   or the native addon;
 3. a warned no-op.
 
 Node 24.15.0 does not expose `process.mlock`. On Linux, build the addon
