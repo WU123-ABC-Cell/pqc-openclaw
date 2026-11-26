@@ -168,8 +168,7 @@ RUN if grep -qx 'qa-lab' /tmp/openclaw-selected-plugin-dirs; then \
 FROM build AS runtime-assets
 ARG OPENCLAW_BUNDLED_PLUGIN_DIR
 # Use the pinned build image's Node headers to compile the addon for this target.
-RUN npm_package_config_node_gyp_nodedir=/usr/local \
-    pnpm_config_verify_deps_before_run=false pnpm run build:native
+RUN ./node_modules/.bin/node-gyp rebuild --directory=src/security/native --nodedir=/usr/local
 
 # BuildKit cache mounts are not part of cached layers; seed tarballs for the
 # installed prod graph in the same step that runs offline prune.
