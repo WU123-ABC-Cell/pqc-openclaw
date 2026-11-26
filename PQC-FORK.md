@@ -63,8 +63,8 @@ transactional rewrap procedure is available.
    or the native addon;
 3. a warned no-op.
 
-Node 24.15.0 does not expose `process.mlock`. On Linux, build the addon
-explicitly:
+The standard Linux installer and default Docker image build and include the
+native addon. When running from a Linux source checkout, build it explicitly:
 
 ```bash
 pnpm build:native

@@ -167,6 +167,10 @@ RUN if grep -qx 'qa-lab' /tmp/openclaw-selected-plugin-dirs; then \
 # metadata before copying runtime assets into the final image.
 FROM build AS runtime-assets
 ARG OPENCLAW_BUNDLED_PLUGIN_DIR
+# Use the pinned build image's Node headers to compile the addon for this target.
+RUN npm_package_config_node_gyp_nodedir=/usr/local \
+    pnpm_config_verify_deps_before_run=false pnpm run build:native
+
 # BuildKit cache mounts are not part of cached layers; seed tarballs for the
 # installed prod graph in the same step that runs offline prune.
 RUN --mount=type=cache,id=openclaw-pnpm-store,target=/root/.local/share/pnpm/store,sharing=locked \
@@ -237,6 +241,7 @@ COPY --from=runtime-assets --chown=node:node /app/pnpm-workspace.yaml .
 COPY --from=runtime-assets --chown=node:node /app/patches ./patches
 COPY --from=runtime-assets --chown=node:node /app/openclaw.mjs .
 COPY --from=runtime-assets --chown=node:node /app/src/agents/templates ./src/agents/templates
+COPY --from=runtime-assets --chmod=0644 /app/src/security/native/build/Release/mlock_addon.node ./src/security/native/build/Release/mlock_addon.node
 COPY --from=runtime-assets --chown=node:node /app/${OPENCLAW_BUNDLED_PLUGIN_DIR} ./${OPENCLAW_BUNDLED_PLUGIN_DIR}
 COPY --from=runtime-assets --chown=node:node /app/skills ./skills
 COPY --from=runtime-assets --chown=node:node /app/docs ./docs
@@ -368,6 +373,9 @@ ENV NODE_ENV=production
 # The node:24-bookworm image includes a 'node' user (uid 1000)
 # This reduces the attack surface by preventing container escape via root privileges
 USER node
+
+# Check that the non-root runtime can load the binary before publishing the image.
+RUN node -e 'const addon = require("./src/security/native/build/Release/mlock_addon.node"); if (typeof addon.secureCopy !== "function") process.exit(1);'
 
 # Start gateway server with default config.
 # Binds to loopback (127.0.0.1) by default for security.

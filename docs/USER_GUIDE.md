@@ -458,9 +458,11 @@ sudo systemctl start pqc-openclaw
 sudo bash /usr/local/bin/healthcheck-pqc.sh --json --skip-keyring
 ```
 
-Node 24.15.0 does not expose `process.mlock`; changing Node alone is not enough.
-The native backend protects against swap, not core dumps. See
-[MLOCK](/security/MLOCK).
+The standard Linux installer and default Docker image include the addon. For a
+running Compose deployment, use the container probe in [MLOCK](/security/MLOCK).
+On Linux, the addon's dedicated wrap-key mapping protects its decoded key
+buffer from swapping and excludes it from core dumps. Ordinary in-place
+locking provides swap protection only.
 
 ### 6.2 "How do I rotate the wrap key?"
 
@@ -472,10 +474,10 @@ key as destructive reinitialization, not routine rotation.
 
 ### 6.3 "The healthcheck says `mlock unavailable`. Is this bad?"
 
-It means neither the runtime hook nor native addon could lock the cached key, so
-you are not getting swap protection. The default file remains protected by mode
-0600, but that is separate from RAM pinning. Diagnose or rebuild the native
-addon as in §6.1.
+It means the healthcheck process found no usable locking backend for its
+synthetic test buffer. File permissions independently protect the on-disk key.
+Use the probe in §6.1 to check the backend and execution environment; see
+[MLOCK](/security/MLOCK) for the effect of host locking limits.
 
 ### 6.4 "How do I uninstall?"
 

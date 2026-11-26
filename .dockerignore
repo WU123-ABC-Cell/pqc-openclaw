@@ -54,6 +54,7 @@ dist-runtime
 openclaw-path-alias-*
 
 # build artifacts
+/src/security/native/build
 dist
 **/dist
 apps/macos/.build

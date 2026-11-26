@@ -110,7 +110,19 @@ service and account values instead.
 
 ## 6. Deployment requirements and limitations
 
-- Deployments need the native addon built with `pnpm build:native`.
+- The standard Linux installer and the default Docker image include the native
+  addon. A manual Linux source installation needs `pnpm build:native`.
+- For the running PQC Compose gateway, check the container's locking backend
+  with the synthetic-buffer probe:
+
+  ```sh
+  docker compose -f docker-compose.pqc.yml exec -T openclaw-gateway \
+    node dist/docker-healthcheck.js --probe-mlock
+  ```
+
+  `mlock-probe:verified` means the probe process locked its test buffer under the
+  current container limits. The gateway remains best-effort about locking.
+
 - Lock limits and host policy can still make `mlock(2)` / `VirtualLock` fail.
 - Node 24.15.0 has no `process.mlock`; upgrading Node alone does not activate
   locking.
