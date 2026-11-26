@@ -63,8 +63,15 @@ The installer does, in order:
 5. Installs the healthcheck, backup, and Prometheus collector wrappers.
 6. Renders the Linux systemd unit and creates `/etc/pqc-openclaw/openclaw.env` (root-owned, 0600).
 
-The installer does not populate an OS keyring. That is an explicit later
-operation because platform keyrings may require an interactive unlock.
+On Linux, the installer builds runtime files with read access for the service
+account and defaults to the file-backed key. The installer
+creates a private local gateway configuration bound to loopback when neither
+the current nor the legacy configuration file exists.
+
+To keep an existing OS keyring deployment through a reinstall, make the service,
+account and key ID explicit in the root-owned environment file or a systemd
+drop-in. Preserve the key ID used to wrap existing identities. Setting up an OS
+keyring can require an interactive unlock.
 
 ### 1.2 macOS 13+ (manual service management)
 
@@ -441,7 +448,7 @@ sudo systemctl stop pqc-openclaw
 
 # 2. Build the checked-in native addon in the installed tree
 cd /opt/pqc-openclaw
-sudo -u pqc-openclaw pnpm build:native
+sudo sh -c 'umask 022; pnpm build:native'
 
 # 3. Run the compiled probe and look for mlock-probe:verified
 node dist/docker-healthcheck.js --probe-mlock

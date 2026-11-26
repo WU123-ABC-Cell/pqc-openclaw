@@ -119,6 +119,13 @@ jobs:
           test -f "$backup_service"
           test -f "$backup_timer"
           test "$(stat -c %a "$state_dir/wrap-key.b64")" = "600"
+          test "$(stat -c %a "$state_dir/openclaw.json")" = "600"
+          python3 -c 'import json, sys; assert json.load(open(sys.argv[1]))["gateway"] == {"mode": "local", "bind": "loopback"}' "$state_dir/openclaw.json"
+          grep -Fq "Environment=OPENCLAW_WRAP_KEY_FILE=$state_dir/wrap-key.b64" "$unit"
+          if grep -q '^Environment=OPENCLAW_WRAP_KEY_OS_' "$unit"; then
+            echo "Fresh systemd units must use the provisioned file keyring" >&2
+            exit 1
+          fi
           test "$(stat -c %a "$config_dir/openclaw.env")" = "600"
           test ! -e "$state_dir/openclaw.env"
           test "$(wc -c < "$state_dir/wrap-key.b64")" -ge 43

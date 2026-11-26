@@ -297,9 +297,13 @@ esac
 if ! git -C "$SOURCE_ROOT" diff --quiet || ! git -C "$SOURCE_ROOT" diff --cached --quiet; then
   warn "source checkout has uncommitted changes; installing committed HEAD only"
 fi
+if [[ -z "$SANDBOX_ROOT" && "$OS" == "linux" && $SKIP_SYSTEMD -eq 0 ]]; then
+  # Keep the managed install directory under the installer account.
+  chown root:root "$INSTALL_ROOT" || die "failed to assign managed install directory to root"
+fi
 git -C "$SOURCE_ROOT" archive --format=tar HEAD | tar -xf - -C "$INSTALL_ROOT"
 chmod -R u+rwX,go+rX "$INSTALL_ROOT"
-if [[ -z "$SANDBOX_ROOT" ]]; then
+if [[ -z "$SANDBOX_ROOT" && ( "$OS" != "linux" || $SKIP_SYSTEMD -ne 0 ) ]]; then
   chown -R "$SERVICE_USER" "$INSTALL_ROOT" || die "failed to assign install tree to $SERVICE_USER"
 fi
 
@@ -311,7 +315,13 @@ done
 
 log "step 4/6: pnpm install"
 (
-  cd "$INSTALL_ROOT"
+  cd "$INSTALL_ROOT" || exit
+  if [[ "$OS" == "linux" ]]; then
+    # Program files must be readable by the unprivileged service. Keep their
+    # inodes independent of the package cache across installer reruns.
+    umask 022
+    export pnpm_config_package_import_method=copy
+  fi
   pnpm install --frozen-lockfile
 ) || die "pnpm install failed (lockfile drift? see CHANGELOG.md §Fixed)"
 
@@ -322,9 +332,11 @@ log "step 4/6: pnpm install"
 if [[ $SKIP_BUILD -eq 0 ]]; then
   log "step 5/6: pnpm build + native secure-memory addon"
   (
-    cd "$INSTALL_ROOT" &&
-      pnpm run build &&
-      pnpm run build:native
+    cd "$INSTALL_ROOT" || exit
+    if [[ "$OS" == "linux" ]]; then
+      umask 022
+    fi
+    pnpm run build && pnpm run build:native
   ) || die "build failed (native addon requires python3, make, and a C++17 compiler)"
   ok "dist tree and native secure-memory addon built"
 else
@@ -420,6 +432,35 @@ fi
 # ----------------------------------------------------------------------
 
 if [[ $OS == "linux" && $SKIP_SYSTEMD -eq 0 ]]; then
+  # Publish a complete config as the service user without overwriting an
+  # existing config or relaxing the gateway's normal startup checks.
+  config_init=(python3 -I - "$STATE_DIR")
+  if [[ -z "$SANDBOX_ROOT" ]]; then
+    config_init=(runuser -u "$SERVICE_USER" -- "${config_init[@]}")
+  fi
+  "${config_init[@]}" <<'PY' || die "failed to initialize the local gateway configuration"
+from pathlib import Path
+import os
+import sys
+import tempfile
+
+state = Path(sys.argv[1])
+config = state / "openclaw.json"
+legacy = state / "clawdbot.json"
+if not (os.path.lexists(config) or os.path.lexists(legacy)):
+    fd, temp = tempfile.mkstemp(dir=state, prefix=".openclaw-install-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as out:
+            out.write('{"gateway":{"mode":"local","bind":"loopback"}}\n')
+        if not os.path.lexists(legacy):
+            try:
+                os.link(temp, config)
+            except FileExistsError:
+                pass
+    finally:
+        os.unlink(temp)
+PY
+
   log "rendering systemd unit"
   keyfile="$STATE_DIR/wrap-key.b64"
   NODE_BIN=$(command -v node)
@@ -439,9 +480,6 @@ Type=simple
 User=$SERVICE_USER
 WorkingDirectory=$INSTALL_ROOT
 Environment=OPENCLAW_STATE_DIR=$STATE_DIR
-Environment=OPENCLAW_WRAP_KEY_OS_SERVICE=pqc-openclaw
-Environment=OPENCLAW_WRAP_KEY_OS_ACCOUNT=wrap-key-$(date +%Y-%m)
-Environment=OPENCLAW_WRAP_KEY_OS_ID=wrap-key-$(date +%Y-%m)
 Environment=OPENCLAW_WRAP_KEY_FILE=$keyfile
 EnvironmentFile=-$ENV_FILE
 ExecStart=$NODE_BIN $INSTALL_ROOT/dist/index.js gateway
