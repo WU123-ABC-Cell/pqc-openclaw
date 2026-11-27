@@ -1,0 +1,78 @@
+name: PQC ARM64 image acceptance
+
+on:
+  push:
+    branches: [review/docker-mlock-arm64-proof-20261127]
+
+permissions:
+  contents: read
+
+jobs:
+  arm64-image:
+    name: Native ARM64 image and original Compose
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 40
+    env:
+      CANDIDATE_SHA: edd5dd26a42c116739552077eb8286c86b504587
+      PROOF_IMAGE: pqc-openclaw:arm64-acceptance
+    steps:
+      - name: Checkout the verification script
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          path: proof
+          persist-credentials: false
+
+      - name: Checkout the exact product commit
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: edd5dd26a42c116739552077eb8286c86b504587
+          path: candidate
+          persist-credentials: false
+
+      - name: Verify candidate and build the original image
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual=$(git -C candidate rev-parse HEAD)
+          test "$actual" = "$CANDIDATE_SHA"
+          test "$(uname -m)" = aarch64
+          test "$(docker info --format '{{.Architecture}}')" = aarch64
+          printf 'TESTED_CODE_SHA=%s HOST_ARCH=%s\n' "$actual" "$(uname -m)"
+          docker version --format '{{.Server.Version}}'
+          docker compose version
+          df -h "$RUNNER_TEMP" /var/lib/docker
+          root=$(mktemp -d "$RUNNER_TEMP/pqc-arm64-acceptance.XXXXXX")
+          printf 'PQC_ARM64_ROOT=%s\n' "$root" >> "$GITHUB_ENV"
+          mkdir "$root/source"
+          git -C candidate archive --format=tar "$actual" | tar -xf - -C "$root/source"
+          for f in Dockerfile .dockerignore docker-compose.pqc.yml; do
+            git -C candidate show "$actual:$f" | cmp - "$root/source/$f"
+            sha256sum "$root/source/$f"
+          done
+          docker buildx build --platform linux/arm64 --pull --load --progress=plain \
+            --tag "$PROOF_IMAGE" --file "$root/source/Dockerfile" "$root/source"
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$PROOF_IMAGE")" = linux/arm64
+
+      - name: Verify live ARM64 gateway memory locking
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo -n python3 "$GITHUB_WORKSPACE/proof/scripts/pqc-e2e/arm64_mlock_live.py" \
+            "$PQC_ARM64_ROOT" "$PROOF_IMAGE" "$CANDIDATE_SHA" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove the temporary image and state
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if docker image inspect "$PROOF_IMAGE" >/dev/null 2>&1; then
+            docker image rm "$PROOF_IMAGE"
+          fi
+          if [[ -n "${PQC_ARM64_ROOT:-}" ]]; then
+            case "$PQC_ARM64_ROOT" in
+              "$RUNNER_TEMP"/pqc-arm64-acceptance.*) ;;
+              *) exit 1 ;;
+            esac
+            test "$(realpath -e "$PQC_ARM64_ROOT")" = "$PQC_ARM64_ROOT"
+            sudo -n rm -rf --one-file-system -- "$PQC_ARM64_ROOT"
+          fi
