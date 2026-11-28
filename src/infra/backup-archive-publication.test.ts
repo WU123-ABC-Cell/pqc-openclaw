@@ -1,6 +1,5 @@
 import fsSync from "node:fs";
 import fs from "node:fs/promises";
-import type { FileHandle } from "node:fs/promises";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 import { __setFsSafeTestHooksForTest } from "@openclaw/fs-safe/test-hooks";
@@ -199,20 +198,21 @@ describe("backup archive publication", () => {
       const prepared = await prepareArchive(plan);
       const log = vi.fn();
       const originalOpen = fs.open.bind(fs);
+      const injectedSync = vi
+        .fn<() => Promise<void>>()
+        .mockRejectedValue(Object.assign(new Error("sync failed"), { code }));
       const openSpy = vi.spyOn(fs, "open").mockImplementation(async (target, flags, mode) => {
+        const handle = await originalOpen(target, flags, mode);
         if (path.resolve(String(target)) === path.resolve(plan.canonicalParentPath)) {
-          return {
-            close: vi.fn().mockResolvedValue(undefined),
-            stat: vi.fn().mockResolvedValue(plan.parentReceipt.identity),
-            sync: vi.fn().mockRejectedValue(Object.assign(new Error("sync failed"), { code })),
-          } as unknown as FileHandle;
+          vi.spyOn(handle, "sync").mockImplementation(injectedSync);
         }
-        return await originalOpen(target, flags, mode);
+        return handle;
       });
       try {
         const error = await publishPreparedBackupArchive({ plan, prepared, log }).catch(
           (caught: unknown) => caught,
         );
+        expect(injectedSync).toHaveBeenCalledTimes(1);
         expect(error).toBeInstanceOf(Error);
         expect(String(error)).toMatch(/sync failed/iu);
         expect(getPublishFileExclusiveFailureDetails(error)).toMatchObject({
@@ -220,7 +220,7 @@ describe("backup archive publication", () => {
           cleanup: "preserved",
           directorySync: { status: "failed", code },
         });
-        await expect(fs.readFile(outputPath, "utf8")).resolves.toBe("complete archive");
+        await expect(fs.readFile(outputPath)).resolves.toEqual(Buffer.from("complete archive"));
         expect(log).toHaveBeenCalledWith(expect.stringContaining("preserved the final archive"));
       } finally {
         openSpy.mockRestore();
