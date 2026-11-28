@@ -1,0 +1,48 @@
+name: Backup directory sync verification
+
+on:
+  push:
+    branches: [review/backup-directory-sync-ci-20261128]
+    paths: [.github/workflows/review-backup-directory-sync-20261128.yml]
+
+permissions:
+  contents: read
+
+env:
+  CANDIDATE_SHA: 6918af51e6472fdcadaabedb3d6db0c4130de6ac
+  OPENCLAW_VITEST_MAX_WORKERS: "2"
+
+jobs:
+  backup:
+    name: Backup archive preservation (Node 24.16.0)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Check out exact backup test candidate
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ env.CANDIDATE_SHA }}
+          persist-credentials: false
+
+      - name: Verify checkout
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD)"
+          printf 'Product checkout %s\n' "$actual"
+          test "$actual" = "$CANDIDATE_SHA"
+
+      - name: Install locked dependencies
+        uses: ./.github/actions/setup-node-env
+        with:
+          node-version: "24.16.0"
+          frozen-lockfile: "true"
+          install-bun: "false"
+
+      - name: Backup archive publication tests
+        env:
+          TEST_PATTERN: "preserves the complete final archive when commit directory sync fails|publishes a complete archive and removes its private staging directory|removes its staging directory when private setup fails|fails closed when hard-link publication returns|keeps the committed final archive when staging cleanup fails|retries cleanup when descriptor and pathname identity reads initially fail"
+        run: |
+          set -euo pipefail
+          test "$(node --version)" = v24.16.0
+          test "$(node -p 'require("./node_modules/@openclaw/fs-safe/package.json").version')" = 0.12.0
+          node scripts/run-vitest.mjs run src/infra/backup-archive-publication.test.ts -t "$TEST_PATTERN"
