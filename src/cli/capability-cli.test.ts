@@ -30,6 +30,10 @@ function primeOpenAiAuthProfile(mode: "api-key" | "token" = "api-key"): void {
   });
 }
 
+function isOutputWriteWithin(directory: string, filePath: string): boolean {
+  return path.resolve(filePath).startsWith(path.resolve(directory) + path.sep);
+}
+
 type LocalAudioSelection = Awaited<ReturnType<typeof inspectLocalAudioSelection>>;
 
 const closeEmbeddingProviderMock = vi.hoisted(() => vi.fn(async () => {}));
@@ -2065,7 +2069,7 @@ describe("capability cli", () => {
           typeof filePath === "string" &&
           Buffer.isBuffer(data) &&
           data.byteLength === buffer.byteLength &&
-          path.dirname(filePath) === tempDir
+          isOutputWriteWithin(tempDir, filePath)
         ) {
           await writeFile(filePath, data.subarray(0, 17), options);
           throw new Error("injected buffered media write failure");
@@ -2938,7 +2942,7 @@ describe("capability cli", () => {
       const copyFile = fs.copyFile.bind(fs);
       const copyFileSpy = vi.spyOn(fs, "copyFile").mockImplementation(async (...args) => {
         const [source, destination] = args;
-        if (typeof destination === "string" && path.dirname(destination) === outputDir) {
+        if (typeof destination === "string" && isOutputWriteWithin(outputDir, destination)) {
           const bytes = await fs.readFile(source);
           await fs.writeFile(destination, bytes.subarray(0, 17));
           throw new Error("injected TTS copy failure");
