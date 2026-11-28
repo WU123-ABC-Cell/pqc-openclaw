@@ -1,0 +1,48 @@
+name: ZIP entry count verification
+
+on:
+  push:
+    branches: [review/zip-entry-count-ci-20261129]
+    paths: [.github/workflows/review-zip-entry-count-20261129.yml]
+
+permissions:
+  contents: read
+
+env:
+  CANDIDATE_SHA: 64635094c2230a412a879ab6344c5fe2317ea310
+  OPENCLAW_VITEST_MAX_WORKERS: "2"
+
+jobs:
+  zip:
+    name: Valid ZIP entry count limits (Node 24.16.0)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Check out exact ZIP test candidate
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ env.CANDIDATE_SHA }}
+          persist-credentials: false
+
+      - name: Verify checkout
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD)"
+          printf 'Product checkout %s\n' "$actual"
+          test "$actual" = "$CANDIDATE_SHA"
+
+      - name: Install locked dependencies
+        uses: ./.github/actions/setup-node-env
+        with:
+          node-version: "24.16.0"
+          frozen-lockfile: "true"
+          install-bun: "false"
+
+      - name: ZIP extraction and limit tests
+        env:
+          TEST_PATTERN: "extracts a valid zip at the entry count limit|rejects a valid zip above the entry count limit without extracting entries|extracts 'zip' archives|rejects 'zip' archives that exceed extracted size budget|rejects 'zip' archives that exceed archive size budget"
+        run: |
+          set -euo pipefail
+          test "$(node --version)" = v24.16.0
+          test "$(node -p 'require("./node_modules/@openclaw/fs-safe/package.json").version')" = 0.12.0
+          node scripts/run-vitest.mjs run src/infra/archive.test.ts -t "$TEST_PATTERN" --reporter=verbose
