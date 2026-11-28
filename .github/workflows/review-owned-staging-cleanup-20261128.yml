@@ -1,0 +1,58 @@
+name: CLI and media staging verification
+
+on:
+  push:
+    branches: [review/owned-staging-cleanup-ci-20261128]
+    paths: [.github/workflows/review-owned-staging-cleanup-20261128.yml]
+
+permissions:
+  contents: read
+
+env:
+  CANDIDATE_SHA: 588d4a32e69adedee15826693b95ef082579092d
+  OPENCLAW_VITEST_MAX_WORKERS: "2"
+
+jobs:
+  staging:
+    name: CLI and media failed-write cleanup (Node 24.16.0)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Check out exact product candidate
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ env.CANDIDATE_SHA }}
+          persist-credentials: false
+
+      - name: Verify checkout
+        run: |
+          actual="$(git rev-parse HEAD)"
+          printf 'Product checkout %s\n' "$actual"
+          test "$actual" = "$CANDIDATE_SHA"
+
+      - name: Install locked dependencies
+        id: setup
+        uses: ./.github/actions/setup-node-env
+        with:
+          node-version: "24.16.0"
+          frozen-lockfile: "true"
+          install-bun: "false"
+
+      - name: CLI output staging tests
+        env:
+          TEST_PATTERN: "streams url-only generated videos to --output paths|preserves an existing --output and removes its temp when a video stream fails|preserves an existing buffered .* --output when publication fails|preserves an existing .* TTS --output when the final copy fails|preserves an existing profile when atomic publication fails|normalizes valid base64 and preserves the destination mode|preserves an existing output when the decoded media write fails|removes partially written file when url stream fails|publishes .* completion atomically without changing existing file or directory modes|preserves the existing .* completion when staged publication fails|rejects an empty-body"
+        run: |
+          set -euo pipefail
+          test "$(node --version)" = v24.16.0
+          node scripts/run-vitest.mjs run \
+            src/cli/capability-cli.test.ts src/cli/completion-cli.write-state.test.ts \
+            src/cli/completion-runtime.test.ts src/cli/nodes-camera.test.ts -t "$TEST_PATTERN"
+
+      - name: Media store staging tests
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        env:
+          TEST_PATTERN: "rejects oversized streams|saves streams with detected extension|does not leave final media artifacts|saves text buffers with the expected|uses original filename to detect generic stream|prefers detected stream mime over mixed"
+        run: |
+          set -euo pipefail
+          test "$(node --version)" = v24.16.0
+          node scripts/run-vitest.mjs run src/media/store.test.ts -t "$TEST_PATTERN"
