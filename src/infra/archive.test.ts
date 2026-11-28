@@ -7,7 +7,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createSuiteTempRootTracker } from "../test-helpers/temp-dir.js";
 import { withRealpathSymlinkRebindRace } from "../test-utils/symlink-rebind-race.js";
 import { createZipCentralDirectoryArchive } from "../test-utils/zip-central-directory-fixture.js";
-import { extractArchive, resolvePackedRootDir } from "./archive.js";
+import { ARCHIVE_LIMIT_ERROR_CODE, extractArchive, resolvePackedRootDir } from "./archive.js";
 
 const fixtureRootTracker = createSuiteTempRootTracker({ prefix: "openclaw-archive-" });
 const directorySymlinkType = process.platform === "win32" ? "junction" : undefined;
@@ -46,6 +46,13 @@ async function writePackageArchive(params: {
   await fs.mkdir(packageDir, { recursive: true });
   await fs.writeFile(path.join(packageDir, params.fileName), params.content);
   await tar.c({ cwd: params.workDir, file: params.archivePath }, ["package"]);
+}
+
+async function writeTwoEntryZip(archivePath: string) {
+  const zip = new JSZip();
+  zip.file("first.txt", "first");
+  zip.file("second.txt", "second");
+  await fs.writeFile(archivePath, await zip.generateAsync({ type: "nodebuffer" }));
 }
 
 async function createDirectorySymlink(targetDir: string, linkPath: string) {
@@ -370,6 +377,42 @@ describe("archive utils", () => {
       });
     },
   );
+
+  it("extracts a valid zip at the entry count limit", async () => {
+    await withArchiveCase("zip", async ({ archivePath, extractDir }) => {
+      await writeTwoEntryZip(archivePath);
+
+      await extractArchive({
+        archivePath,
+        destDir: extractDir,
+        timeoutMs: ARCHIVE_EXTRACT_TIMEOUT_MS,
+        limits: { maxEntries: 2 },
+      });
+
+      expect((await fs.readdir(extractDir)).toSorted()).toEqual(["first.txt", "second.txt"]);
+      await expect(fs.readFile(path.join(extractDir, "first.txt"), "utf8")).resolves.toBe("first");
+      await expect(fs.readFile(path.join(extractDir, "second.txt"), "utf8")).resolves.toBe(
+        "second",
+      );
+    });
+  });
+
+  it("rejects a valid zip above the entry count limit without extracting entries", async () => {
+    await withArchiveCase("zip", async ({ archivePath, extractDir }) => {
+      await writeTwoEntryZip(archivePath);
+
+      await expect(
+        extractArchive({
+          archivePath,
+          destDir: extractDir,
+          timeoutMs: ARCHIVE_EXTRACT_TIMEOUT_MS,
+          limits: { maxEntries: 1 },
+        }),
+      ).rejects.toMatchObject({ code: ARCHIVE_LIMIT_ERROR_CODE.ENTRY_COUNT_EXCEEDS_LIMIT });
+
+      await expect(fs.readdir(extractDir)).resolves.toEqual([]);
+    });
+  });
 
   it("rejects zip archives whose actual central directory exceeds the entry limit before parsing", async () => {
     await withArchiveCase("zip", async ({ archivePath, extractDir }) => {
